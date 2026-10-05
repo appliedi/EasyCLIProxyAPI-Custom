@@ -7,4 +7,3 @@ This distribution is maintained separately from `router-for-me/EasyCLIProxyAPI` 
 - Keep desktop update ownership in this repository. Do not restore upstream desktop release URLs or mirrors while resolving conflicts.
 - Preserve active installations and user configuration during development. Use mock accounts and isolated cores for tests.
 - Treat release tags as immutable. Update the changelog and localized release notes before tagging a new version; record later work under Unreleased.
-

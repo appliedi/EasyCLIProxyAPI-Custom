@@ -72,4 +72,3 @@ Priority and affinity selection are implemented by the official core, not by a m
 - Bump with `node scripts/set-version.mjs <version>`; maintain matching `Cargo.toml`/`Cargo.lock` versions and `core-version.txt`. Move Unreleased changes into the dated changelog entry and add `docs/release-notes/v<version>/{en,zh-CN,zh-TW,ja}.md`.
 - Push only the intended tag. Confirm GitHub Actions succeeds and the latest manifest references existing assets for both Windows architectures with matching hashes/sizes. If the tag push does not start a run, inspect Actions before dispatching the workflow manually; avoid duplicate publication.
 - Packages must contain application files and the verified core archive, never real OAuth files, local configuration, runtime logs, or API keys. Preserve those separately when installing.
-

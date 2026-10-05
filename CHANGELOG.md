@@ -9,6 +9,7 @@ Every functional change must update **Unreleased** in the same commit or pull re
 ### Maintenance
 
 - Added this changelog and the [upstream merge guide](docs/upstream-merges.md), including a customization map, merge history, and validation requirements.
+- Added a pull request checklist for changelog updates, merge records, and validation.
 - Documented separate upstream release refs so upstream tags cannot collide with this distribution's release tags.
 
 ## 0.4.0 — 2026-10-05
@@ -58,4 +59,3 @@ This was a local distribution, not a release in the new GitHub repository.
 - Based on upstream commit `90364e9` and bundled core `8.0.6`.
 - Added the custom quota dashboard, priority editor, session-affinity controls, translations, and regression tests.
 - Preserved these changes in commit `5d5bab29e68145dc1d2f731940089476f8c0f691` before merging upstream.
-
