@@ -22,6 +22,7 @@ No changes yet.
 - TypeScript and all 703 frontend tests passed (32 isolated-core tests/hooks skipped).
 - The dashboard browser regression passed, including navigation between both pages, cache reuse, priority editing, affinity settings, scoped refresh, layout persistence, and responsive layout.
 - No proxy core or routing logic changed; the bundled core remains 8.0.15.
+- [Release workflow 37333933738](https://github.com/appliedi/EasyCLIProxyAPI-Custom/actions/runs/37333933738) passed for Windows x64 and ARM64 and published v0.4.1. The live update manifest matched both uploaded packages' URLs, sizes, and SHA-256 digests.
 
 ### Maintenance
 
