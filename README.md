@@ -132,8 +132,38 @@ Antigravity CLI connects through CPA's Gemini-compatible API. Launch the CLI fro
 - Manage core settings, API keys, remote management credentials, and routing strategy.
 - Create client-visible model aliases and map them to provider models and reasoning levels.
 - Upload, download, inspect, and manage authentication files.
-- Review provider quotas and account availability.
+- Review provider quotas and account availability with provider filters, summary cards,
+  and a compact account ledger. Switch between ledger and card views, select which quota
+  window to summarize, inspect reset countdowns and last-update times, search accounts by name,
+  email or plan, and sort by lowest remaining window or earliest reset. Refresh individual
+  accounts, the visible search results, or all quotas. Search filters the account list while
+  provider summaries continue to show all enabled accounts for the selected providers.
+  Summary totals add remaining percentages for matching windows across reporting accounts;
+  missing data is marked unavailable and account allowances are not pooled.
 - Keep the application available from the macOS menu bar or Windows system tray.
+
+### Account priority and session affinity
+
+Open **OAuth → Quota Lookup** and use an account's **Priority** button to edit its
+credential settings. Higher numbers are preferred when choosing a new account: for example,
+set your primary Claude account to `10` and your backup to `0`.
+
+Expand **Account routing**, enable **Session Affinity**, choose an idle timeout (for example,
+`2h`), and save. The timeout defaults to one hour when blank and renews with activity.
+An existing session stays with its available account even when priorities change or a
+higher-priority account recovers. If its account becomes unavailable, the core can fail over
+and bind the session to the replacement. Equal-priority accounts use the existing routing strategy.
+
+Affinity is scoped to the client's session identity, provider and model, not the project
+folder. Separate chats in a project can have different bindings; custom clients should send
+stable session IDs. Idle expiry and core restarts can require a new binding. This helps reuse
+upstream prompt caches but does not extend their lifetime. These behaviors follow the
+[bundled core's affinity implementation](https://github.com/router-for-me/CLIProxyAPI/blob/v8.0.6/sdk/cliproxy/auth/selector.go).
+
+For an isolated routing check with two simulated Claude accounts, set `CPA_V8_TEST_CORE`
+to a v8 core executable and run `node tests/account-routing.v8.integration.cjs`.
+This verifies priority selection, active-session retention, idle timeout renewal and expiry,
+and failover without contacting real providers.
 
 ## Quick Start
 

@@ -605,6 +605,9 @@ function mockApiCall(body: JsonObject) {
       },
     };
   }
+  if (url.includes('wham/rate-limit-reset-credits')) {
+    return { status_code: 200, body: { available_count: 0, applicable_available_count: 0, credits: [] } };
+  }
   if (url.includes('anthropic.com/api/oauth/usage')) {
     return {
       status_code: 200,

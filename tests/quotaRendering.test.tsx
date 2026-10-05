@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nProvider } from '../src/i18n';
-import { QuotaCard } from '../src/pages/QuotaPage';
+import { ProviderQuotaSummary, QuotaCard } from '../src/pages/QuotaPage';
 import { quotaRowsFor } from '../src/services/quotaService';
 import type { QuotaState } from '../src/services/quotaService';
 
@@ -10,6 +10,25 @@ const render = (quota: QuotaState, provider = 'codex') => renderToStaticMarkup(
 );
 
 describe('quota card rendering', () => {
+  it('shows unknown provider quota as unavailable with explicit coverage', () => {
+    const html = renderToStaticMarkup(<I18nProvider><ProviderQuotaSummary provider="codex" items={[
+      { file: { name: 'unknown.json' }, quota: { status: 'error', rows: [] } },
+    ]} /></I18nProvider>);
+    expect(html).toContain('Unavailable');
+    expect(html).toContain('0 of 1 accounts reporting this window');
+    expect(html).not.toContain('<strong>0%</strong>');
+  });
+
+  it('renders combined percentages and an accessible segment for each account', () => {
+    const html = renderToStaticMarkup(<I18nProvider><ProviderQuotaSummary provider="claude" items={[
+      { file: { name: 'first.json' }, quota: { status: 'success', rows: [{ label: 'Weekly', remainingPercent: 58 }] } },
+      { file: { name: 'second.json' }, quota: { status: 'success', rows: [{ label: 'Weekly', remainingPercent: 100 }] } },
+    ]} /></I18nProvider>);
+    expect(html).toContain('158%');
+    expect(html).toContain('of 200% remaining');
+    expect(html).toContain('aria-label="first.json: 58% remaining"');
+    expect(html).toContain('aria-label="second.json: 100% remaining"');
+  });
   it('当前适用次数为零时仍可重置，并保留额度详情', () => {
     const html = render({
       status: 'success', rows: [], resetCredits: 2, resetCreditsApplicable: 0,
