@@ -6,6 +6,25 @@ Every functional change must update **Unreleased** in the same commit or pull re
 
 ## Unreleased
 
+### Windows installer
+
+- Prepared version **0.4.2** with a standard per-user NSIS **Setup.exe** alongside portable ZIPs. Setup creates Start Menu/optional desktop shortcuts and a Windows Installed Apps entry, includes the proxy archive, and installs WebView2 when needed.
+- Fresh installed copies default to the separate per-user data folder. Setup can select an existing portable folder before first launch; already registered storage locations always take precedence. Install/reinstall/uninstall preserve usage, fees, settings, credentials, and non-packaged files.
+- Require a graceful app exit before Setup or uninstall, including silent runs, instead of Tauri's default force-kill behavior. Remove only this installation's matching autostart registration.
+- Keep the updater-compatible `EasyCLIProxyAPI.exe` filename and portable manifest. In-app updates continue using ZIPs and preserve the installation marker. Installer resources use an exact allowlist and a verified core checksum, excluding user data.
+- Added `build-installer.ps1`, x64/ARM64 installer and checksum assets to the release workflow, Windows installation/reinstallation/uninstallation smoke checks, and installer documentation. Signing is not configured; locally built installers are unsigned. No new release has been published.
+- Validation: built the x64 0.4.2 Setup.exe and verified its version and SHA-256 sidecar. An isolated installer identity passed real Windows install/reinstall/uninstall tests, including retaining the original portable selection and unchanged sample data inside/outside the install directory. All 18 storage regressions, updater replacement/rollback preservation, and 707 frontend tests passed (32 existing integration tests/hooks skipped). ARM64 packaging is configured for CI but was not built locally. The active portable installation was not replaced.
+
+### Storage and upgrade persistence
+
+- Added **Advanced Features → Storage & backups** with portable, recommended per-user, and custom data locations, an active-folder shortcut, scheduled backup/restore, and the existing history-size limit (`0` retains all recorded history).
+- Persist the selected data location outside release packages, so future Custom builds extracted elsewhere reopen the same usage database, fees, prices, settings, and credentials. First launch registers the existing installation without moving data. The first storage-aware upgrade must be installed in the existing application folder; older builds cannot use this preference.
+- Copy and verify data at restart before writers start, using SQLite's backup API for committed WAL records and SHA-256 checks for files. Include external OAuth credentials and rebase the copied configuration. Switch locations only after verification; retain the original folder. Restore verifies a backup into a new folder without merging histories or overwriting current data.
+- Lock the shared data profile across executable locations, stop startup when its folder or identity is unavailable, and reject invalid configuration instead of falling back to fresh defaults. Failed copies leave the original profile active and report the failure. Scheduled copies are deferred during updater startup acknowledgment.
+- Preserve graceful proxy shutdown before storage restarts and prefer the new executable's bundled core version when data lives elsewhere. Extend update/rollback preservation tests to cover profile markers and databases.
+- Document migration, backup scope, first-upgrade requirements, and recovery in `docs/data-storage.md`; add the storage customization to the upstream merge map. Backups are manual, contain credentials, and do not include external client files or browser preferences.
+- Validation: all 766 Rust tests passed (8 existing integration/helper tests ignored), including 16 new storage regressions; TypeScript and all 707 frontend tests passed (32 isolated-core tests/hooks skipped). The storage UI and complete English/Chinese settings-layout browser checks passed. `build.ps1 -SkipCopy -BuildJobs 8` produced an optimized Windows executable; the running installation and its data were not replaced.
+
 ### Subscription Value
 
 - Added a separate **Subscription Value** sidebar page with monthly API-equivalent estimates by routed OAuth account and model, a cumulative daily chart, pricing coverage, and optional USD subscription-fee comparisons. Idle connected accounts remain visible; Antigravity model usage stays under its Antigravity account.

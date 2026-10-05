@@ -8,6 +8,8 @@ Version **0.4.1** incorporates upstream desktop **0.3.22** and bundles CLIProxyA
 
 Download Windows builds from [our releases](https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/latest). The first migration from the old custom 0.3.6 build must be manual because that build still checks the upstream desktop update feed. Close the old app and stop its core, back up the portable folder, then extract the new package over it, preserving `config.toml`, `oauth/`, and `cpa-core/config.yaml`.
 
+The upcoming **0.4.2** build also adds a standard Windows **Setup.exe** alongside the portable ZIP. It installs for your Windows account, offers reuse of an existing portable data folder, and keeps usage, fees, settings, and credentials when uninstalled. Build it with `.\build-installer.ps1`; see the [Windows installer guide](docs/windows-installer.md) and [storage guide](docs/data-storage.md). These additions remain under Unreleased until the next release is published.
+
 To publish a tested update, bump the app version using `node scripts/set-version.mjs`, add localized release notes under `docs/release-notes/v<VERSION>/`, and push the matching `v<VERSION>` tag. GitHub Actions builds both Windows architectures and publishes the update manifest with SHA-256 checksums. Linux and macOS source support is inherited, but this fork currently publishes Windows binaries only.
 
 ---

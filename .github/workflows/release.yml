@@ -1,4 +1,4 @@
-name: Build portable releases
+name: Build Windows releases
 
 run-name: >-
   ${{ github.event_name == 'push' && github.ref_type == 'branch' && 'Warm build caches' || 'Portable release' }} ${{ (github.ref_type == 'tag' && github.ref_name) || inputs.release_tag || github.ref_name }}
@@ -261,11 +261,33 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -Path "release/${{ steps.package.outputs.stem }}" -DestinationPath "${{ steps.package.outputs.stem }}.zip"
+      - name: Build Windows Setup.exe
+        if: env.PACKAGE_RELEASE == 'true' && matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $config = Join-Path $PWD '.codex/installer/tauri.generated.json'
+          node scripts/prepare-installer.mjs --portable "release/${{ steps.package.outputs.stem }}" --arch "${{ matrix.arch }}" --output $config
+          if ($LASTEXITCODE -ne 0) { throw 'Installer payload validation failed.' }
+          bun tauri bundle --bundles nsis --config $config --ci
+          if ($LASTEXITCODE -ne 0) { throw 'Installer bundling failed.' }
+          $nsisArch = if ('${{ matrix.arch }}' -eq 'amd64') { 'x64' } else { 'arm64' }
+          $source = "src-tauri/target/release/bundle/nsis/EasyCLIProxyAPI Custom_${{ needs.version.outputs.version }}_${nsisArch}-setup.exe"
+          $destination = '${{ steps.package.outputs.stem }}-setup.exe'
+          Copy-Item -LiteralPath $source -Destination $destination
+          $hash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText("$destination.sha256", "$hash  $destination`n", [Text.UTF8Encoding]::new($false))
+      - name: Test Windows installer data preservation
+        if: env.PACKAGE_RELEASE == 'true' && matrix.os == 'windows'
+        shell: pwsh
+        run: ./tests/windows-installer-smoke.ps1 -Installer '${{ steps.package.outputs.stem }}-setup.exe' -ProductName 'EasyCLIProxyAPI Custom'
       - uses: actions/upload-artifact@v7
         if: env.PACKAGE_RELEASE == 'true'
         with:
           name: ${{ steps.package.outputs.stem }}
-          path: ${{ steps.package.outputs.stem }}.${{ matrix.suffix }}
+          path: |
+            ${{ steps.package.outputs.stem }}.${{ matrix.suffix }}
+            ${{ steps.package.outputs.stem }}-setup.exe
+            ${{ steps.package.outputs.stem }}-setup.exe.sha256
           if-no-files-found: error
           retention-days: 14
   publish:

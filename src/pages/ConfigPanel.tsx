@@ -45,6 +45,7 @@ import { useDialogFocusTrap } from '../components/useDialogFocusTrap';
 import { useConfirmation } from '../components/ConfirmationDialog';
 import { TemplateConfigSection } from '../components/TemplateConfigSection';
 import { SettingsHelp } from '../components/SettingsHelp';
+import { DataStoragePanel } from '../components/DataStoragePanel';
 import { templateMessages, templateText } from '../i18n/templateConfig';
 import {
   settingsCategories, settingsTemplateGroups,
@@ -96,7 +97,7 @@ type ConfigAction =
   | null;
 type ConfigSubpage = SettingsCategory;
 const CONFIG_SUBPAGES = settingsCategories.map(category => category.id);
-const CATEGORY_ICONS = { general: ShieldCheck, aliases: Link2, routing: Route, requests: SlidersHorizontal, oauth: KeyRound, diagnostics: FileText, extensions: Puzzle, software: Settings2 };
+const CATEGORY_ICONS = { general: ShieldCheck, aliases: Link2, routing: Route, requests: SlidersHorizontal, oauth: KeyRound, diagnostics: FileText, extensions: Puzzle, software: Settings2, storage: HardDrive };
 type SettingDestination = { category: ConfigSubpage; target: string; field?: string };
 type SettingSearchEntry = SettingDestination & { title: string; context: string; keywords: string };
 
@@ -1056,6 +1057,7 @@ export function ConfigPanelPage() {
     retry: retrySettingsDirty, logging: loggingSettingsDirty, software: softwareSettingsDirty,
   };
   const nativeEntries: SettingSearchEntry[] = [
+    { category: 'storage', target: 'config-native-storage', title: templateText(settingsCategories.find(category => category.id === 'storage')!.title, locale), context: '', keywords: 'storage backup restore portable data folder history retention 存储 备份 恢复 便携 数据 保存先 バックアップ' },
     { category: 'general', target: 'config-native-keys', title: t('config.keys.title'), context: '', keywords: 'API key token 鉴权密钥 api-keys access' },
     { category: 'general', target: 'config-native-management', title: t('config.webuiKey.title'), context: '', keywords: 'WebUI secret-key 密钥 管理接口 面板 密码 management security' },
     { category: 'general', target: 'config-native-network', title: st('nativeNetwork'), context: '', keywords: [t('config.network.port'), t('config.network.listenHost'), t('config.network.proxyUrl'), t('config.network.systemProxy'), 'server host port proxy URL 8317 127.0.0.1 0.0.0.0 监听 地址 系统代理'].join(' ') },
@@ -1076,6 +1078,7 @@ export function ConfigPanelPage() {
     oauth: false,
     extensions: false,
     software: softwareSettingsDirty,
+    storage: false,
   };
   const categoryDirty = (id: ConfigSubpage) => nativeCategoryDirty[id]
     || settingsTemplateGroups[id].some(group => dirtyTemplateGroups.includes(group.id));
@@ -2033,6 +2036,9 @@ export function ConfigPanelPage() {
             {renderFeedback(loggingFeedback)}
           </div>
         </section>
+<section id="config-native-storage" tabIndex={-1} hidden={searching || activeSubpage !== 'storage'} className="panel">
+  {activeSubpage === 'storage' && <DataStoragePanel />}
+</section>
 <section id="config-native-software" tabIndex={-1} hidden={searching || activeSubpage !== 'software'} className="panel config-software-panel">
             <div className="config-panel-heading">
               <div className="config-heading-title">

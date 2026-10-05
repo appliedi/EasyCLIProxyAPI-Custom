@@ -23,6 +23,7 @@ mod oauth_browser;
 mod plugins;
 mod progress;
 mod provider_health;
+mod storage;
 #[cfg(any(
     target_os = "linux",
     target_os = "macos",
@@ -2378,22 +2379,18 @@ fn main() {
     };
 
     let portable_update_ack = portable_update_ack_argument();
+    let _storage_guards = match storage::initialize() {
+        Ok(guards) => guards,
+        Err(error) => {
+            storage::show_startup_error(&error);
+            return;
+        }
+    };
     let gui_config = match load_or_create_gui_config() {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("{error}");
-            if portable_update_ack.is_some() {
-                return;
-            }
-            let mut config = GuiConfigFile::default();
-            if let Err(secret_error) = ensure_strong_management_secret(&mut config) {
-                eprintln!("Failed to initialize WebUI security key: {secret_error}");
-                return;
-            }
-            if let Err(sanitize_error) = sanitize_gui_config(&mut config) {
-                eprintln!("Failed to initialize fixed credentials directory: {sanitize_error}");
-            }
-            config
+            storage::show_startup_error(&error);
+            return;
         }
     };
     let initial_window_size = configured_window_size(&gui_config);
@@ -2729,6 +2726,11 @@ fn main() {
             usage::subscription_value::get_subscription_value,
             usage::subscription_value::save_subscription_fees,
             usage::get_usage_storage_settings,
+            storage::get_data_storage_settings,
+            storage::schedule_storage_operation,
+            storage::cancel_storage_operation,
+            storage::open_data_directory,
+            storage::restart_for_storage_operation,
             usage::repair_usage_cache_records,
             usage::save_usage_storage_settings,
             usage::shrink_usage_database,
@@ -2778,7 +2780,11 @@ fn main() {
                 process_state
                     .shutdown_complete
                     .store(true, Ordering::Release);
-                app_handle.exit(code.unwrap_or(0));
+                if storage::restart_requested() {
+                    app_handle.request_restart();
+                } else {
+                    app_handle.exit(code.unwrap_or(0));
+                }
             });
         }
         tauri::RunEvent::Exit => {

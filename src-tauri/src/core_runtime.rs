@@ -1736,7 +1736,17 @@ pub(crate) fn macos_app_resources_dir(executable_dir: &Path) -> Option<PathBuf> 
 }
 
 pub(crate) fn core_base_dir() -> Result<PathBuf, String> {
+    if let Some(directory) = crate::storage::resolved_directory() {
+        return Ok(directory);
+    }
+    legacy_core_base_dir()
+}
+
+pub(crate) fn legacy_core_base_dir() -> Result<PathBuf, String> {
     let executable_dir = executable_dir()?;
+    if executable_dir.join("data/storage-profile.json").is_file() {
+        return Ok(executable_dir.join("data"));
+    }
     #[cfg(target_os = "macos")]
     if macos_app_resources_dir(&executable_dir).is_some() {
         let home_dir = env::var_os("HOME")
@@ -1761,7 +1771,10 @@ pub(crate) fn bundled_core_locations(
             resources_dir.join("cpa-core"),
         ));
     }
-    locations.push((base_dir.join(CORE_VERSION_FILE), base_dir.join("cpa-core")));
+    locations.push((executable_dir.join(CORE_VERSION_FILE), executable_dir.join("cpa-core")));
+    if base_dir != executable_dir {
+        locations.push((base_dir.join(CORE_VERSION_FILE), base_dir.join("cpa-core")));
+    }
     if let Some(project_root) = source_project_root(executable_dir) {
         if project_root != base_dir {
             locations.push((

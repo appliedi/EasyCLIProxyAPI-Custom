@@ -1,0 +1,18 @@
+.data-storage-panel { display: grid; gap: 18px; max-width: 900px; min-width: 0; }
+.data-storage-panel h2, .data-storage-panel legend { display: flex; align-items: center; gap: 9px; }
+.data-storage-panel h2, .data-storage-panel p { margin: 0; }
+.data-storage-panel p { line-height: 1.6; }
+.data-storage-panel code { display: block; overflow-wrap: anywhere; font-size: .85rem; }
+.data-storage-panel fieldset { min-width: 0; display: grid; gap: 14px; padding: 20px; border: 1px solid var(--border-color, #80808040); border-radius: 12px; }
+.data-storage-panel legend { padding: 0 8px; font-weight: 650; }
+.data-storage-panel label { display: grid; gap: 8px; font-size: .9rem; font-weight: 600; }
+.data-storage-panel input, .data-storage-panel select { width: 100%; min-width: 0; box-sizing: border-box; border: 1px solid var(--border-color, #80808060); border-radius: 8px; padding: 10px 12px; color: inherit; background: var(--bg-color, transparent); font: inherit; }
+.data-storage-panel input:read-only { opacity: .8; }
+.data-storage-panel button { width: fit-content; max-width: 100%; white-space: normal; }
+.data-storage-panel fieldset:disabled { opacity: .6; }
+.data-storage-current, .data-storage-pending { display: grid; gap: 12px; padding: 18px; border-radius: 10px; background: #138a8110; border: 1px solid #138a8140; }
+.data-storage-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.data-storage-error { color: var(--danger-color, #c24040); overflow-wrap: anywhere; }
+.data-storage-locator { opacity: .7; font-size: .85rem; }
+.data-storage-panel hr { width: 100%; border: 0; border-top: 1px solid #80808040; }
+@media (max-width: 600px) { .data-storage-panel fieldset { padding: 14px; } .data-storage-actions > button { width: 100%; } }

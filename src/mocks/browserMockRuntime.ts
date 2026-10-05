@@ -3,6 +3,7 @@ import { createPluginMock } from './pluginMock';
 import { createQuotaMock, createQuotaMockFiles } from './quotaMock';
 import { createSubscriptionValueMock } from './subscriptionValueMock';
 import type { AccountSeed, FeeChange } from '../services/subscriptionValue';
+import type { DataStorageSettings, StorageOperation } from '../services/dataStorage';
 
 export type BrowserMockScenario = 'running' | 'stopped' | 'empty' | 'error';
 export type BrowserMockMode = BrowserMockScenario | 'off';
@@ -794,6 +795,7 @@ const ERROR_SCENARIO_COMMANDS = new Set([
   'management_request',
   'get_usage_overview',
   'get_subscription_value',
+  'get_data_storage_settings',
   'get_core_models',
   'core_health_probe',
   'get_agent_config_statuses',
@@ -806,6 +808,13 @@ export function createBrowserMockRuntime(
 ): BrowserMockRuntime {
   const state = createState(scenario);
   const subscriptionValue = createSubscriptionValueMock(scenario === 'empty');
+  const dataStorage: DataStorageSettings = {
+    mode: 'portable', directory: 'C:\\Apps\\EasyCLIProxyAPI',
+    userDirectory: 'C:\\Users\\demo\\AppData\\Local\\EasyCLIProxyAPI-Custom\\data',
+    applicationDirectory: 'C:\\Apps\\EasyCLIProxyAPI',
+    locator: 'C:\\Users\\demo\\AppData\\Local\\EasyCLIProxyAPI-Custom\\storage.json',
+    pending: null, lastResult: null, lastError: null,
+  };
   if (scenario === 'empty') {
     state.usageEvents = [];
     state.usagePrices = [];
@@ -1122,6 +1131,25 @@ export function createBrowserMockRuntime(
       case 'get_subscription_value': return subscriptionValue.get(readString(payload.month), payload.accounts as AccountSeed[] | null);
       case 'save_subscription_fees': subscriptionValue.save(readString(payload.month), payload.fees as FeeChange[]); return null;
       case 'get_usage_storage_settings': return clone(state.usageStorage);
+      case 'get_data_storage_settings': return clone(dataStorage);
+      case 'schedule_storage_operation': {
+        if (dataStorage.pending) throw new Error('A storage operation is already scheduled');
+        dataStorage.pending = clone(payload.operation) as StorageOperation;
+        return null;
+      }
+      case 'cancel_storage_operation': dataStorage.pending = null; return null;
+      case 'open_data_directory': return null;
+      case 'restart_for_storage_operation': {
+        if (!dataStorage.pending) throw new Error('No storage operation is scheduled');
+        const operation = dataStorage.pending;
+        if (operation.kind !== 'backup') {
+          dataStorage.directory = operation.destination;
+          dataStorage.mode = operation.kind === 'move' ? operation.mode : 'custom';
+        }
+        dataStorage.lastResult = 'Storage operation completed (browser simulation).';
+        dataStorage.pending = null;
+        return null;
+      }
       case 'save_usage_storage_settings': {
         state.usageStorage.maxDatabaseSizeMb = readNumber(payload.maxDatabaseSizeMb);
         state.usageStorage.deletedRecords = 0;

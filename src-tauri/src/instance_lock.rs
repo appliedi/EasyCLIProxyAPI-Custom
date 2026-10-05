@@ -12,7 +12,15 @@ pub(crate) struct AppInstanceGuard {
 
 pub(crate) fn acquire_app_instance_guard() -> Result<AppInstanceGuard, String> {
     let executable_dir = super::executable_dir()?;
-    acquire_app_instance_guard_for(&executable_dir)
+    // Tauri starts the replacement process just before the previous process exits.
+    // Give that process time to release its lock without allowing two writers.
+    let mut result = acquire_app_instance_guard_for(&executable_dir);
+    for _ in 0..20 {
+        if result.is_ok() { break; }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        result = acquire_app_instance_guard_for(&executable_dir);
+    }
+    result
 }
 
 pub(crate) fn app_instance_key(executable_dir: &Path) -> String {

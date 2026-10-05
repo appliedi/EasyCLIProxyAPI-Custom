@@ -843,6 +843,15 @@ fn portable_update_replacement_preserves_user_data_and_can_roll_back() {
     fs::create_dir_all(app_dir.join(OAUTH_DIR_NAME)).unwrap();
     fs::write(app_dir.join(OAUTH_DIR_NAME).join("account.json"), b"oauth").unwrap();
     let preserved_paths = [
+        "installation.json",
+        "initial-data-directory.txt",
+        "storage-profile.json",
+        "usage-records/usage.db",
+        "usage-records/usage.db-wal",
+        "data/storage-profile.json",
+        "data/usage-records/usage.db",
+        "data/config.toml",
+        "data/oauth/account.json",
         "cpa-core/config.yaml",
         "cpa-core/oauth/account.json",
         "cpa-core/custom-auth/account.json",

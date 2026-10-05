@@ -2,7 +2,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 
-const categories = ['general', 'aliases', 'routing', 'requests', 'oauth', 'diagnostics', 'extensions', 'software'];
+const categories = ['general', 'aliases', 'routing', 'requests', 'oauth', 'diagnostics', 'extensions', 'storage', 'software'];
 const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { width: 1280, height: 800 }, { width: 1600, height: 1000 }];
 
 (async () => {
@@ -181,7 +181,7 @@ const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { w
           };
         });
         assert.equal(navigationLayout.aboveContent, true, `${label}: category navigation belongs above settings content`);
-        assert.equal(navigationLayout.singleRow, true, `${label}: all eight categories must stay in a single horizontal row`);
+        assert.equal(navigationLayout.singleRow, true, `${label}: all categories must stay in a single horizontal row`);
         assert.equal(navigationLayout.labelsFit, true, `${label}: complete category labels must fit their own buttons`);
         if (viewport.width === 640) {
           assert.equal(navigationLayout.overflowing, true, `${label}: narrow navigation keeps readable labels through scrolling`);
@@ -506,7 +506,7 @@ const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { w
       }
     }
     assert.deepEqual(runtimeErrors, [], 'Settings navigation must not produce runtime errors');
-    console.log('PASS: eight settings categories including independent model aliases, adaptive cards, search, retained drafts, save feedback, and Chinese/English responsive layouts.');
+    console.log('PASS: nine settings categories including storage, independent model aliases, adaptive cards, search, retained drafts, save feedback, and Chinese/English responsive layouts.');
   } finally {
     if (browser) await browser.close();
     if (server) await server.close();

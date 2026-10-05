@@ -13,6 +13,7 @@ export const settingsCategories = [
   { id: 'oauth', title: text('上游与凭据', 'Upstreams & credentials', '上流と認証情報') },
   { id: 'diagnostics', title: text('日志与诊断', 'Logs & diagnostics', 'ログと診断') },
   { id: 'extensions', title: text('扩展与集成', 'Extensions & integrations', '拡張と連携') },
+  { id: 'storage', title: text('存储与备份', 'Storage & backups', '保存先とバックアップ') },
   { id: 'software', title: text('应用偏好', 'App preferences', 'アプリの設定') },
 ] as const;
 export type SettingsCategory = typeof settingsCategories[number]['id'];
@@ -26,6 +27,7 @@ export const settingsTemplateGroups = {
   diagnostics: [...generalTemplateGroups.filter(group => group.id === 'diagnostics'), ...extensionTemplateGroups.filter(group => group.id === 'extensions-inflight')],
   extensions: extensionTemplateGroups.filter(group => group.id === 'extensions-plugins'),
   software: [],
+  storage: [],
 };
 export const allSettingsTemplateGroups = Object.values(settingsTemplateGroups).flat();
 export const settingsMessages = {
