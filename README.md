@@ -1,3 +1,15 @@
+# EasyCLIProxyAPI Custom
+
+This is the independently maintained [appliedi/EasyCLIProxyAPI-Custom](https://github.com/appliedi/EasyCLIProxyAPI-Custom) distribution, based on [router-for-me/EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI). The upstream MIT license and attribution are preserved.
+
+Version **0.4.0** incorporates upstream desktop **0.3.22** and bundles CLIProxyAPI **8.0.15**, while retaining our provider quota summaries, account ledger, priority editor, and session-affinity controls. Desktop updates and the model catalog come from this repository. Core updates continue to come from the official CLIProxyAPI repository.
+
+Download Windows builds from [our releases](https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/latest). The first migration from the old custom 0.3.6 build must be manual because that build still checks the upstream desktop update feed. Close the old app and stop its core, back up the portable folder, then extract the new package over it, preserving `config.toml`, `oauth/`, and `cpa-core/config.yaml`.
+
+To publish a tested update, bump the app version using `node scripts/set-version.mjs`, add localized release notes under `docs/release-notes/v<VERSION>/`, and push the matching `v<VERSION>` tag. GitHub Actions builds both Windows architectures and publishes the update manifest with SHA-256 checksums. Linux and macOS source support is inherited, but this fork currently publishes Windows binaries only.
+
+---
+
 <p align="center">
   <strong>English</strong> |
   <a href="README.zh-CN.md">简体中文</a> |
@@ -88,6 +100,14 @@ You can add multiple connections, search existing entries, refresh provider stat
 through the unified local CLIProxyAPI endpoint. Requests and responses can be converted between
 supported OpenAI, Claude, Gemini, and compatible formats.
 
+### Plugins
+
+The **Plugins** page manages installed core plugins, their enabled state and typed configuration.
+Browse the plugin store to install, update or select a release version, configure additional stores
+and environment-based authentication, open pages and sign in to accounts provided by enabled plugins. Third-party
+installations require source review and a typed confirmation. The page detects unsupported core
+builds and shows a restart action when an installation or removal requires it.
+
 ### Usage history and token analytics
 
 ![Usage history and token analytics](docs/screenshots/en/4.png)
@@ -158,7 +178,7 @@ Affinity is scoped to the client's session identity, provider and model, not the
 folder. Separate chats in a project can have different bindings; custom clients should send
 stable session IDs. Idle expiry and core restarts can require a new binding. This helps reuse
 upstream prompt caches but does not extend their lifetime. These behaviors follow the
-[bundled core's affinity implementation](https://github.com/router-for-me/CLIProxyAPI/blob/v8.0.6/sdk/cliproxy/auth/selector.go).
+[bundled core's affinity implementation](https://github.com/router-for-me/CLIProxyAPI/blob/v8.0.15/sdk/cliproxy/auth/selector.go).
 
 For an isolated routing check with two simulated Claude accounts, set `CPA_V8_TEST_CORE`
 to a v8 core executable and run `node tests/account-routing.v8.integration.cjs`.
@@ -168,7 +188,7 @@ and failover without contacting real providers.
 ## Quick Start
 
 1. Download the package for your operating system from
-   [GitHub Releases](https://github.com/router-for-me/EasyCLIProxyAPI/releases/latest).
+   [GitHub Releases](https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/latest).
 2. Extract the Windows or Linux archive, or open the macOS DMG.
 3. Launch EasyCLIProxyAPI.
 4. Open **Version Management** and install the bundled or latest CLIProxyAPI core.

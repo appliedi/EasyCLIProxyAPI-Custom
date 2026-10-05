@@ -47,7 +47,7 @@ export async function generatePortableUpdateManifest({
     resolvedDirectory,
     portableUpdateManifestName(normalizedPlatform),
   ));
-  const resolvedRepository = repository ?? 'router-for-me/EasyCLIProxyAPI';
+  const resolvedRepository = repository ?? 'appliedi/EasyCLIProxyAPI-Custom';
   const resolvedGitcodeRepository = String(gitcodeRepository ?? '').trim();
   const normalizedRawTag = String(rawTag ?? '').trim();
   const tag = normalizedRawTag.startsWith('v') ? normalizedRawTag : `v${normalizedRawTag}`;

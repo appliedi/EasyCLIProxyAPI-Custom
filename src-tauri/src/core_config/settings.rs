@@ -26,7 +26,8 @@ pub(crate) fn validate_api_key_remark(remark: &str) -> Result<(), String> {
 pub(crate) fn validate_api_access_provider_section(section: &str) -> Result<(), String> {
     if matches!(
         section,
-        "gemini-api-key" | "codex-api-key" | "claude-api-key" | "openai-compatibility"
+        "gemini-api-key" | "interactions-api-key" | "vertex-api-key" | "codex-api-key"
+            | "claude-api-key" | "xai-api-key" | "meta-api-key" | "openai-compatibility"
     ) {
         Ok(())
     } else {
@@ -44,6 +45,10 @@ pub(crate) fn usage_provider_section(provider: &str) -> Option<&'static str> {
         "codex" => Some("codex-api-key"),
         "claude" => Some("claude-api-key"),
         "gemini" | "aistudio" => Some("gemini-api-key"),
+        "interactions" => Some("interactions-api-key"),
+        "vertex" | "vertex-ai" => Some("vertex-api-key"),
+        "xai" | "grok" => Some("xai-api-key"),
+        "meta" => Some("meta-api-key"),
         "openai" | "openai-compatibility" => Some("openai-compatibility"),
         _ => None,
     }
@@ -97,9 +102,6 @@ pub(crate) fn validate_strong_management_secret_key(secret_key: &str) -> Result<
     if secret_key.trim().is_empty() {
         return Err("WebUI key cannot be empty".to_string());
     }
-    if secret_key.trim() == LEGACY_DEFAULT_MANAGEMENT_SECRET_KEY {
-        return Err("The legacy default WebUI key 123456 cannot be used".to_string());
-    }
     if is_hashed_management_secret_key(secret_key) {
         return Err("GUI configuration must save a plaintext WebUI key that can authenticate with the management interface".to_string());
     }
@@ -116,9 +118,8 @@ pub(crate) fn generate_management_secret_key() -> Result<String, String> {
 
 pub(crate) fn management_secret_requires_rotation(secret_key: &str) -> bool {
     let secret_key = secret_key.trim();
-    secret_key.is_empty()
-        || secret_key == LEGACY_DEFAULT_MANAGEMENT_SECRET_KEY
-        || is_hashed_management_secret_key(secret_key)
+    // Empty is an intentional disabled Management API, including after restart.
+    is_hashed_management_secret_key(secret_key)
 }
 
 pub(crate) fn ensure_strong_management_secret(config: &mut GuiConfigFile) -> Result<bool, String> {
@@ -155,10 +156,10 @@ pub(crate) fn is_hashed_management_secret_key(secret_key: &str) -> bool {
 }
 
 pub(crate) fn validate_routing_strategy(strategy: &str) -> Result<(), String> {
-    if matches!(strategy, "round-robin" | "fill-first") {
+    if matches!(strategy, "round-robin" | "weighted-round-robin" | "fill-first") {
         return Ok(());
     }
-    Err("Routing strategy supports only round-robin or fill-first".to_string())
+    Err("Routing strategy supports round-robin, weighted-round-robin, or fill-first".to_string())
 }
 
 pub(crate) fn normalize_optional_config_string(
@@ -290,7 +291,15 @@ pub(crate) fn merge_core_config_yaml(
     config: &GuiConfigFile,
 ) -> Result<String, String> {
     let base = match current {
-        Some(current) => current.to_string(),
+        Some(current) => {
+            let template_document: serde_norway::Value = serde_norway::from_str(template)
+                .map_err(|error| format!("Failed to parse kernel configuration template: {error}"))?;
+            if core_config_uses_v8(&template_document) {
+                migrate_legacy_core_config_to_v8(template, current)?
+            } else {
+                current.to_string()
+            }
+        }
         None => merge_core_config_fields(template, None)?,
     };
     apply_gui_managed_settings(&base, config)
@@ -1428,8 +1437,7 @@ pub(crate) fn load_or_create_gui_config() -> Result<GuiConfigFile, String> {
                 config.management_secret_key = core_settings
                     .management_secret_key
                     .as_deref()
-                    .filter(|secret_key| !is_hashed_management_secret_key(secret_key))
-                    .unwrap_or_default()
+                    .unwrap_or(&config.management_secret_key)
                     .to_string();
             }
             if presence.routing_strategy.is_none() {
@@ -1469,8 +1477,7 @@ pub(crate) fn load_or_create_gui_config() -> Result<GuiConfigFile, String> {
         config.management_secret_key = read_installed_core_config_settings()
             .ok()
             .and_then(|settings| settings.management_secret_key)
-            .filter(|secret_key| !is_hashed_management_secret_key(secret_key))
-            .unwrap_or_default();
+            .unwrap_or_else(|| config.management_secret_key.clone());
         changed = true;
     }
     if presence.host.is_none() || presence.auth_dir.is_none() {
@@ -1788,15 +1795,6 @@ pub(crate) fn sanitize_gui_config_at(
         changed = true;
     }
     let host = config.host.trim();
-    let host = if host.is_empty() {
-        if config.allow_lan {
-            "0.0.0.0"
-        } else {
-            "127.0.0.1"
-        }
-    } else {
-        host
-    };
     if config.host != host {
         config.host = host.to_string();
         changed = true;
@@ -1806,14 +1804,16 @@ pub(crate) fn sanitize_gui_config_at(
         config.allow_lan = allow_lan;
         changed = true;
     }
-    match migrate_auth_dir_at(config, install_dir, persistent_auth_dir) {
-        Ok(migrated) => changed |= migrated,
-        Err(error) => {
-            eprintln!("Failed to recover OAuth directory; keeping existing configuration: {error}");
+    if !config.auth_dir_user_selected {
+        match migrate_auth_dir_at(config, install_dir, persistent_auth_dir) {
+            Ok(migrated) => changed |= migrated,
+            Err(error) => {
+                eprintln!("Failed to recover OAuth directory; keeping existing configuration: {error}");
+            }
         }
     }
     if config.auth_dir.trim().is_empty()
-        || Path::new(config.auth_dir.trim()) == persistent_auth_dir
+        || (!config.auth_dir_user_selected && Path::new(config.auth_dir.trim()) == persistent_auth_dir)
     {
         config.auth_dir = DEFAULT_AUTH_DIR.to_string();
         changed = true;
@@ -1939,6 +1939,7 @@ pub(crate) fn write_gui_config_to_path(
         ("close-behavior", value(config.close_behavior.as_str())),
         ("default-terminal", value(config.default_terminal.as_str())),
         ("auth-dir", value(config.auth_dir.as_str())),
+        ("auth-dir-user-selected", value(config.auth_dir_user_selected)),
         (
             "management-secret-key",
             value(config.management_secret_key.as_str()),
@@ -2071,7 +2072,7 @@ pub(crate) fn validate_gui_config(config: &GuiConfigFile) -> Result<(), String> 
     if config.port == 0 {
         return Err("GUI configuration port must be between 1 and 65535".to_string());
     }
-    if config.host.trim().is_empty() || config.host.chars().any(char::is_control) {
+    if config.host.chars().any(char::is_control) {
         return Err("Invalid GUI configuration host".to_string());
     }
     if config.auth_dir.trim().is_empty() || config.auth_dir.chars().any(char::is_control) {
@@ -2109,7 +2110,11 @@ pub(crate) fn validate_gui_config(config: &GuiConfigFile) -> Result<(), String> 
         }
         validate_api_key_remark(&entry.remark)?;
     }
-    validate_strong_management_secret_key(&config.management_secret_key)?;
+    if config.management_secret_key.is_empty() {
+        validate_management_secret_key(&config.management_secret_key)?;
+    } else {
+        validate_strong_management_secret_key(&config.management_secret_key)?;
+    }
     validate_routing_strategy(config.routing_strategy.trim())?;
     if config.proxy_override {
         network_proxy::normalize_optional_proxy_url(&config.proxy_url)?;

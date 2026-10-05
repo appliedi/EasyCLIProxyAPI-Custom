@@ -7,8 +7,9 @@ import {
   ExternalLink,
   Info,
   RefreshCw,
-  RotateCcw,
+  Package,
   Trash2,
+  X,
 } from 'lucide-react';
 import { useCoreRuntime } from '../coreRuntime';
 import { useCoreUpdate } from '../coreUpdate';
@@ -24,6 +25,11 @@ export type CoreInstallResult = {
   assetName: string;
   installDir: string;
   binaryPath: string | null;
+};
+
+type BundledCoreInfo = {
+  version: string;
+  assetName: string;
 };
 
 export type CoreInstallTask = {
@@ -64,7 +70,7 @@ function downloadSourceLabel(source: VersionDownloadSource, t: ReturnType<typeof
 }
 
 export type MessageType = 'info' | 'success' | 'error';
-const APP_RELEASE_URL = 'https://github.com/router-for-me/EasyCLIProxyAPI/releases/latest';
+const APP_RELEASE_URL = 'https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/latest';
 export const DEFAULT_VERSION_DOWNLOAD_SOURCE = 'github';
 const recordVersionManagementVisit = createVersionManagementVisitTracker();
 
@@ -98,6 +104,8 @@ export function VersionManagementPage() {
   } = useCoreUpdate();
 
   const [installedAppVersion, setInstalledAppVersion] = useState('');
+  const [bundledCore, setBundledCore] = useState<BundledCoreInfo | null>(null);
+  const [bundledCoreError, setBundledCoreError] = useState('');
 
   const [installing, setInstalling] = useState(false);
   const [progress, setProgress] = useState<CoreInstallTask | null>(null);
@@ -243,7 +251,7 @@ export function VersionManagementPage() {
     }
   };
 
-  const installVersion = async (version: string) => {
+  const installCore = async (target: { kind: 'bundled' } | { kind: 'release'; version: string }) => {
     completedInstallKeyRef.current = '';
     manualInstallInProgressRef.current = true;
     setInstalling(true);
@@ -251,8 +259,8 @@ export function VersionManagementPage() {
     setInstallDialogOpen(true);
     setProgress({
       running: true,
-      cancellable: true,
-      phase: 'Preparing download',
+      cancellable: target.kind === 'release',
+      phase: target.kind === 'bundled' ? 'Preparing bundled kernel' : 'Preparing download',
       downloaded: 0,
       total: null,
       percent: null,
@@ -261,8 +269,11 @@ export function VersionManagementPage() {
     });
 
     try {
-      const result = await invoke<CoreInstallResult>('install_core_version', { version });
-      showInstallCompletedNotice(result, t('kernel.install.completed', { version: result.version }));
+      const result = target.kind === 'bundled'
+        ? await invoke<CoreInstallResult>('install_bundled_core')
+        : await invoke<CoreInstallResult>('install_core_version', { version: target.version });
+      const message = t(target.kind === 'bundled' ? 'kernel.install.bundledCompleted' : 'kernel.install.completed', { version: result.version });
+      showInstallCompletedNotice(result, message);
       manualInstallInProgressRef.current = false;
       setProgress({
         running: false,
@@ -271,13 +282,12 @@ export function VersionManagementPage() {
         downloaded: 1,
         total: 1,
         percent: 100,
-        message: t('kernel.install.completed', { version: result.version }),
+        message,
         result,
       });
       setInstallDialogOpen(false);
       setProgress(null);
       setCancellingInstall(false);
-      await refreshStatus();
     } catch (error) {
       manualInstallInProgressRef.current = false;
       const errorMessage = String(error);
@@ -295,6 +305,7 @@ export function VersionManagementPage() {
       }));
     } finally {
       setInstalling(false);
+      await refreshStatus();
     }
   };
 
@@ -381,6 +392,13 @@ export function VersionManagementPage() {
 
     loadInstallTask();
     void loadVersionSourceSettings();
+    void invoke<BundledCoreInfo | null>('detect_bundled_core')
+      .then((info) => {
+        if (!disposed) setBundledCore(info);
+      })
+      .catch((error) => {
+        if (!disposed) setBundledCoreError(String(error));
+      });
 
     void getVersion()
       .then((version) => {
@@ -401,7 +419,7 @@ export function VersionManagementPage() {
   const coreInstalled = Boolean(coreStatus?.installed);
   const coreProcessBusy = Boolean(coreStatus?.starting);
   const busy = checkingLatest || installing || coreProcessBusy;
-  const installDisabled = busy || installing;
+  const installDisabled = installing || coreProcessBusy;
 
   const resolvedAppVersion = appUpdate?.currentVersion || installedAppVersion;
   const currentAppVersion = resolvedAppVersion ? displayAppVersion(resolvedAppVersion) : t('common.detecting');
@@ -485,16 +503,16 @@ export function VersionManagementPage() {
     : t('common.close');
 
   const installDialogActionDisabled = (installing || progress?.running) && (cancellingInstall || !progress?.cancellable);
+  const closeCustomMirrorDialog = () => {
+    setCustomMirrorDialogOpen(false);
+    setCustomMirrorDraft('');
+    setVersionSourceError('');
+  };
+
   const customMirrorDialogRef = useDialogFocusTrap<HTMLFormElement>({
     active: customMirrorDialogOpen,
     initialFocusRef: customMirrorInputRef,
-    onEscape: versionSourceSaving
-      ? undefined
-      : () => {
-          setCustomMirrorDialogOpen(false);
-          setCustomMirrorDraft('');
-          setVersionSourceError('');
-        },
+    onEscape: versionSourceSaving ? undefined : closeCustomMirrorDialog,
     preventEscape: versionSourceSaving,
   });
   const confirmUpdateDialogRef = useDialogFocusTrap<HTMLElement>({
@@ -509,11 +527,8 @@ export function VersionManagementPage() {
 
   return (
     <section className="page management-page version-management-page">
-      <header className="management-header version-page-header">
-        <div><h1>{t('app.nav.versions')}</h1></div>
-      </header>
       <MessageNotice message={versionSourceError} onDismiss={() => setVersionSourceError('')} />
-      <section className="panel version-list">
+      <section className="version-list">
         <div className="version-source-row" aria-label={t('kernel.versions.downloadSource')}>
           <div className="version-source-copy">
             <strong>{t('kernel.versions.downloadSource')}</strong>
@@ -688,12 +703,12 @@ export function VersionManagementPage() {
             <button
               type="button"
               className="secondary-button"
-              title={t('kernel.versions.reinstallTitle')}
-              disabled={!currentVersion || installDisabled}
-              onClick={() => void installVersion(currentVersion)}
+              title={bundledCoreError || (bundledCore ? t('kernel.versions.installBundledTitle', { version: bundledCore.version }) : t('kernel.versions.noBundled'))}
+              disabled={!bundledCore || installDisabled}
+              onClick={() => void installCore({ kind: 'bundled' })}
             >
-              <RotateCcw size={15} aria-hidden="true" />
-              <span>{t('kernel.versions.reinstall')}</span>
+              <Package size={15} aria-hidden="true" />
+              <span>{t('kernel.versions.installBundled')}</span>
             </button>
           </div>
         </article>
@@ -721,8 +736,20 @@ export function VersionManagementPage() {
             }}
           >
             <div className="install-dialog-heading">
-              <span>{t('kernel.versions.downloadSource')}</span>
-              <h2 id="custom-mirror-dialog-title">{t('kernel.versions.customMirrorDialogTitle')}</h2>
+              <div>
+                <span>{t('kernel.versions.downloadSource')}</span>
+                <h2 id="custom-mirror-dialog-title">{t('kernel.versions.customMirrorDialogTitle')}</h2>
+              </div>
+              <button
+                type="button"
+                className="icon-button quiet"
+                onClick={closeCustomMirrorDialog}
+                disabled={versionSourceSaving}
+                title={t('common.close')}
+                aria-label={t('common.close')}
+              >
+                <X size={18} aria-hidden="true" />
+              </button>
             </div>
             <p className="custom-mirror-dialog-description">
               {t('kernel.versions.customMirrorDialogDescription')}
@@ -761,11 +788,7 @@ export function VersionManagementPage() {
                 type="button"
                 className="secondary-button"
                 disabled={versionSourceSaving}
-                onClick={() => {
-                  setCustomMirrorDialogOpen(false);
-                  setCustomMirrorDraft('');
-                  setVersionSourceError('');
-                }}
+                onClick={closeCustomMirrorDialog}
               >
                 {t('common.cancel')}
               </button>
@@ -814,7 +837,7 @@ export function VersionManagementPage() {
                 className="primary-button"
                 onClick={() => {
                   setConfirmUpdateOpen(false);
-                  void installVersion(latestVersion);
+                  void installCore({ kind: 'release', version: latestVersion });
                 }}
               >
                 <Download size={15} aria-hidden="true" />
@@ -899,6 +922,8 @@ function localizeInstallPhase(
     'Preparing download': 'kernel.phase.preparingDownload',
     Downloading: 'kernel.phase.downloading',
     Extracting: 'kernel.phase.extracting',
+    'Preparing bundled kernel': 'kernel.phase.preparingBundled',
+    'Verify bundled kernel': 'kernel.phase.preparingBundled',
     'Extract bundled kernel': 'kernel.phase.preparingBundled',
     'Installation complete': 'kernel.phase.completed',
     'Installation failed': 'kernel.phase.failed',

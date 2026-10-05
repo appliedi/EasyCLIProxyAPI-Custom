@@ -2,9 +2,9 @@
 param(
     [int]$BuildJobs,
 
-    [string]$GitCodeGuiRepository = 'lzt404/EasyCLIProxyAPI',
+    [string]$GitCodeGuiRepository = '',
 
-    [string]$GitCodeCoreRepository = 'lzt404/CLIProxyAPI',
+    [string]$GitCodeCoreRepository = '',
 
     [switch]$SkipCopy
 )
@@ -60,10 +60,10 @@ if (-not $PSBoundParameters.ContainsKey('BuildJobs')) {
 if ($BuildJobs -lt 1 -or $BuildJobs -gt 256) {
     throw 'BuildJobs must be between 1 and 256.'
 }
-if ($GitCodeGuiRepository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
+if ($GitCodeGuiRepository -and $GitCodeGuiRepository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
     throw 'GitCodeGuiRepository must use the owner/repository format.'
 }
-if ($GitCodeCoreRepository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
+if ($GitCodeCoreRepository -and $GitCodeCoreRepository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
     throw 'GitCodeCoreRepository must use the owner/repository format.'
 }
 

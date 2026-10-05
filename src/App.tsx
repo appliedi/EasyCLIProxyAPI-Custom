@@ -1,5 +1,5 @@
 import { MessageNotice } from './appNotice';
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import {
@@ -7,6 +7,7 @@ import {
   Check,
   ChevronUp,
   ExternalLink,
+  Gauge,
   History,
   House,
   Languages,
@@ -15,6 +16,7 @@ import {
   MessageCircle,
   Network,
   PackageOpen,
+  Puzzle,
   ServerCog,
   Settings,
   X,
@@ -27,9 +29,11 @@ import { ApiAccessPage } from './pages/ApiAccessPage';
 import { KernelPage } from './pages/Kernel';
 import { VersionManagementPage } from './pages/VersionManagementPage';
 import { OAuthManagementPage } from './pages/ManagementPages';
+import { QuotaPage } from './pages/QuotaPage';
 import { AgentsPage } from './pages/AgentsPage';
 import { EasyModePage } from './pages/EasyModePage';
 import { UsageRecordsPage } from './pages/UsageRecordsPage';
+import { PluginsPage } from './pages/PluginsPage';
 import { languageOptions, useI18n } from './i18n';
 import { AppUpdateDialog, AppUpdateProvider, useAppUpdate } from './appUpdate';
 import { appUpdateIndicatorState } from './appUpdateModel';
@@ -66,6 +70,12 @@ const pages = [
     component: OAuthManagementPage,
   },
   {
+    id: 'quota',
+    labelKey: 'app.nav.quota',
+    icon: Gauge,
+    component: QuotaPage,
+  },
+  {
     id: 'agents',
     labelKey: 'app.nav.agents',
     icon: Bot,
@@ -76,6 +86,12 @@ const pages = [
     labelKey: 'app.nav.usageRecords',
     icon: History,
     component: UsageRecordsPage,
+  },
+  {
+    id: 'plugins',
+    labelKey: 'app.nav.plugins',
+    icon: Puzzle,
+    component: PluginsPage,
   },
   {
     id: 'config',
@@ -242,12 +258,23 @@ function AppContent() {
     options[next]?.focus();
   };
 
-  const select = (pageId: PageId) => {
+  const select = useCallback((pageId: PageId) => {
     if (!canOpenAppPage(pageId, coreReady)) {
       return;
     }
     setActive(pageId);
-  };
+  }, [coreReady]);
+
+  useEffect(() => {
+    const handleNavigate = (event: Event) => {
+      const customEvent = event as CustomEvent<PageId>;
+      if (customEvent.detail) {
+        select(customEvent.detail);
+      }
+    };
+    window.addEventListener('app:navigate', handleNavigate);
+    return () => window.removeEventListener('app:navigate', handleNavigate);
+  }, [select]);
 
   const openContact = async () => {
     try {

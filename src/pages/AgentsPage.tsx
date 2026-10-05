@@ -70,6 +70,7 @@ import { CodexSessionsPanel } from './CodexSessionsPanel';
 import { CodexModelCatalogDialog } from './CodexModelCatalogDialog';
 import { DeepSeekHarnessCatalogDialog } from './DeepSeekHarnessCatalogDialog';
 import { AgentConfigBackupDialog } from './AgentConfigBackupDialog';
+import { AgentClientList } from './AgentClientList';
 import { AgentConfigManagementPanel, AgentConfigurationFeedback, AgentRunControls } from './AgentControls';
 import { useDialogFocusTrap } from '../components/useDialogFocusTrap';
 
@@ -378,6 +379,9 @@ let agentViewStateCache: Record<'full' | 'embedded', Partial<Record<AgentClientI
 };
 
 const AGENT_MODEL_SELECTIONS_KEY = 'cpa-gui.agent-model-selections.v1';
+// Keep the last successful data across page visits; revalidate it in the background.
+let agentStatusesCache: AgentConfigStatus[] | null = null;
+const agentModelsCache: Partial<Record<AgentClientId, ModelOption[]>> = {};
 const AGENT_SELECTED_CLIENT_KEY = 'cpa-gui.agent-selected-client.v1';
 const AGENT_LAUNCH_DIRECTORY_HISTORY_KEY = 'cpa-gui.agent-launch-directory-history.v1';
 
@@ -833,8 +837,11 @@ export function AgentsPage({ embedded = false, onConfigurationApplied }: AgentsP
   const setConfigurationNotice = (configurationNotice: string) => updateViewState({ configurationNotice });
   const setClearNotice = (clearNotice: string) => updateViewState({ clearNotice });
   const setLaunchError = (launchError: string) => updateViewState({ launchError });
-  const [statuses, setStatuses] = useState<AgentConfigStatus[]>([]);
-  const [models, setModels] = useState<ModelOption[]>([]);
+  const [statuses, setStatuses] = useState<AgentConfigStatus[]>(() => agentStatusesCache ?? []);
+  const [modelData, setModelData] = useState(() => ({
+    client: selected, models: agentModelsCache[selected] ?? [],
+  }));
+  const models = modelData.client === selected ? modelData.models : agentModelsCache[selected] ?? [];
   const [modelByClient, setModelByClient] = useState<Partial<Record<AgentClientId, string>>>(
     readAgentModelSelections,
   );
@@ -850,7 +857,7 @@ export function AgentsPage({ embedded = false, onConfigurationApplied }: AgentsP
   const [claudeCustomMappingByClient, setClaudeCustomMappingByClientState] = useState(
     () => ({ ...claudeCustomMappingCache }),
   );
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => agentStatusesCache === null);
   const [modelLoading, setModelLoading] = useState(false);
   const [busyAction, setBusyAction] = useState<
     'backup' | 'apply' | 'close-config' | 'default' | 'clear' | 'install-pi' | 'update-pi' | 'repair-pi' | 'uninstall-pi' | 'oauth-check' | 'native-oauth' | 'directory' | 'launch' | 'launch-cli' | 'launch-app' | 'restart-app' | 'stop-deepseek' | 'restart-deepseek' | null
@@ -889,6 +896,7 @@ export function AgentsPage({ embedded = false, onConfigurationApplied }: AgentsP
   );
   const [piProviderUpdateStatus, setPiProviderUpdateStatus] = useState<PiProviderUpdateStatus | null>(null);
   const modelRequestRef = useRef(0);
+  const statusRequestRef = useRef(0);
   const piUpdateRequestRef = useRef(0);
   const claudeModelMappingsDirtyRef = useRef(claudeModelMappingsDirtyCache);
   const launchDirectoryDialogRef = useDialogFocusTrap<HTMLElement>({
@@ -946,11 +954,23 @@ export function AgentsPage({ embedded = false, onConfigurationApplied }: AgentsP
   }, []);
 
   const loadStatuses = useCallback(async (forceRefresh = false) => {
+    const requestId = ++statusRequestRef.current;
     const command = forceRefresh
       ? 'refresh_agent_config_statuses'
       : 'get_agent_config_statuses';
     const nextStatuses = await invoke<AgentConfigStatus[]>(command);
+    if (requestId !== statusRequestRef.current) return;
     setStatuses(nextStatuses);
+  }, []);
+
+  useEffect(() => {
+    if (statuses.length) agentStatusesCache = statuses;
+  }, [statuses]);
+
+  useEffect(() => () => {
+    // Responses from a previous visit must not overwrite the shared cache.
+    modelRequestRef.current += 1;
+    statusRequestRef.current += 1;
   }, []);
 
   const loadDeepSeekHarnessProcessStatus = useCallback(async () => {
@@ -958,16 +978,16 @@ export function AgentsPage({ embedded = false, onConfigurationApplied }: AgentsP
     setDeepSeekHarnessProcessStatus(status);
   }, []);
 
-  const loadModels = useCallback(async (client: AgentClientId, preferredModel = '') => {
+  const loadModels = useCallback(async (client: AgentClientId, preferredModel = '', background = false) => {
     const requestId = modelRequestRef.current + 1;
     modelRequestRef.current = requestId;
-    setModelLoading(true);
+    setModelLoading(!background || agentModelsCache[client] === undefined);
     setModelError('');
-    setModels([]);
     try {
       const nextModels = await invoke<ModelOption[]>('get_agent_models', { client });
       if (modelRequestRef.current !== requestId) return;
-      setModels(nextModels);
+      agentModelsCache[client] = nextModels;
+      setModelData({ client, models: nextModels });
       setModelSelectionError('');
       setModelByClient((current) => {
         const next = {
@@ -997,7 +1017,7 @@ export function AgentsPage({ embedded = false, onConfigurationApplied }: AgentsP
   }, [loadStatuses]);
 
   useEffect(() => {
-    setLoading(true);
+    setLoading(agentStatusesCache === null);
     setDetectionError('');
     void loadStatuses()
       .catch((requestError) => setDetectionError(String(requestError)))
@@ -1008,7 +1028,7 @@ export function AgentsPage({ embedded = false, onConfigurationApplied }: AgentsP
     if (loading) return;
     const status = statuses.find((status) => status.id === selected);
     const preferredModel = status?.currentModel ?? '';
-    void loadModels(selected, preferredModel);
+    void loadModels(selected, preferredModel, true);
   }, [loadModels, loading, selected]);
 
   useEffect(() => {
@@ -1020,7 +1040,7 @@ export function AgentsPage({ embedded = false, onConfigurationApplied }: AgentsP
       void loadStatuses().catch((requestError) => {
         if (!disposed) setDetectionError(String(requestError));
       });
-      void loadModels(selected);
+      void loadModels(selected, '', true);
     }).then((unlisten) => {
       if (disposed) unlisten();
       else stop = unlisten;
@@ -1078,7 +1098,7 @@ export function AgentsPage({ embedded = false, onConfigurationApplied }: AgentsP
   const selectedModel = selectedModelOption?.name ?? '';
   const isPiClient = selected === 'pi';
   const isDeepSeekHarnessClient = selected === 'deepseek-harness';
-  const hasIndependentCliAndApp = selected === 'codex' || selected === 'opencode';
+  const hasIndependentCliAndApp = selected === 'codex' || selected === 'opencode' || isDeepSeekHarnessClient;
   const isClaudeModelMappingClient = selected === 'claude-code' || selected === 'claude-desktop';
   const claudeModelMappingsDraft = isClaudeModelMappingClient
     ? claudeModelMappingsDraftByClient[selected]
@@ -2019,53 +2039,29 @@ export function AgentsPage({ embedded = false, onConfigurationApplied }: AgentsP
 
   return (
     <section className={`page management-page agents-page${embedded ? ' agents-page-embedded' : ''}`}>
-      <header className="management-header">
-        <div className={embedded ? 'agent-embedded-header-copy' : undefined}>
-          {embedded ? (
-            <>
-              <h1>{t('agents.embedded.title')}</h1>
-              <p>{t('agents.embedded.subtitle')}</p>
-            </>
-          ) : (
-            <>
-              <h1>{t('agents.title')}</h1>
-            </>
-          )}
-        </div>
-        <div className="agent-header-actions">
-          {detectionError ? (
-            <MessageNotice message={detectionError} onDismiss={() => setDetectionError('')} />
-          ) : null}
-          <button type="button" className="secondary-button compact-button" onClick={() => void refresh()} disabled={loading || busy}>
-            <RefreshCw size={16} className={loading ? 'spin' : ''} />
-            {t('agents.redetect')}
-          </button>
-        </div>
-      </header>
+      {embedded ? (
+        <header className="management-header">
+          <div className="agent-embedded-header-copy">
+            <h1>{t('agents.embedded.title')}</h1>
+            <p>{t('agents.embedded.subtitle')}</p>
+          </div>
+        </header>
+      ) : null}
 
       <div className="agent-workbench">
-        <aside className="panel agent-client-list" aria-label={t('agents.localClients')}>
-          <div className="agent-list-items">
-            {agentDefinitions.map((agent) => {
-              const status = statuses.find((item) => item.id === agent.id);
-              return (
-                <button
-                  type="button"
-                  className={selected === agent.id ? 'active' : ''}
-                  key={agent.id}
-                  onClick={() => setSelected(agent.id)}
-                  disabled={busy}
-                >
-                  <span className="agent-client-icon"><AgentMark definition={agent} /></span>
-                  <span><strong>{agent.name}</strong><small>{listStatusText(status)}</small></span>
-                  {status?.installed ? (
-                    <i className="agent-installed-indicator" title={t('agents.clientDetected')} aria-hidden="true" />
-                  ) : null}
-                </button>
-              );
-            })}
-          </div>
-        </aside>
+        <AgentClientList clients={agentDefinitions.map((agent) => {
+          const status = statuses.find((item) => item.id === agent.id);
+          return {
+            id: agent.id,
+            name: agent.name,
+            icon: <AgentMark definition={agent} />,
+            summary: listStatusText(status),
+            installed: Boolean(status?.installed),
+            detected: Boolean(status && (status.installed || status.configExists || status.configured
+              || (agent.id === 'pi' && status.pluginInstalled))),
+          };
+        })} selected={selected} onSelect={setSelected} onRefresh={() => void refresh()}
+          loading={loading} busy={busy} error={detectionError} onDismissError={() => setDetectionError('')} />
 
         <section className="panel agent-config-panel">
           {availableSubpages.length > 1 ? (
@@ -2484,7 +2480,7 @@ export function AgentsPage({ embedded = false, onConfigurationApplied }: AgentsP
           <MessageNotice tone="success" message={!configurationErrorMessage ? configurationNotice || clearNotice : null}
             onDismiss={() => { setConfigurationNotice(''); setClearNotice(''); }} />
           {activeSubpage === 'core' ? <AgentRunControls name={activeDefinition.name} dualTargets={hasIndependentCliAndApp}
-            desktop={hasIndependentCliAndApp || selected === 'claude-desktop' || selected === 'zcode' || selected === 'workbuddy'}
+            desktop={(hasIndependentCliAndApp && !isDeepSeekHarnessClient) || selected === 'claude-desktop' || selected === 'zcode' || selected === 'workbuddy'}
             targets={activeLaunchTargets} enabled={launchEnabled} busyAction={busyAction}
             harness={isDeepSeekHarnessClient ? deepSeekHarnessProcessStatus : null}
             onLaunch={(target) => void launchAgent(target)} onRestart={() => void restartDesktopApp()}

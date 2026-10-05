@@ -20,6 +20,7 @@ mod network_proxy;
 ))]
 mod native_i18n;
 mod oauth_browser;
+mod plugins;
 mod progress;
 mod provider_health;
 #[cfg(any(
@@ -103,20 +104,20 @@ const RELEASE_ATOM_URL: &str = "https://github.com/router-for-me/CLIProxyAPI/rel
 const RELEASE_DOWNLOAD_PREFIX: &str =
     "https://github.com/router-for-me/CLIProxyAPI/releases/download/";
 #[cfg(windows)]
-const APP_UPDATE_MANIFEST_URL: &str = "https://github.com/router-for-me/EasyCLIProxyAPI/releases/latest/download/portable-update-windows.json";
+const APP_UPDATE_MANIFEST_URL: &str = "https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/latest/download/portable-update-windows.json";
 #[cfg(target_os = "linux")]
-const APP_UPDATE_MANIFEST_URL: &str = "https://github.com/router-for-me/EasyCLIProxyAPI/releases/latest/download/portable-update-linux.json";
+const APP_UPDATE_MANIFEST_URL: &str = "https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/latest/download/portable-update-linux.json";
 #[cfg(target_os = "macos")]
-const APP_UPDATE_MANIFEST_URL: &str = "https://github.com/router-for-me/EasyCLIProxyAPI/releases/latest/download/portable-update-darwin-v2.json";
+const APP_UPDATE_MANIFEST_URL: &str = "https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/latest/download/portable-update-darwin-v2.json";
 const APP_RELEASE_DOWNLOAD_PREFIX: &str =
-    "https://github.com/router-for-me/EasyCLIProxyAPI/releases/download/";
+    "https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/download/";
 #[cfg(windows)]
 const APP_UPDATE_MANIFEST_NAME: &str = "portable-update-windows.json";
 #[cfg(target_os = "linux")]
 const APP_UPDATE_MANIFEST_NAME: &str = "portable-update-linux.json";
 #[cfg(target_os = "macos")]
 const APP_UPDATE_MANIFEST_NAME: &str = "portable-update-darwin-v2.json";
-const CODEX_MODEL_CATALOG_URL: &str = "https://raw.githubusercontent.com/router-for-me/EasyCLIProxyAPI/main/src-tauri/resources/codex_models/model-catalog.json";
+const CODEX_MODEL_CATALOG_URL: &str = "https://raw.githubusercontent.com/appliedi/EasyCLIProxyAPI-Custom/main/src-tauri/resources/codex_models/model-catalog.json";
 const CODEX_MODEL_CATALOG_OVERRIDE_DIR: &str = "codex_models";
 const CODEX_MODEL_CATALOG_SOURCE_FILE: &str = "model-catalog.json";
 const MAX_CODEX_MODEL_CATALOG_BYTES: usize = 4 * 1024 * 1024;
@@ -154,7 +155,7 @@ const DEFAULT_AGENT_TERMINAL: &str = "auto";
 const DEFAULT_API_KEY_INITIAL_REMARK: &str = "Default key";
 const DEFAULT_REQUEST_RETRY: u32 = 3;
 const DEFAULT_MAX_RETRY_CREDENTIALS: u32 = 0;
-const DEFAULT_MAX_RETRY_INTERVAL: u32 = 30;
+const DEFAULT_MAX_RETRY_INTERVAL: i64 = 30;
 const DEFAULT_STREAMING_BOOTSTRAP_RETRIES: u32 = 0;
 const DEFAULT_DISABLE_COOLING: bool = false;
 const DEFAULT_LOGS_MAX_TOTAL_SIZE_MB: u32 = 0;
@@ -233,7 +234,7 @@ const USER_AGENT: &str = concat!(
 const APP_USER_AGENT: &str = concat!(
     "EasyCLIProxyAPI/",
     env!("CARGO_PKG_VERSION"),
-    " (+https://github.com/router-for-me/EasyCLIProxyAPI)"
+    " (+https://github.com/appliedi/EasyCLIProxyAPI-Custom)"
 );
 static CORE_CONFIG_FILE_LOCK: Mutex<()> = Mutex::new(());
 static AGENT_CONFIG_FILE_LOCK: Mutex<()> = Mutex::new(());
@@ -603,6 +604,7 @@ struct GuiConfigFile {
     window_width: Option<u32>,
     window_height: Option<u32>,
     auth_dir: String,
+    auth_dir_user_selected: bool,
     #[serde(deserialize_with = "deserialize_gui_api_keys")]
     api_keys: Vec<GuiApiKeyEntry>,
     api_access_remarks: Vec<GuiApiAccessRemark>,
@@ -628,7 +630,7 @@ struct GuiConfigFile {
     disable_cooling: bool,
     request_retry: u32,
     max_retry_credentials: u32,
-    max_retry_interval: u32,
+    max_retry_interval: i64,
     streaming_bootstrap_retries: u32,
 }
 
@@ -909,9 +911,10 @@ impl Default for GuiConfigFile {
             window_width: Some(DEFAULT_MAIN_WINDOW_WIDTH),
             window_height: Some(DEFAULT_MAIN_WINDOW_HEIGHT),
             auth_dir: DEFAULT_AUTH_DIR.to_string(),
+            auth_dir_user_selected: false,
             api_keys: vec![default_api_key_entry()],
             api_access_remarks: Vec::new(),
-            management_secret_key: String::new(),
+            management_secret_key: LEGACY_DEFAULT_MANAGEMENT_SECRET_KEY.to_string(),
             debug: false,
             commercial_mode: false,
             logging_to_file: false,
@@ -975,7 +978,7 @@ struct GuiConfigPresence {
     disable_cooling: Option<bool>,
     request_retry: Option<u32>,
     max_retry_credentials: Option<u32>,
-    max_retry_interval: Option<u32>,
+    max_retry_interval: Option<i64>,
     streaming_bootstrap_retries: Option<u32>,
 }
 
@@ -1467,7 +1470,7 @@ struct GuiNetworkRoutingSettings {
     disable_cooling: bool,
     request_retry: u32,
     max_retry_credentials: u32,
-    max_retry_interval: u32,
+    max_retry_interval: i64,
     streaming_bootstrap_retries: u32,
 }
 
@@ -1489,7 +1492,7 @@ struct GuiRetrySettings {
     disable_cooling: bool,
     request_retry: u32,
     max_retry_credentials: u32,
-    max_retry_interval: u32,
+    max_retry_interval: i64,
     streaming_bootstrap_retries: u32,
 }
 
@@ -1554,7 +1557,7 @@ struct CoreConfigSettings {
     disable_cooling: bool,
     request_retry: u32,
     max_retry_credentials: u32,
-    max_retry_interval: u32,
+    max_retry_interval: i64,
     streaming_bootstrap_retries: u32,
     #[allow(dead_code)]
     #[serde(skip_serializing)]
@@ -1593,7 +1596,7 @@ struct CoreConfigView {
     disable_cooling: bool,
     request_retry: u32,
     max_retry_credentials: u32,
-    max_retry_interval: u32,
+    max_retry_interval: i64,
     streaming_bootstrap_retries: u32,
 }
 
@@ -2208,7 +2211,6 @@ impl GuiConfigState {
             if let Some(secret_key) = settings
                 .management_secret_key
                 .as_deref()
-                .filter(|secret_key| !secret_key.is_empty())
                 .filter(|secret_key| !is_hashed_management_secret_key(secret_key))
             {
                 config.management_secret_key = secret_key.to_string();
@@ -2675,6 +2677,8 @@ fn main() {
             get_core_sensitive_words_settings,
             save_core_sensitive_words_settings,
             get_core_config_settings,
+            get_extended_core_config,
+            save_extended_core_config,
             save_core_logging_settings,
             set_core_request_log,
             add_core_api_key,
@@ -2683,7 +2687,11 @@ fn main() {
             set_core_management_secret_key,
             clear_core_management_secret_key,
             management_api::management_request,
+            plugins::get_plugin_support,
+            plugins::get_plugin_resource_url,
             provider_health::provider_health_probe,
+            provider_health::get_core_models,
+            provider_health::core_health_probe,
             management_api::upload_auth_file,
             management_api::open_auth_files_directory,
             management_api::open_core_logs_directory,

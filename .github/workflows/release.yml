@@ -16,8 +16,6 @@ on:
         default: true
         type: boolean
   push:
-    branches:
-      - main
     tags:
       - 'v*'
 
@@ -70,26 +68,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-22.04
-            os: linux
-            display_os: Linux
-            arch: amd64
-            suffix: tar.gz
-          - runner: ubuntu-22.04-arm
-            os: linux
-            display_os: Linux
-            arch: aarch64
-            suffix: tar.gz
-          - runner: macos-15-intel
-            os: darwin
-            display_os: Darwin
-            arch: amd64
-            suffix: dmg
-          - runner: macos-15
-            os: darwin
-            display_os: Darwin
-            arch: aarch64
-            suffix: dmg
           - runner: windows-2025
             os: windows
             display_os: Windows
@@ -154,6 +132,7 @@ jobs:
           GITCODE_CORE_REPOSITORY: ${{ vars.GITCODE_CORE_REPOSITORY }}
         run: |
           bun install --frozen-lockfile
+          bun test
           bun tauri build --no-bundle
         shell: bash
       - name: Prepare portable directory
@@ -325,7 +304,7 @@ jobs:
           RELEASE_TAG: ${{ needs.version.outputs.tag }}
         run: |
           set -euo pipefail
-          for platform in windows linux darwin; do
+          for platform in windows; do
             node scripts/manifest.mjs \
               --directory artifacts \
               --platform "$platform" \

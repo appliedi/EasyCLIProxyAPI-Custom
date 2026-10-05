@@ -47,7 +47,7 @@ const USAGE_EVENT_KEY_MIGRATION_KEY: &str = "event_key_v5";
 const USAGE_DATABASE_MAX_MB_KEY: &str = "max_database_size_mb";
 const USAGE_UPDATED_EVENT: &str = "usage-records-updated";
 const USAGE_SCHEMA_VERSION: u8 = 1;
-const USAGE_DATABASE_SCHEMA_VERSION: i64 = 5;
+const USAGE_DATABASE_SCHEMA_VERSION: i64 = 6;
 const MAX_USAGE_FAILURE_BODY_CHARS: usize = 2_000;
 const USAGE_QUEUE_BATCH_SIZE: usize = 10_000;
 const USAGE_INBOX_PROCESS_LIMIT: usize = 500;
@@ -224,6 +224,11 @@ pub(crate) struct UsageRecord {
     api_group_key: String,
     #[serde(default)]
     model: String,
+    #[serde(default, alias = "responseModel")]
+    response_model: String,
+    // Derived from the active price catalog when reading a page; never trust imported estimates.
+    #[serde(default, skip_deserializing)]
+    cost: Option<UsageRecordCost>,
     #[serde(default)]
     alias: String,
     #[serde(default, skip_serializing)]
@@ -260,6 +265,12 @@ pub(crate) struct UsageRecord {
     collector_source: String,
     #[serde(default)]
     tokens: UsageTokenStats,
+}
+
+#[derive(Clone, Serialize)]
+struct UsageRecordCost {
+    total: f64,
+    pricing_model: String,
 }
 
 #[derive(Deserialize)]
@@ -1214,6 +1225,7 @@ fn initialize_usage_schema(connection: &Connection) -> Result<(), String> {
                 failure_body TEXT NOT NULL DEFAULT '',
                 provider TEXT NOT NULL DEFAULT '',
                 model TEXT NOT NULL DEFAULT '',
+                response_model TEXT NOT NULL DEFAULT '',
                 alias TEXT NOT NULL DEFAULT '',
                 reasoning_effort TEXT NOT NULL DEFAULT '',
                 service_tier TEXT NOT NULL DEFAULT '',
@@ -1303,6 +1315,7 @@ fn initialize_usage_schema(connection: &Connection) -> Result<(), String> {
         )
         .map_err(|error| format!("Failed to initialize SQLite usage records schema: {error}"))?;
     ensure_usage_failure_columns(connection)?;
+    ensure_usage_response_model_column(connection)?;
     connection
         .execute(
             "CREATE INDEX IF NOT EXISTS idx_usage_events_canceled_timestamp ON usage_events(canceled, timestamp_ms DESC)",
@@ -1312,6 +1325,20 @@ fn initialize_usage_schema(connection: &Connection) -> Result<(), String> {
     connection
         .pragma_update(None, "user_version", USAGE_DATABASE_SCHEMA_VERSION)
         .map_err(|error| format!("Failed to update SQLite usage records version: {error}"))
+}
+
+fn ensure_usage_response_model_column(connection: &Connection) -> Result<(), String> {
+    if !usage_table_columns(connection, "usage_events")?.contains("response_model") {
+        connection
+            .execute(
+                "ALTER TABLE usage_events ADD COLUMN response_model TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .map_err(|error| {
+                format!("Failed to add SQLite usage record response_model field: {error}")
+            })?;
+    }
+    Ok(())
 }
 
 fn ensure_usage_failure_columns(connection: &Connection) -> Result<(), String> {
@@ -2555,12 +2582,12 @@ fn insert_usage_records_in_transaction(
                 generate, cached_tokens, collector_source,
                 input_tokens, output_tokens, reasoning_tokens, cache_read_tokens,
                 cache_creation_tokens, total_tokens, canceled, failure_status,
-                failure_body, created_at
+                failure_body, created_at, response_model
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                 ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
                 ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
-                ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40
+                ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41
             )
             "#,
         )
@@ -2631,6 +2658,7 @@ fn insert_usage_records_in_transaction(
                     i64::from(record.failure_status),
                     record.failure_body,
                     created_at,
+                    record.response_model,
                 ])
                 .map_err(|error| format!("Failed to write SQLite usage records: {error}"))?,
         );
@@ -2746,8 +2774,16 @@ fn normalize_usage_record(value: Value, config: &GuiConfigFile) -> Result<UsageR
         failure_body,
         provider,
         api_group_key,
-        model: string_field(object, "model").unwrap_or_else(|| "unknown".to_string()),
-        alias: string_field(object, "alias").unwrap_or_default(),
+        model: string_field(object, "resolved_model")
+            .or_else(|| string_field(object, "resolvedModel"))
+            .or_else(|| string_field(object, "model"))
+            .unwrap_or_else(|| "unknown".to_string()),
+        response_model: string_field(object, "response_model")
+            .or_else(|| string_field(object, "responseModel")).unwrap_or_default(),
+        cost: None,
+        alias: string_field(object, "alias")
+            .or_else(|| string_field(object, "requested_model"))
+            .or_else(|| string_field(object, "requestedModel")).unwrap_or_default(),
         client_ip: string_field(object, "client_ip"),
         x_forwarded_for: string_field(object, "x_forwarded_for"),
         user_agent: string_field(object, "user_agent"),
@@ -3214,19 +3250,49 @@ fn cost_for_price(model: &str, service_tier: &str, tokens: &CostTokens, price: &
         long_output_multiplier,
     );
     let tier = service_tier.trim().to_ascii_lowercase();
-    let multiplier = if tokens.long_input > 0
-        && matches!(tier.as_str(), "priority" | "fast")
+    let multiplier = match tier.as_str() {
+        "flex" | "batch" => 0.5,
+        "priority" | "fast" => service_tier_multiplier(model),
+        _ => 1.0,
+    };
+    // A grouped total can contain both context lengths. Long-context overrides
+    // must not suppress the service-tier multiplier on its short requests.
+    let long_multiplier = if matches!(tier.as_str(), "priority" | "fast")
         && !is_model_family(model, "gpt-6")
     {
         1.0
     } else {
-        match tier.as_str() {
-            "flex" | "batch" => 0.5,
-            "priority" | "fast" => service_tier_multiplier(model),
-            _ => 1.0,
-        }
+        multiplier
     };
-    (short_cost + long_cost) * multiplier
+    short_cost * multiplier + long_cost * long_multiplier
+}
+
+fn usage_record_cost(record: &UsageRecord, prices: &HashMap<String, ModelPrice>) -> Option<UsageRecordCost> {
+    let (model, price) = resolve_model_price(&record.model, &record.alias, prices)?;
+    let input = record.tokens.input_tokens;
+    // Keep the same context buckets and tier selection as the aggregate pricing query.
+    let long = input > LONG_CONTEXT_INPUT_TOKEN_THRESHOLD
+        || (input > GROK_47_LONG_CONTEXT_INPUT_TOKEN_THRESHOLD && is_model_family(model, "grok-4.7"));
+    let tokens = CostTokens {
+        input,
+        output: record.tokens.output_tokens,
+        cache_read: record.tokens.cache_read_tokens,
+        cache_creation: record.tokens.cache_creation_tokens,
+        long_input: if long { input } else { 0 },
+        long_output: if long { record.tokens.output_tokens } else { 0 },
+        long_cache_read: if long { record.tokens.cache_read_tokens } else { 0 },
+        long_cache_creation: if long { record.tokens.cache_creation_tokens } else { 0 },
+    };
+    let identity = format!("{} {} {}", record.executor_type, record.provider, record.auth_type).to_ascii_lowercase();
+    let tier = if identity.contains("codex") || record.response_service_tier.trim().is_empty() {
+        &record.service_tier
+    } else {
+        &record.response_service_tier
+    };
+    Some(UsageRecordCost {
+        total: cost_for_price(model, tier, &tokens, &price),
+        pricing_model: price.model,
+    })
 }
 
 fn cost_for_token_segment(
@@ -4189,7 +4255,7 @@ fn load_usage_events(
         .map(from_sql_i64)
         .map_err(|error| format!("Failed to count SQLite usage events: {error}"))?
         .min(usize::MAX as u64) as usize;
-    let page_size = query.page_size.unwrap_or(50).clamp(20, 200);
+    let page_size = query.page_size.unwrap_or(50).clamp(1, 5_000);
     let total_pages = total.div_ceil(page_size).max(1);
     let page = query.page.unwrap_or(1).clamp(1, total_pages);
     let offset = (page - 1).saturating_mul(page_size);
@@ -4205,7 +4271,7 @@ fn load_usage_events(
             cached_tokens, collector_source,
             input_tokens, output_tokens, reasoning_tokens, cache_read_tokens,
             cache_creation_tokens, total_tokens, canceled, failure_status,
-            failure_body, id
+            failure_body, id, response_model
         FROM usage_events{}
         ORDER BY timestamp_ms DESC, id DESC
         LIMIT ? OFFSET ?
@@ -4223,8 +4289,10 @@ fn load_usage_events(
         .map_err(|error| format!("Failed to query SQLite usage events: {error}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("Failed to read SQLite usage events: {error}"))?;
+    let prices = load_model_prices(connection)?;
     for item in &mut items {
         item.source_display = usage_source_display(config, &item.provider, &item.source);
+        item.cost = usage_record_cost(item, &prices);
     }
     Ok(UsageEventPage {
         items,
@@ -4252,6 +4320,8 @@ fn usage_record_from_row(row: &Row<'_>) -> rusqlite::Result<UsageRecord> {
         provider: row.get(7)?,
         api_group_key: row.get(20)?,
         model: row.get(8)?,
+        response_model: row.get(37)?,
+        cost: None,
         alias: row.get(9)?,
         client_ip: row.get(21)?,
         x_forwarded_for: row.get(22)?,
@@ -5022,6 +5092,8 @@ mod tests {
             provider: "openai".to_string(),
             api_group_key: "hash".to_string(),
             model: model.to_string(),
+            response_model: String::new(),
+            cost: None,
             alias: String::new(),
             client_ip: None,
             x_forwarded_for: None,
@@ -5133,6 +5205,7 @@ mod tests {
             window_width: None,
             window_height: None,
             auth_dir: String::new(),
+            auth_dir_user_selected: false,
             api_keys: Vec::new(),
             api_access_remarks: Vec::new(),
             management_secret_key: "123456".to_string(),
@@ -5185,6 +5258,126 @@ mod tests {
         assert_eq!(record.tokens.total_tokens, 30);
         assert_eq!(record.tokens.cache_read_tokens, 5);
         assert!(!record.api_key_hash.is_empty());
+    }
+
+    #[test]
+    fn normalizes_response_model_when_present_and_defaults_when_missing() {
+        let config = GuiConfigFile::default();
+        for (response_model, expected) in [
+            (None, ""),
+            (Some(serde_json::json!(null)), ""),
+            (Some(serde_json::json!("  ")), ""),
+            (
+                Some(serde_json::json!(" gemini-3.8-flash ")),
+                "gemini-3.8-flash",
+            ),
+        ] {
+            let mut value = serde_json::json!({
+                "request_id": "response-model-normalization",
+                "model": "gemini-3.8-flash-high",
+                "alias": "client-alias"
+            });
+            if let Some(response_model) = response_model {
+                value["response_model"] = response_model;
+            }
+            let record = normalize_usage_record(value, &config).unwrap();
+
+            assert_eq!(record.response_model, expected);
+            assert_eq!(record.model, "gemini-3.8-flash-high");
+            assert_eq!(record.alias, "client-alias");
+            assert_eq!(
+                serde_json::to_value(&record).unwrap()["response_model"],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn response_model_json_roundtrip_accepts_legacy_records_without_the_field() {
+        let mut record = sample_record("response-json", "2026-07-17T20:30:00+08:00", "gpt-a");
+        record.response_model = "gpt-upstream".to_string();
+        let mut encoded = serde_json::to_value(&record).unwrap();
+        let decoded: UsageRecord = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded.response_model, "gpt-upstream");
+
+        encoded.as_object_mut().unwrap().remove("response_model");
+        let legacy: UsageRecord = serde_json::from_value(encoded).unwrap();
+        assert!(legacy.response_model.is_empty());
+        assert_eq!(legacy.model, "gpt-a");
+    }
+
+    #[test]
+    fn response_model_survives_sqlite_roundtrip() {
+        let root = test_root("response-model-roundtrip");
+        let mut connection = open_test_database(&root);
+        let mut record = sample_record(
+            "response-model-roundtrip",
+            "2026-07-17T20:30:00+08:00",
+            "gemini-alias",
+        );
+        record.response_model = "gemini-3.8-flash-high".to_string();
+        insert_usage_records(&mut connection, &[record]).unwrap();
+        let page = load_usage_events(
+            &connection,
+            &UsageQuery::default(),
+            &GuiConfigFile::default(),
+        )
+        .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].response_model, "gemini-3.8-flash-high");
+        assert_eq!(page.items[0].model, "gemini-alias");
+        assert_eq!(page.items[0].tokens.total_tokens, 30);
+        assert_eq!(
+            serde_json::to_value(&page.items[0]).unwrap()["response_model"],
+            "gemini-3.8-flash-high"
+        );
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn response_model_migration_preserves_v5_records_and_is_idempotent() {
+        let root = test_root("response-model-v6-migration");
+        let mut connection = open_test_database(&root);
+        let record = sample_record("legacy-v5", "2026-07-17T20:30:00+08:00", "gpt-a");
+        insert_usage_records(&mut connection, &[record]).unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE usage_events DROP COLUMN response_model; PRAGMA user_version = 5;",
+            )
+            .unwrap();
+        assert!(!usage_table_columns(&connection, "usage_events")
+            .unwrap()
+            .contains("response_model"));
+        drop(connection);
+
+        initialize_usage_storage_at(&root).unwrap();
+        let mut connection = open_usage_database_at(&root).unwrap();
+        let config = GuiConfigFile::default();
+        let legacy_page = load_usage_events(&connection, &UsageQuery::default(), &config).unwrap();
+        assert_eq!(legacy_page.total, 1);
+        assert!(legacy_page.items[0].response_model.is_empty());
+        assert_eq!(legacy_page.items[0].tokens.total_tokens, 30);
+
+        let mut record = sample_record("new-v6", "2026-07-17T20:31:00+08:00", "gpt-b");
+        record.response_model = "gpt-upstream".to_string();
+        insert_usage_records(&mut connection, &[record]).unwrap();
+        drop(connection);
+
+        initialize_usage_storage_at(&root).unwrap();
+        let connection = open_usage_database_at(&root).unwrap();
+        let page = load_usage_events(&connection, &UsageQuery::default(), &config).unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.items[0].response_model, "gpt-upstream");
+        assert!(page.items[1].response_model.is_empty());
+        assert_eq!(
+            connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            USAGE_DATABASE_SCHEMA_VERSION
+        );
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -5808,6 +6001,9 @@ mod tests {
         let user_version = connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap();
+        let response_model_column = usage_table_columns(&connection, "usage_events")
+            .unwrap()
+            .contains("response_model");
         let migrated = connection
             .query_row(
                 r#"
@@ -5841,6 +6037,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(user_version, USAGE_DATABASE_SCHEMA_VERSION);
+        assert!(response_model_column);
         assert_eq!(migrated.0, 1);
         assert_eq!(migrated.1, 30);
         assert_eq!(migrated.2, "legacy-hash");
@@ -6253,8 +6450,15 @@ mod tests {
         let inbox_dir = root.join(LEGACY_USAGE_INBOX_DIR);
         fs::create_dir_all(&events_dir).unwrap();
         fs::create_dir_all(&inbox_dir).unwrap();
-        let first = sample_record("request-1", "2026-07-17T20:30:00+08:00", "gpt-a");
-        let second = sample_record("request-2", "2026-07-17T20:31:00+08:00", "gpt-b");
+        let mut first = serde_json::to_value(sample_record(
+            "request-1",
+            "2026-07-17T20:30:00+08:00",
+            "gpt-a",
+        ))
+        .unwrap();
+        first.as_object_mut().unwrap().remove("response_model");
+        let mut second = sample_record("request-2", "2026-07-17T20:31:00+08:00", "gpt-b");
+        second.response_model = "gpt-b-upstream".to_string();
         fs::write(
             events_dir.join("2026-07-17-20.json"),
             serde_json::to_vec(&serde_json::json!({
@@ -6294,6 +6498,14 @@ mod tests {
 
         assert_eq!(count, 2);
         assert_eq!(marker, "2");
+        let page = load_usage_events(
+            &connection,
+            &UsageQuery::default(),
+            &GuiConfigFile::default(),
+        )
+        .unwrap();
+        assert_eq!(page.items[0].response_model, "gpt-b-upstream");
+        assert!(page.items[1].response_model.is_empty());
         drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
@@ -6332,6 +6544,13 @@ mod tests {
         assert_eq!(analysis.models[0].key, "gpt-5.6-terra");
         assert_eq!(events.total, 1);
         assert_eq!(events.items[0].id, "request-2");
+        let exported = load_usage_events(
+            &connection,
+            &UsageQuery { page_size: Some(5_000), ..query },
+            &config,
+        ).unwrap();
+        assert_eq!(exported.page_size, 5_000);
+        assert_eq!(exported.items.len(), 1);
         drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
@@ -6422,6 +6641,60 @@ mod tests {
         assert_eq!(overview.tps_sample_count, 4);
         drop(connection);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn response_model_accepts_manager_plus_field_names() {
+        let record = normalize_usage_record(serde_json::json!({
+            "request_id": "compatible-models", "requestedModel": "client-alias",
+            "resolvedModel": "gpt-6-sol", "model": "display-model",
+            "responseModel": " reported-model "
+        }), &GuiConfigFile::default()).unwrap();
+        assert_eq!(record.alias, "client-alias");
+        assert_eq!(record.model, "gpt-6-sol");
+        assert_eq!(record.response_model, "reported-model");
+    }
+
+    #[test]
+    fn request_cost_matches_aggregate_and_recalculates_current_prices() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialize_usage_schema(&connection).unwrap();
+        let mut records = Vec::new();
+        for (index, model) in ["gpt-6-sol", "gpt-5.6-terra", "xai/grok-4.7"].iter().enumerate() {
+            for input in [200_000, 250_000, 300_000] {
+                let mut record = sample_record(&format!("{index}-{input}"), "2026-10-04T00:00:00Z", model);
+                record.provider = if index < 2 { "codex" } else { "openai" }.into();
+                record.service_tier = "fast".into();
+                record.response_service_tier = "flex".into();
+                record.tokens.input_tokens = input;
+                record.tokens.output_tokens = 500;
+                record.tokens.reasoning_tokens = 100;
+                record.tokens.cache_read_tokens = 100_000;
+                record.tokens.cache_creation_tokens = 1_000;
+                record.tokens.total_tokens = input + 500;
+                record.response_model = "unpriced-response-must-not-change-billing".into();
+                records.push(record);
+            }
+        }
+        records.push(sample_record("unknown-price", "2026-10-04T00:00:00Z", "unpriced-model"));
+        insert_usage_records(&mut connection, &records).unwrap();
+        let query = UsageQuery::default();
+        let page = load_usage_events(&connection, &query, &GuiConfigFile::default()).unwrap();
+        let (aggregate, priced) = load_estimated_cost(&connection, &build_usage_filter(&query)).unwrap();
+        let total: f64 = page.items.iter().filter_map(|r| r.cost.as_ref().map(|c| c.total)).sum();
+        assert!((aggregate - total).abs() < 1e-9);
+        assert_eq!(priced, 9);
+        assert!(page.items.iter().find(|r| r.id == "unknown-price").unwrap().cost.is_none());
+
+        let free_price = ModelPrice { model: "unpriced-model".into(), prompt_configured: true,
+            completion_configured: true, cache_read_configured: true, cache_creation_configured: true,
+            source: "manual".into(), ..ModelPrice::default() };
+        upsert_model_price(&connection, &free_price).unwrap();
+        let updated = load_usage_events(&connection, &query, &GuiConfigFile::default()).unwrap();
+        let free = updated.items.iter().find(|r| r.id == "unknown-price").unwrap();
+        assert_eq!(free.cost.as_ref().unwrap().total, 0.0);
+        let imported: UsageRecord = serde_json::from_value(serde_json::to_value(free).unwrap()).unwrap();
+        assert!(imported.cost.is_none(), "Imported estimates must be recomputed");
     }
 
     #[test]
