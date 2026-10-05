@@ -45,12 +45,12 @@ Every functional change must update **Unreleased** in the same commit or pull re
 ### Validation
 
 - TypeScript check and optimized Windows x64 build passed.
-- Frontend suite: 702 passed before the final additional null-map regression; the new regression and related updater tests also passed.
+- Frontend suite: 703 passed, 32 isolated-core tests/hooks skipped in each GitHub Windows build; isolated-core integrations were run separately locally as described below.
 - Real core `8.0.15`: all 28 management/provider integration tests passed across the initial run and targeted retry after the null-map fix.
 - Routing integration passed: priority selection, active binding retention, failover, sliding idle timeout, and reselection after expiry.
 - Dashboard browser test passed: summaries, filters, scoped refresh, priority validation/persistence, affinity saving, layouts, and narrow widths.
 - Rust suite: 740 initially passed, 8 ignored. Four process-start timing failures passed when rerun serially; the remaining cleanup test passed after the Windows lock retry fix.
-- Publication and downloadable asset status are recorded by the [release workflow](https://github.com/appliedi/EasyCLIProxyAPI-Custom/actions/workflows/release.yml); local build validation alone does not imply publication succeeded.
+- [Release workflow 37331204556](https://github.com/appliedi/EasyCLIProxyAPI-Custom/actions/runs/37331204556) passed for Windows x64 and ARM64 and published [v0.4.0](https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/tag/v0.4.0). The live latest-update manifest was fetched and both asset URLs, byte sizes, and SHA-256 values matched GitHub's uploaded release asset metadata.
 
 ## 0.3.6-custom — 2026-10-05
 
