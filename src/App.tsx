@@ -30,6 +30,7 @@ import { KernelPage } from './pages/Kernel';
 import { VersionManagementPage } from './pages/VersionManagementPage';
 import { OAuthManagementPage } from './pages/ManagementPages';
 import { QuotaPage } from './pages/QuotaPage';
+import { SubscriptionUsagePage } from './pages/SubscriptionUsagePage';
 import { AgentsPage } from './pages/AgentsPage';
 import { EasyModePage } from './pages/EasyModePage';
 import { UsageRecordsPage } from './pages/UsageRecordsPage';
@@ -68,6 +69,12 @@ const pages = [
     labelKey: 'app.nav.oauth',
     icon: LogIn,
     component: OAuthManagementPage,
+  },
+  {
+    id: 'subscription-usage',
+    labelKey: 'app.nav.subscriptionUsage',
+    icon: Gauge,
+    component: SubscriptionUsagePage,
   },
   {
     id: 'quota',

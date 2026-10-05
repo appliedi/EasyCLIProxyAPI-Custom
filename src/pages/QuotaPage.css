@@ -20,7 +20,7 @@
   gap: 12px;
   align-items: stretch;
 }
-.quota-page .real-quota-card:not(.quota-ledger-row) {
+.quota-page .real-quota-card {
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -31,18 +31,18 @@
   background: var(--bg-card);
   box-shadow: 0 1px 2px rgb(40 45 55 / 3%);
 }
-.quota-page .real-quota-card:not(.quota-ledger-row):hover { border-color: #b7c9ed; box-shadow: 0 3px 12px rgb(55 95 180 / 8%); }
-.quota-page .real-quota-card:not(.quota-ledger-row) .real-quota-card-header {
+.quota-page .real-quota-card:hover { border-color: #b7c9ed; box-shadow: 0 3px 12px rgb(55 95 180 / 8%); }
+.quota-page .real-quota-card-header {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
 }
-.quota-page .real-quota-card:not(.quota-ledger-row) .real-quota-card-header .quota-identity { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.quota-page .real-quota-card-header .quota-identity { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .quota-page .quota-identity > div { display: grid; gap: 3px; min-width: 0; }
 .quota-page .quota-account-icon { width: 26px; height: 26px; flex: 0 0 auto; }
-.quota-page .real-quota-card:not(.quota-ledger-row) .real-quota-card-header strong { color: var(--theme-2d2a26); font-size: var(--font-size-body); }
-.quota-page .real-quota-card:not(.quota-ledger-row) .real-quota-card-header span { font-size: var(--font-size-meta); }
+.quota-page .real-quota-card-header strong { color: var(--theme-2d2a26); font-size: var(--font-size-body); }
+.quota-page .real-quota-card-header span { font-size: var(--font-size-meta); }
 .quota-page .quota-plan { grid-column: 1; grid-row: 2; }
 .quota-page .quota-status { grid-column: 2; grid-row: 2; justify-items: end; }
 .quota-page .quota-plan, .quota-page .quota-status { display: grid; gap: 3px; min-width: 0; }
@@ -66,106 +66,3 @@
 .quota-page .quota-card-message, .quota-page .quota-card-error { min-height: 36px; flex-wrap: wrap; }
 .quota-page .quota-card-error > span { display: grid; gap: 4px; min-width: 0; }
 .quota-page .quota-card-error small { overflow-wrap: anywhere; font-size: 11px; }
-
-.quota-toolbar, .quota-provider-filters, .quota-layout-control,
-.quota-summary-heading, .quota-summary-heading strong {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.quota-toolbar { justify-content: space-between; flex-wrap: wrap; }
-.quota-provider-filters { flex-wrap: wrap; gap: 4px; }
-.quota-provider-filters button {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-.quota-provider-filters button[aria-pressed="true"] {
-  background: var(--bg-secondary);
-  border-color: var(--border-color);
-  color: var(--text-primary);
-}
-.quota-provider-filters button:hover { background: var(--bg-secondary); }
-.quota-provider-filters button span { font-size: 12px; color: var(--text-secondary); }
-.quota-provider-filters img, .quota-summary-heading img { width: 21px; height: 21px; object-fit: contain; }
-.quota-layout-control { font-size: 13px; color: var(--text-secondary); }
-.quota-layout-control select, .quota-window-select {
-  min-width: 0;
-  max-width: 100%;
-  padding: 7px 10px;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  font: inherit;
-}
-.quota-summary-hint { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.6; }
-.quota-account-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.quota-account-search {
-  flex: 1 1 240px;
-  min-width: 0;
-  padding: 9px 12px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  font: inherit;
-}
-.quota-account-search::placeholder { color: var(--text-secondary); }
-.quota-account-toolbar .quota-layout-control { flex-wrap: wrap; max-width: 100%; }
-.quota-fetched-at { font-size: 11px; color: var(--text-secondary); line-height: 1.5; }
-.account-routing-panel > summary { cursor: pointer; color: var(--text-primary); font-weight: 600; }
-.account-routing-panel > summary > span { display: inline-block; margin-left: 16px; color: var(--text-secondary); font-size: 12px; font-weight: 400; }
-.account-routing-panel p { color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
-.account-routing-panel fieldset { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; padding: 0; margin: 16px 0; border: 0; min-width: 0; }
-.quota-affinity-toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; }
-.account-routing-panel .quota-layout-control { flex-wrap: wrap; }
-.account-routing-panel input:not([type=checkbox]) { padding: 7px 10px; width: 100px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-secondary); color: var(--text-primary); }
-.account-routing-panel .quota-routing-error { color: var(--danger-color); overflow-wrap: anywhere; }
-.quota-overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 12px; }
-.quota-provider-summary { display: flex; flex-direction: column; align-items: stretch; gap: 13px; min-width: 0; }
-.quota-summary-heading { justify-content: space-between; flex-wrap: wrap; }
-.quota-summary-heading > span, .quota-provider-summary small, .quota-summary-placeholder {
-  color: var(--text-secondary); font-size: 12px;
-}
-.quota-window-select { font-size: 13px; }
-.quota-summary-placeholder { padding: 8px 0; }
-.quota-summary-total { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.quota-summary-total strong { color: var(--text-primary); font-size: 32px; font-weight: 650; letter-spacing: -1px; }
-.quota-summary-total > span { color: var(--text-secondary); font-size: 13px; }
-.quota-summary-segments { display: flex; gap: 4px; }
-.quota-summary-segments > div { flex: 1; min-width: 0; height: 6px; }
-.quota-page .real-quota-track.quota-tone-healthy span { background: var(--success-color); }
-.real-quota-track.quota-tone-medium span { background: var(--warning-color); }
-.real-quota-track.quota-tone-low span { background: var(--danger-color); }
-[data-theme="dark"] .quota-page .quota-tone-medium span { background: #fbbf24; }
-[data-theme="dark"] .quota-icon-xai,
-[data-theme="dark"] .quota-icon-kimi,
-[data-theme="dark"] .quota-icon-devin { filter: invert(1); }
-.real-quota-track.quota-tone-unknown { background: repeating-linear-gradient(120deg, var(--border-color) 0 3px, transparent 3px 6px); }
-.quota-page .quota-layout-ledger .real-quota-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
-.quota-ledger-row.panel { border-radius: 0; border: 0; border-bottom: 1px solid var(--border-color); box-shadow: none; background: transparent; padding: 20px 0; }
-.quota-ledger-row .quota-row-list { grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr)); gap: 20px; }
-.quota-ledger-row .real-quota-track { height: 6px; }
-.quota-ledger-row .real-quota-row { align-content: start; }
-.quota-ledger-row .real-quota-row small { line-height: 1.5; }
-@media (min-width: 1150px) {
-  .quota-ledger-row { grid-template-columns: minmax(190px, 0.85fr) minmax(0, 3fr); column-gap: 24px; }
-  .quota-ledger-row .real-quota-card-header { display: contents; }
-  .quota-ledger-row .real-quota-card-header > div:first-child { grid-column: 1; grid-row: 1; align-content: start; }
-  .quota-ledger-row .quota-card-actions { grid-column: 1; grid-row: 2; flex-wrap: wrap; justify-content: flex-start; }
-  .quota-ledger-row .quota-row-list { grid-column: 2; grid-row: 1 / span 2; }
-  .quota-ledger-row > :not(.real-quota-card-header):not(.quota-row-list) { grid-column: 2; }
-}
-@media (max-width: 650px) {
-  .quota-ledger-row .real-quota-card-header { align-items: flex-start; flex-direction: column; }
-  .quota-provider-filters button { padding: 8px; }
-}
-
-[data-theme="dark"] .quota-page .real-quota-track { background: var(--border-color); }

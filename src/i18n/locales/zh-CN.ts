@@ -346,6 +346,7 @@ export const zhCN = {
   'app.nav.api': 'API 接入',
   'app.nav.authFiles': '凭证文件',
   'app.nav.quota': '额度查询',
+  'app.nav.subscriptionUsage': '订阅用量',
   'app.nav.usageRecords': '使用记录',
   'app.nav.agents': '智能体配置',
   'app.nav.lockedHint': '请先在首页启动内核服务',

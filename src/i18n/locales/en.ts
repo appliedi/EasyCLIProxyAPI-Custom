@@ -347,6 +347,7 @@ export const en: Record<MessageKey, string> = {
   'app.nav.api': 'API Access',
   'app.nav.authFiles': 'Auth Files',
   'app.nav.quota': 'Quota Lookup',
+  'app.nav.subscriptionUsage': 'Subscription Usage',
   'app.nav.usageRecords': 'Usage',
   'app.nav.agents': 'Agent Configuration',
   'app.nav.lockedHint': 'Please start the core service on Home first',

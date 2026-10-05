@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nProvider } from '../src/i18n';
-import { ProviderQuotaSummary, QuotaCard } from '../src/pages/QuotaPage';
+import { ProviderQuotaSummary, QuotaCard } from '../src/pages/SubscriptionUsagePage';
 import { quotaRowsFor, formatQuotaTimestamp } from '../src/services/quotaService';
 import type { QuotaState } from '../src/services/quotaService';
 

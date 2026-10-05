@@ -398,6 +398,7 @@ export const jaOverrides = {
   'app.nav.api': 'API 接続',
   'app.nav.authFiles': '認証ファイル',
   'app.nav.quota': 'クォータ照会',
+  'app.nav.subscriptionUsage': 'サブスクリプション使用状況',
   'app.nav.usageRecords': '使用履歴',
   'app.nav.agents': 'エージェント設定',
   'app.nav.lockedHint': 'まずホームでコアサービスを起動してください',

@@ -23,7 +23,7 @@ const fs = require('node:fs');
     page.setDefaultTimeout(15000);
     console.log('Opening quota dashboard');
     await page.goto(base);
-    await page.getByRole('button', { name: 'Quota Lookup', exact: true }).click();
+    await page.getByRole('button', { name: 'Subscription Usage', exact: true }).click();
     await page.locator('.quota-provider-summary').first().waitFor();
     console.log('Dashboard loaded');
     assert.equal(await page.locator('.quota-provider-summary').count(), 6);
@@ -39,6 +39,16 @@ const fs = require('node:fs');
     await claude.getByRole('combobox').selectOption({ label: '5-hour window' });
     assert.match(await claude.innerText(), /76%/);
     await claude.getByRole('combobox').selectOption({ label: '7-day window' });
+
+    // The upstream lookup remains separate and shares fetched quota data.
+    await page.getByRole('button', { name: 'Quota Lookup', exact: true }).click();
+    await page.locator('.quota-page .real-quota-card').first().waitFor();
+    assert.equal(await page.locator('.quota-provider-summary').count(), 0);
+    assert.equal(await page.locator('.account-routing-panel').count(), 0);
+    assert.ok(await page.locator('.quota-page .quota-row-list').count() >= 10);
+    await page.getByRole('button', { name: 'Subscription Usage', exact: true }).click();
+    await page.locator('.quota-provider-summary').first().waitFor();
+    assert.equal(await page.locator('.quota-ledger-row').count(), 12);
 
     const filters = page.getByRole('group', { name: 'Filter by provider' });
     await filters.getByRole('button', { name: /Codex/ }).click();
@@ -74,7 +84,7 @@ const fs = require('node:fs');
     await page.getByLabel('View', { exact: true }).selectOption('cards');
     assert.equal(await page.locator('.quota-ledger-row').count(), 0);
     await page.reload();
-    await page.getByRole('button', { name: 'Quota Lookup', exact: true }).click();
+    await page.getByRole('button', { name: 'Subscription Usage', exact: true }).click();
     await page.locator('.quota-provider-summary').first().waitFor();
     assert.equal(await page.getByLabel('View', { exact: true }).inputValue(), 'cards');
     await page.getByLabel('View', { exact: true }).selectOption('ledger');
@@ -124,7 +134,7 @@ const fs = require('node:fs');
     }
     for (const width of [1024, 640, 390]) {
       await page.setViewportSize({ width, height: 850 });
-      const overflow = await page.locator('.quota-page').evaluate((element) => element.scrollWidth > element.clientWidth + 1);
+      const overflow = await page.locator('.subscription-usage-page').evaluate((element) => element.scrollWidth > element.clientWidth + 1);
       assert.equal(overflow, false, `Quota page overflows at ${width}px`);
     }
     await page.screenshot({ path: path.join(output, 'mobile.png'), fullPage: true });

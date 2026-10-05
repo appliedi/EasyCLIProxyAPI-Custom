@@ -6,6 +6,23 @@ Every functional change must update **Unreleased** in the same commit or pull re
 
 ## Unreleased
 
+No changes yet.
+
+## 0.4.1 — 2026-10-05
+
+### Navigation
+
+- Moved the custom dashboard to its own **Subscription Usage** sidebar item and page title. The upstream **Quota Lookup** page remains available separately.
+- Isolated the custom page and styles in `SubscriptionUsagePage.tsx` and `SubscriptionUsagePage.css`, reducing future merge conflicts in upstream quota files.
+- Both pages continue to share quota cache data; account priorities, affinity controls, filters, summaries, and ledger/card views remain on Subscription Usage.
+- Updated English, Chinese, and Japanese labels and the customization map.
+
+### Validation
+
+- TypeScript and all 703 frontend tests passed (32 isolated-core tests/hooks skipped).
+- The dashboard browser regression passed, including navigation between both pages, cache reuse, priority editing, affinity settings, scoped refresh, layout persistence, and responsive layout.
+- No proxy core or routing logic changed; the bundled core remains 8.0.15.
+
 ### Maintenance
 
 - Added this changelog and the [upstream merge guide](docs/upstream-merges.md), including a customization map, merge history, and validation requirements.

@@ -4,7 +4,7 @@ See the [changelog](CHANGELOG.md), [upstream merge guide](docs/upstream-merges.m
 
 This is the independently maintained [appliedi/EasyCLIProxyAPI-Custom](https://github.com/appliedi/EasyCLIProxyAPI-Custom) distribution, based on [router-for-me/EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI). The upstream MIT license and attribution are preserved.
 
-Version **0.4.0** incorporates upstream desktop **0.3.22** and bundles CLIProxyAPI **8.0.15**, while retaining our provider quota summaries, account ledger, priority editor, and session-affinity controls. Desktop updates and the model catalog come from this repository. Core updates continue to come from the official CLIProxyAPI repository.
+Version **0.4.1** incorporates upstream desktop **0.3.22** and bundles CLIProxyAPI **8.0.15**, with a dedicated **Subscription Usage** sidebar item for our provider quota summaries, account ledger, priority editor, and session-affinity controls. Upstream **Quota Lookup** remains a separate page. Desktop updates and the model catalog come from this repository. Core updates continue to come from the official CLIProxyAPI repository.
 
 Download Windows builds from [our releases](https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/latest). The first migration from the old custom 0.3.6 build must be manual because that build still checks the upstream desktop update feed. Close the old app and stop its core, back up the portable folder, then extract the new package over it, preserving `config.toml`, `oauth/`, and `cpa-core/config.yaml`.
 

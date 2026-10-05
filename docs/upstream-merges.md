@@ -18,21 +18,21 @@ Use separate refs for upstream releases: our `v*` tags trigger our releases and 
 
 | Field | Value |
 | --- | --- |
-| Custom release | `0.4.0` |
+| Custom release | `0.4.1` |
 | Upstream desktop release | `v0.3.22` |
 | Upstream commit | `56a88ccb6f9128793a810b2bb17a474dade2939b` |
 | Core version | `8.0.15` |
 | Custom pre-merge checkpoint | `5d5bab29e68145dc1d2f731940089476f8c0f691` |
 | Merge commit | `dbd0a11de81739168c2e3355ac57ed4275d9202f` |
 
-The merge had conflicts in `src/pages/QuotaPage.tsx`, `src/pages/QuotaPage.css`, `src/mocks/browserMockRuntime.ts`, and `tests/quotaRendering.test.tsx`. We combined the dashboard with upstream reset/expiry behavior, preserved ledger layout, and adopted the expanded upstream quota mocks. Do not resolve future conflicts by replacing any of these files wholesale.
+The merge had conflicts in `src/pages/QuotaPage.tsx`, `src/pages/QuotaPage.css`, `src/mocks/browserMockRuntime.ts`, and `tests/quotaRendering.test.tsx`. We combined the dashboard with upstream reset/expiry behavior, preserved ledger layout, and adopted the expanded upstream quota mocks. In 0.4.1, the custom dashboard moved to `SubscriptionUsagePage.tsx`/`.css`; `QuotaPage.tsx`/`.css` now match this upstream base exactly. Preserve that separation during future merges.
 
 ## Customization map
 
 | Area | Files to inspect | Behavior to preserve |
 | --- | --- | --- |
-| Dashboard | `src/pages/QuotaPage.tsx`, `src/pages/QuotaPage.css`, `src/services/quotaSummary.ts` | Filters, reporting coverage, independent quota windows, ledger/cards, search/sort, scoped refresh; unavailable quota is not zero |
-| Account routing | `src/components/AccountRoutingPanel.tsx`, quota page, upstream auth-file settings services | Integer priority editing; save only affinity fields; retain routing strategy and other configuration |
+| Dashboard | `src/pages/SubscriptionUsagePage.tsx`, `src/pages/SubscriptionUsagePage.css`, `src/services/quotaSummary.ts`, `src/App.tsx` | Filters, reporting coverage, independent quota windows, ledger/cards, search/sort, scoped refresh; unavailable quota is not zero |
+| Account routing | `src/components/AccountRoutingPanel.tsx`, subscription usage page, upstream auth-file settings services | Integer priority editing; save only affinity fields; retain routing strategy and other configuration |
 | Translations | `src/i18n/locales/en.ts`, `src/i18n/locales/zh-CN.ts`, `src/i18n/ja.ts` | `quota.routing.*` and custom dashboard strings; traditional Chinese derives from existing translation handling |
 | Release ownership | `src-tauri/src/main.rs`, `src-tauri/src/app_update.rs`, `src/pages/VersionManagementPage.tsx`, `scripts/manifest.mjs`, browser mock | Custom desktop URLs, repository validation and catalog source; official core URLs |
 | Builds | `.github/workflows/release.yml`, `build.ps1`, `build.sh`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json` | Independent version, no inherited desktop mirror, both Windows architectures, checksummed manifests |
