@@ -1,6 +1,8 @@
 import { applyTemplateChanges, readTemplatePath, sameTemplateValue, type TemplateConfigChange } from '../services/templateConfig';
 import { createPluginMock } from './pluginMock';
 import { createQuotaMock, createQuotaMockFiles } from './quotaMock';
+import { createSubscriptionValueMock } from './subscriptionValueMock';
+import type { AccountSeed, FeeChange } from '../services/subscriptionValue';
 
 export type BrowserMockScenario = 'running' | 'stopped' | 'empty' | 'error';
 export type BrowserMockMode = BrowserMockScenario | 'off';
@@ -791,6 +793,7 @@ const ERROR_SCENARIO_COMMANDS = new Set([
   'check_latest_core',
   'management_request',
   'get_usage_overview',
+  'get_subscription_value',
   'get_core_models',
   'core_health_probe',
   'get_agent_config_statuses',
@@ -802,6 +805,7 @@ export function createBrowserMockRuntime(
   delayMs = 0,
 ): BrowserMockRuntime {
   const state = createState(scenario);
+  const subscriptionValue = createSubscriptionValueMock(scenario === 'empty');
   if (scenario === 'empty') {
     state.usageEvents = [];
     state.usagePrices = [];
@@ -1115,6 +1119,8 @@ export function createBrowserMockRuntime(
         }));
         return { rows, totalCost: rows.length ? 3.63 : 0, totalRequests: rows.length ? 278 : 0, pricedRequests: rows.length ? 278 : 0, savedPrices: state.usagePrices.length };
       }
+      case 'get_subscription_value': return subscriptionValue.get(readString(payload.month), payload.accounts as AccountSeed[] | null);
+      case 'save_subscription_fees': subscriptionValue.save(readString(payload.month), payload.fees as FeeChange[]); return null;
       case 'get_usage_storage_settings': return clone(state.usageStorage);
       case 'save_usage_storage_settings': {
         state.usageStorage.maxDatabaseSizeMb = readNumber(payload.maxDatabaseSizeMb);

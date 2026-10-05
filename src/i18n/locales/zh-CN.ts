@@ -1,11 +1,13 @@
 import { easyModeZhCN } from '../easyMode';
 import { homeZhCN } from '../home';
 import { authFileListZhCN } from '../authFileList';
+import { subscriptionValueZhCN } from '../subscriptionValue';
 
 export const zhCN = {
   'app.nav.plugins': '插件',
   ...homeZhCN,
   ...authFileListZhCN,
+  ...subscriptionValueZhCN,
   'apiAccess.entries.addKey': '添加 API Key',
   'apiAccess.entries.addProvider': '添加服务',
   'apiAccess.entries.editKey': '编辑 API Key',

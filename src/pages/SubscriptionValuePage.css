@@ -1,0 +1,76 @@
+.subscription-value-page { gap: 18px; }
+.subscription-value-page h2 { font-size: 15px; margin: 0; }
+.subscription-value-page .management-header p { color: var(--text-secondary); margin: 8px 0 0; }
+.subscription-value-page .sv-toolbar,.subscription-value-page .sv-actions,.subscription-value-page .sv-section-heading { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.subscription-value-page .sv-toolbar,.subscription-value-page .sv-section-heading { justify-content: space-between; }
+.subscription-value-page .sv-toolbar label { display: flex; align-items: center; gap: 10px; color: var(--text-secondary); font-size: 13px; }
+.subscription-value-page input { border: 1px solid var(--border-color); border-radius: 7px; background: var(--bg-secondary); color: var(--text-primary); padding: 8px 10px; font: inherit; min-width: 0; }
+.subscription-value-page small,.subscription-value-page .sv-period-note { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.subscription-value-page .sv-period-note { margin-bottom: -6px; }
+.subscription-value-page .sv-stats { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 14px; }
+.subscription-value-page .sv-stat { display: grid; align-content: start; gap: 8px; padding: 20px; }
+.subscription-value-page .sv-stat:first-child { border-top: 3px solid var(--primary-color); padding-top: 18px; }
+.subscription-value-page .sv-stat>span { color: var(--text-secondary); font-size: 13px; }
+.subscription-value-page .sv-stat>strong { font-size: clamp(24px,2.4vw,34px); line-height: 1.2; letter-spacing: -.8px; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.subscription-value-page .sv-ledger { border: 1px solid var(--border-color); border-radius: 12px; overflow: hidden; background: var(--bg-primary); }
+.subscription-value-page .sv-ledger-head,.subscription-value-page .sv-account { display: grid; grid-template-columns: minmax(0,1.6fr) minmax(100px,1fr) minmax(80px,.8fr) minmax(90px,.8fr); gap: 16px; align-items: center; padding: 14px 18px; }
+.subscription-value-page .sv-ledger-head { background: var(--bg-secondary); color: var(--text-secondary); font-size: 12px; }
+.subscription-value-page .sv-ledger-head>span:not(:first-child) { text-align: right; }
+.subscription-value-page .sv-account { border: 0; border-top: 1px solid var(--border-color); width: 100%; background: transparent; color: var(--text-primary); text-align: left; cursor: pointer; font: inherit; padding-top: 18px; padding-bottom: 18px; }
+.subscription-value-page .sv-account:hover { background: var(--bg-secondary); }
+.subscription-value-page .sv-account[aria-pressed=true] { background: color-mix(in srgb, var(--primary-color) 10%, var(--bg-primary)); box-shadow: inset 3px 0 var(--primary-color); }
+.subscription-value-page .sv-account small { display: block; margin-top: 4px; overflow-wrap: anywhere; }
+.subscription-value-page .sv-identity { min-width: 0; overflow-wrap: anywhere; }
+.subscription-value-page .sv-identity strong { font-weight: 600; font-size: 14px; }
+.subscription-value-page .sv-amount,.subscription-value-page .sv-fee,.subscription-value-page .sv-ratio { text-align: right; font-size: 14px; font-variant-numeric: tabular-nums; }
+.subscription-value-page .sv-amount b,.subscription-value-page .sv-ratio b { font-weight: 650; }
+.subscription-value-page .sv-share { display: block; background: var(--border-color); height: 3px; margin-top: 7px; border-radius: 4px; }
+.subscription-value-page .sv-share>span { display: block; height: 100%; border-radius: inherit; background: var(--primary-color); }
+.subscription-value-page .sv-account .sv-mobile-label { display: none; }
+.subscription-value-page .sv-below { color: var(--warning-color); }
+.subscription-value-page .sv-detail-heading h2 { overflow-wrap: anywhere; min-width: 0; }
+.subscription-value-page .sv-detail-grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.15fr); gap: 16px; }
+.subscription-value-page .sv-detail-grid>.panel { min-width: 0; padding: 20px; }
+.subscription-value-page .sv-detail-total { display: block; font-size: 26px; font-variant-numeric: tabular-nums; margin-top: 12px; }
+.subscription-value-page .sv-trend p { margin: 3px 0 0; color: var(--text-secondary); font-size: 12px; }
+.subscription-value-page .sv-chart { display: block; width: 100%; height: auto; margin-top: 12px; }
+.subscription-value-page .sv-chart text { fill: var(--text-secondary); font-size: 11px; }
+.subscription-value-page .sv-grid { stroke: var(--border-color); stroke-width: 1; }
+.subscription-value-page .sv-area { fill: color-mix(in srgb, var(--primary-color) 10%, transparent); }
+.subscription-value-page .sv-cost-line { stroke: var(--primary-color); stroke-width: 2.5; fill: none; }
+.subscription-value-page .sv-fee-line { stroke: var(--text-secondary); stroke-dasharray: 4 4; stroke-width: 1; }
+.subscription-value-page .sv-legend { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 18px; color: var(--text-secondary); font-size: 11px; }
+.subscription-value-page .sv-legend span { display: flex; gap: 5px; align-items: center; }
+.subscription-value-page .sv-legend i { width: 15px; border-top: 2px solid var(--primary-color); }
+.subscription-value-page .sv-legend .sv-fee-key { border-top: 1px dashed var(--text-secondary); }
+.subscription-value-page .sv-models table { border-collapse: collapse; width: 100%; table-layout: fixed; margin: 12px 0; font-size: 13px; }
+.subscription-value-page .sv-models th { color: var(--text-secondary); font-weight: 400; font-size: 12px; padding-bottom: 10px; }
+.subscription-value-page .sv-models th:first-child { width: 48%; }
+.subscription-value-page .sv-models th,.subscription-value-page .sv-models td { text-align: right; overflow-wrap: anywhere; }
+.subscription-value-page .sv-models th:first-child,.subscription-value-page .sv-models td:first-child { text-align: left; padding-right: 8px; }
+.subscription-value-page .sv-models td { padding: 10px 0; border-top: 1px solid var(--border-color); vertical-align: top; font-variant-numeric: tabular-nums; }
+.subscription-value-page .sv-models td small { display: block; font-size: 11px; margin-top: 3px; }
+.subscription-value-page .sv-token-detail { font-size: 11px; color: var(--text-secondary); margin-top: 8px; }
+.subscription-value-page summary { cursor: pointer; }
+.subscription-value-page .sv-footer { font-size: 12px; line-height: 1.6; color: var(--text-secondary); }
+.subscription-value-page .sv-footer p { margin: 0 0 8px; }
+.subscription-value-page .sv-footer details p { margin-top: 10px; max-width: 900px; }
+.subscription-value-page .sv-fee-editor h2 { margin-bottom: 8px; }
+.subscription-value-page .sv-fee-editor p { font-size: 13px; color: var(--text-secondary); }
+.subscription-value-page .sv-fee-fields { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(240px,100%),1fr)); gap: 16px; margin: 18px 0; }
+.subscription-value-page .sv-fee-fields label { display: grid; gap: 6px; overflow-wrap: anywhere; font-size: 12px; color: var(--text-secondary); }
+.subscription-value-page .sv-fee-fields input { width: 100%; font-size: 14px; }
+.subscription-value-page .sv-notice,.subscription-value-page .sv-empty { font-size: 13px; color: var(--text-secondary); margin: 0; }
+.subscription-value-page .sv-error { color: var(--danger-color)!important; font-size: 13px; overflow-wrap: anywhere; }
+@media(max-width:1100px) { .subscription-value-page .sv-detail-grid { grid-template-columns: 1fr; } }
+@media(max-width:760px) {
+  .subscription-value-page .sv-stats { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .subscription-value-page .sv-stat:first-child { grid-column: 1/-1; }
+  .subscription-value-page .sv-stat { padding: 16px; }
+  .subscription-value-page .sv-ledger-head { display: none; }
+  .subscription-value-page .sv-account { grid-template-columns: repeat(2,minmax(0,1fr)); padding: 16px; gap: 14px; }
+  .subscription-value-page .sv-account:first-of-type { border-top: 0; }
+  .subscription-value-page .sv-account .sv-mobile-label { display: block; font-size: 11px; margin: 0 0 4px; }
+  .subscription-value-page .sv-fee { text-align: left; }
+  .subscription-value-page .sv-detail-grid>.panel { padding: 16px; }
+}

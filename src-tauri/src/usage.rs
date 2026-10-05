@@ -1,5 +1,6 @@
 mod resp;
 mod token;
+pub(crate) mod subscription_value;
 
 #[cfg(target_os = "macos")]
 use super::executable_dir;

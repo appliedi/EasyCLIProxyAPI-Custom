@@ -32,6 +32,7 @@ The merge had conflicts in `src/pages/QuotaPage.tsx`, `src/pages/QuotaPage.css`,
 | Area | Files to inspect | Behavior to preserve |
 | --- | --- | --- |
 | Dashboard | `src/pages/SubscriptionUsagePage.tsx`, `src/pages/SubscriptionUsagePage.css`, `src/services/quotaSummary.ts`, `src/App.tsx` | Filters, reporting coverage, independent quota windows, ledger/cards, search/sort, scoped refresh; unavailable quota is not zero |
+| Subscription value | `src/pages/SubscriptionValuePage.tsx`/`.css`, `src/services/subscriptionValue.ts`, `src-tauri/src/usage/subscription_value.rs` | Separate monthly account/model value page, pricing completeness, provider-scoped attribution, effective-dated fees. `usage.rs` only declares the child module; `main.rs` registers two commands. Keep the custom SQLite tables and current-catalog estimate semantics when merging pricing changes. |
 | Account routing | `src/components/AccountRoutingPanel.tsx`, subscription usage page, upstream auth-file settings services | Integer priority editing; save only affinity fields; retain routing strategy and other configuration |
 | Translations | `src/i18n/locales/en.ts`, `src/i18n/locales/zh-CN.ts`, `src/i18n/ja.ts` | `quota.routing.*` and custom dashboard strings; traditional Chinese derives from existing translation handling |
 | Release ownership | `src-tauri/src/main.rs`, `src-tauri/src/app_update.rs`, `src/pages/VersionManagementPage.tsx`, `scripts/manifest.mjs`, browser mock | Custom desktop URLs, repository validation and catalog source; official core URLs |

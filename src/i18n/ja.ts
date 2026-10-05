@@ -2,11 +2,13 @@ import type { MessageKey } from './locales/zh-CN';
 import { easyModeJa } from './easyMode';
 import { homeJa } from './home';
 import { authFileListJa } from './authFileList';
+import { subscriptionValueJa } from './subscriptionValue';
 
 export const jaOverrides = {
   'app.nav.plugins': 'プラグイン',
   ...homeJa,
   ...authFileListJa,
+  ...subscriptionValueJa,
   'apiAccess.entries.addKey': 'API キーを追加',
   'apiAccess.entries.addProvider': 'サービスを追加',
   'apiAccess.entries.editKey': 'API キーを編集',

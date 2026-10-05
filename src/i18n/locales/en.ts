@@ -2,11 +2,13 @@ import type { MessageKey } from './zh-CN';
 import { easyModeEn } from '../easyMode';
 import { homeEn } from '../home';
 import { authFileListEn } from '../authFileList';
+import { subscriptionValueEn } from '../subscriptionValue';
 
 export const en: Record<MessageKey, string> = {
   'app.nav.plugins': 'Plugins',
   ...homeEn,
   ...authFileListEn,
+  ...subscriptionValueEn,
   'apiAccess.entries.addKey': 'Add API Key',
   'apiAccess.entries.addProvider': 'Add Service',
   'apiAccess.entries.editKey': 'Edit API Key',

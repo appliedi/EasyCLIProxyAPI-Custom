@@ -6,7 +6,14 @@ Every functional change must update **Unreleased** in the same commit or pull re
 
 ## Unreleased
 
-No changes yet.
+### Subscription Value
+
+- Added a separate **Subscription Value** sidebar page with monthly API-equivalent estimates by routed OAuth account and model, a cumulative daily chart, pricing coverage, and optional USD subscription-fee comparisons. Idle connected accounts remain visible; Antigravity model usage stays under its Antigravity account.
+- Save fees in the local usage database with an effective month. Changes carry forward until the next saved change and do not rewrite earlier months. Blank fees are unknown; explicit zero fees are distinct. Portfolio value ratios only include accounts with entered fees.
+- Aggregate retained usage in SQLite without event-page limits. Reuse existing model pricing, cache accounting, service-tier and long-context adjustments. Missing required prices are excluded and disclosed rather than treated as zero cost. Estimates use the active price catalog, so changing prices recalculates history.
+- Keep API-key and unattributed traffic out of subscription totals. Saved accounts and history remain available while the core is offline. No OAuth, routing, or proxy-core configuration changes are required.
+- Added English, Chinese, and Japanese strings, browser mock data, and regression coverage for account attribution, fee history, missing rates, large histories, model/day reconciliation, and responsive interactions.
+- Validation: TypeScript and all 707 frontend tests passed (32 isolated-core tests/hooks skipped); all 77 Rust usage tests passed, including five new subscription-value tests. The isolated browser regression passed for account/model drilldowns, fee validation and persistence, month changes, narrow layouts, offline navigation, and empty/error states. An optimized Windows build passed with `build.ps1 -SkipCopy -BuildJobs 8`; the running installation was not replaced.
 
 ## 0.4.1 — 2026-10-05
 

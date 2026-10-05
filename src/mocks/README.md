@@ -40,6 +40,11 @@ of returning fake success. Add new contracts to `browserMockRuntime.ts`,
 Other desktop operations may still return preview-only results; the mock does not
 launch real apps, write credentials to disk or make upstream API requests.
 
+Subscription Value uses `subscriptionValueMock.ts`: fictional per-account/model
+estimates, incomplete pricing, idle accounts, and effective-month fee changes.
+Fees persist across page navigation in the preview session and reset on reload.
+Run `node tests/subscription-value-ui.cjs` for its isolated browser regression.
+
 ## Verification
 
 ```sh

@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import {
   Bot,
+  ChartNoAxesCombined,
   Check,
   ChevronUp,
   ExternalLink,
@@ -31,6 +32,7 @@ import { VersionManagementPage } from './pages/VersionManagementPage';
 import { OAuthManagementPage } from './pages/ManagementPages';
 import { QuotaPage } from './pages/QuotaPage';
 import { SubscriptionUsagePage } from './pages/SubscriptionUsagePage';
+import { SubscriptionValuePage } from './pages/SubscriptionValuePage';
 import { AgentsPage } from './pages/AgentsPage';
 import { EasyModePage } from './pages/EasyModePage';
 import { UsageRecordsPage } from './pages/UsageRecordsPage';
@@ -75,6 +77,12 @@ const pages = [
     labelKey: 'app.nav.subscriptionUsage',
     icon: Gauge,
     component: SubscriptionUsagePage,
+  },
+  {
+    id: 'subscription-value',
+    labelKey: 'app.nav.subscriptionValue',
+    icon: ChartNoAxesCombined,
+    component: SubscriptionValuePage,
   },
   {
     id: 'quota',

@@ -2726,6 +2726,8 @@ fn main() {
             usage::get_usage_analysis,
             usage::get_usage_events,
             usage::get_usage_pricing,
+            usage::subscription_value::get_subscription_value,
+            usage::subscription_value::save_subscription_fees,
             usage::get_usage_storage_settings,
             usage::repair_usage_cache_records,
             usage::save_usage_storage_settings,
