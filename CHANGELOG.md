@@ -6,6 +6,13 @@ Every functional change must update **Unreleased** in the same commit or pull re
 
 ## Unreleased
 
+### Review follow-up
+
+- Keep distinct nameless historical subscription accounts from aliasing unrelated OAuth or unknown-auth requests. Added a regression for both cases.
+- Preserve the initial portable-data hint and autostart registration through Tauri `/UPDATE`; normal uninstall removes only recognized commands belonging to that installation, including `--autostart`. Expanded the real installer smoke test to cover both update cycles and unrelated startup-entry preservation, with a configurable isolated registry key for local runs.
+- Show Windows storage startup errors with a native message box instead of constructing another WebView; retain the existing dialog on other platforms.
+- Avoid restarting PR builds when review bots edit only the PR description.
+
 ## 0.4.3 — 2026-11-05
 
 ### Release fixes and validation

@@ -221,7 +221,7 @@ fn load_value(
     let mut aliases: HashMap<(String, String), Vec<String>> = HashMap::new();
     {
         let mut stmt = connection
-            .prepare("SELECT id, provider, name FROM subscription_value_accounts")
+            .prepare("SELECT id, provider, name FROM subscription_value_accounts WHERE name <> ''")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -444,6 +444,40 @@ mod tests {
     }
     fn price(c: &Connection) {
         c.execute("INSERT INTO model_prices (model,prompt_per_1m,completion_per_1m,cache_per_1m,cache_creation_per_1m,prompt_configured,completion_configured) VALUES ('test-priced',2,5,0,0,1,1)",[]).unwrap();
+    }
+
+    #[test]
+    fn nameless_history_never_aliases_an_unknown_account() {
+        for auth in ["oauth", "unknown"] {
+            let c = database();
+            price(&c);
+            event(
+                &c,
+                "first",
+                "claude",
+                "historical",
+                "test-priced",
+                "oauth",
+                2,
+            );
+            c.execute("UPDATE usage_events SET source = ''", [])
+                .unwrap();
+            assert_eq!(
+                load_value(&c, "2026-09", &GuiConfigFile::default())
+                    .unwrap()
+                    .accounts
+                    .len(),
+                1
+            );
+            event(&c, "second", "claude", "different", "test-priced", auth, 3);
+            c.execute("UPDATE usage_events SET source = ''", [])
+                .unwrap();
+            let report = load_value(&c, "2026-09", &GuiConfigFile::default()).unwrap();
+            let expected = if auth == "oauth" { 2 } else { 1 };
+            assert_eq!(report.accounts.len(), expected, "{auth}");
+            assert!(report.accounts.iter().all(|a| a.requests == 1), "{auth}");
+            assert_eq!(report.other_requests, if auth == "oauth" { 0 } else { 1 });
+        }
     }
 
     #[test]

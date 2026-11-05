@@ -871,16 +871,34 @@ pub(crate) fn restart_for_storage_operation(app: tauri::AppHandle) -> Result<()>
 }
 
 pub(crate) fn show_startup_error(message: &str) {
-    use tauri_plugin_dialog::DialogExt;
     eprintln!("{message}");
-    if let Ok(app) = tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .build(tauri::generate_context!())
+    #[cfg(windows)]
     {
-        app.dialog()
-            .message(message)
-            .title("EasyCLIProxyAPI — data folder unavailable")
-            .blocking_show();
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+        let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        let text = wide(message);
+        let title = wide("EasyCLIProxyAPI — data folder unavailable");
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                text.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONERROR,
+            )
+        };
+    }
+    #[cfg(not(windows))]
+    {
+        use tauri_plugin_dialog::DialogExt;
+        if let Ok(app) = tauri::Builder::default()
+            .plugin(tauri_plugin_dialog::init())
+            .build(tauri::generate_context!())
+        {
+            app.dialog()
+                .message(message)
+                .title("EasyCLIProxyAPI — data folder unavailable")
+                .blocking_show();
+        }
     }
 }
 

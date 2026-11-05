@@ -84,3 +84,9 @@ Release packaging evidence: the optimized Windows x64 0.4.3 executable built suc
 The comprehensive settings browser test initially hit a Windows EBUSY file-watcher error while packaging wrote generated core archives. Its Vite watcher now excludes .codex, src-tauri and cpa-core outputs, matching the other browser harnesses.
 
 The final English/Chinese settings browser rerun passed all nine categories across six viewport sizes after excluding generated build outputs from its watcher. The release source has zero failures in both full unit suites and the custom browser regressions.
+
+## CodeRabbit review follow-up
+
+Review-only PR #2 compares the Custom head with exact upstream v0.3.76; main integration PR #1 retains the complete upstream import. CodeRabbit reviewed 112 selected files (the lockfile was excluded by its defaults). Three findings were confirmed and reproduced before fixes: nameless account alias attribution, lost initial data hints during `/UPDATE`, and missed uninstall cleanup of `--autostart`.
+
+The new alias regression failed before the SQL filter and now passes for OAuth and unknown-auth cases. The installer test failed first on a lost `/UPDATE` hint, then on the leftover startup command. The fixed hooks preserve both owned autostart and the portable-data hint through updates, retain foreign startup targets, and clean owned entries on normal uninstall. The smoke harness can use a separate registry namespace and snapshots unrelated entries to ensure preservation. Final affected verification: all six subscription-value Rust tests and the full serial Windows Rust suite (**1,158 passed, 13 ignored, zero failed**); the isolated expanded installer smoke passed. Windows startup error handling now uses MessageBoxW without another Tauri/WebView instance.
