@@ -6,6 +6,8 @@ Every functional change must update **Unreleased** in the same commit or pull re
 
 ## Unreleased
 
+- Reserve stable release tags atomically before publication, recheck their commit after any competing creation, and require an existing verified tag when creating the release. Failed reservations stop publication.
+
 ## 0.4.3 — 2026-11-05
 
 ### Review follow-up

@@ -441,9 +441,12 @@ jobs:
             esac
           fi
 
-          build_commit="$(node scripts/verify-release-target.mjs "$RELEASE_TAG")"
+          build_commit="$(node scripts/verify-release-target.mjs "$RELEASE_TAG" --reserve)"
           prerelease="$MANUAL_PRERELEASE"
           release_args=(--title "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/easycli-release-notes.md")
+          if [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            release_args+=(--verify-tag)
+          fi
           if [[ "$is_unique_preview" == "true" ]]; then
             prerelease=true
             release_args+=(--target "$build_commit" --latest=false)

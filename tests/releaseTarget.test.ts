@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { assertStableTagTarget } from '../scripts/verify-release-target.mjs';
+import { assertStableTagTarget, reserveStableTag } from '../scripts/verify-release-target.mjs';
 
 const first = 'a'.repeat(40), second = 'b'.repeat(40);
 test('publication uses the build source and verifies its target before release operations', () => {
@@ -12,12 +12,33 @@ test('publication uses the build source and verifies its target before release o
   const publishCheckout = workflow.jobs.publish.steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));
   expect(publishCheckout.with.ref).toBe(buildCheckout.with.ref);
   const publish = workflow.jobs.publish.steps.find((step: any) => step.name === 'Publish release').run;
-  const guard = publish.indexOf('build_commit="$(node scripts/verify-release-target.mjs "$RELEASE_TAG")"');
+  const guard = publish.indexOf('build_commit="$(node scripts/verify-release-target.mjs "$RELEASE_TAG" --reserve)"');
   expect(guard).toBeGreaterThanOrEqual(0);
   expect(guard).toBeLessThan(publish.indexOf('gh release view'));
   expect(guard).toBeLessThan(publish.indexOf('gh release create'));
   expect(publish).toContain('--target "$build_commit"');
+  expect(publish).toContain('release_args+=(--verify-tag)');
   expect(publish).toContain('Stable release $RELEASE_TAG already exists');
+});
+test('stable reservation creates the ref before verifying its final target', () => {
+  const calls: string[] = [];
+  reserveStableTag('v1.2.3', first, {
+    create: (ref: string, sha: string) => { calls.push('create'); expect(ref).toBe('refs/tags/v1.2.3'); expect(sha).toBe(first); },
+    read: () => { calls.push('read'); return first + '\trefs/tags/v1.2.3\n'; },
+  });
+  expect(calls).toEqual(['create', 'read']);
+});
+test('a competing tag creator is accepted only for the exact build commit', () => {
+  const create = () => { throw new Error('already exists'); };
+  expect(() => reserveStableTag('v1.2.3', first, { create, read: () => second + '\trefs/tags/v1.2.3\n' })).toThrow('differs from build commit');
+  expect(() => reserveStableTag('v1.2.3', first, { create, read: () => first + '\trefs/tags/v1.2.3\n' })).not.toThrow();
+  expect(() => reserveStableTag('v1.2.3', first, { create, read: () => second + '\trefs/tags/v1.2.3\n' + first + '\trefs/tags/v1.2.3^{}\n' })).not.toThrow();
+  expect(() => reserveStableTag('v1.2.3', first, { create, read: () => '' })).toThrow('missing');
+  expect(() => reserveStableTag('v1.2.3', first, { create, read: () => { throw new Error('network failure'); } })).toThrow('network failure');
+});
+test('preview tags do not reserve or read stable refs', () => {
+  const unexpected = () => { throw new Error('unexpected stable operation'); };
+  expect(() => reserveStableTag('preview-20261105-1600', first, { create: unexpected, read: unexpected })).not.toThrow();
 });
 test('stable publication rejects a lightweight tag on another commit', () => {
   expect(() => assertStableTagTarget('v1.2.3', first, second + '\trefs/tags/v1.2.3\n')).toThrow('differs from build commit');

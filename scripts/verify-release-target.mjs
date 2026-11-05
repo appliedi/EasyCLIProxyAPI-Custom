@@ -11,7 +11,7 @@ const objectId = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
  * @param {string} buildCommit Commit checked out by both build and publish jobs.
  * @param {string} remoteRefs Output from git ls-remote --tags for this exact tag.
  */
-export function assertStableTagTarget(tag, buildCommit, remoteRefs) {
+export function assertStableTagTarget(tag, buildCommit, remoteRefs, requirePresent = false) {
   if (!stableTag.test(tag)) return;
   if (!objectId.test(buildCommit)) throw new Error('Invalid build commit');
   const refs = new Map();
@@ -23,16 +23,34 @@ export function assertStableTagTarget(tag, buildCommit, remoteRefs) {
     refs.set(ref, sha);
   }
   const target = refs.get('refs/tags/' + tag + '^{}') ?? refs.get('refs/tags/' + tag);
+  if (!target && requirePresent) throw new Error('Stable tag ' + tag + ' is missing after reservation');
   if (target && target !== buildCommit) throw new Error('Stable tag ' + tag + ' target ' + target + ' differs from build commit ' + buildCommit);
+}
+
+/** GitHub ref creation is atomic and never replaces an existing ref. Even when
+ * creation fails (including a concurrent creator), verify the remote fail closed.
+ */
+export function reserveStableTag(tag, buildCommit, { create, read }) {
+  if (!stableTag.test(tag)) return;
+  if (!objectId.test(buildCommit)) throw new Error('Invalid build commit');
+  try { create('refs/tags/' + tag, buildCommit); } catch { /* Verify existing ref below. */ }
+  assertStableTagTarget(tag, buildCommit, read(), true);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const tag = process.argv[2] ?? '';
   const buildCommit = execFileSync('git', ['rev-parse', 'HEAD^{commit}'], { encoding: 'utf8' }).trim();
   // A network/authentication failure throws; it must not look like an absent tag.
-  const refs = stableTag.test(tag)
+  const read = () => stableTag.test(tag)
     ? execFileSync('git', ['ls-remote', '--tags', 'origin', 'refs/tags/' + tag, 'refs/tags/' + tag + '^{}'], { encoding: 'utf8' })
     : '';
-  assertStableTagTarget(tag, buildCommit, refs);
+  if (process.argv.includes('--reserve')) {
+    reserveStableTag(tag, buildCommit, {
+      create: (ref, sha) => execFileSync('gh', ['api', '--method', 'POST', 'repos/{owner}/{repo}/git/refs', '-f', 'ref=' + ref, '-f', 'sha=' + sha], { encoding: 'utf8', stdio: 'pipe' }),
+      read,
+    });
+  } else {
+    assertStableTagTarget(tag, buildCommit, read());
+  }
   console.log(buildCommit);
 }
