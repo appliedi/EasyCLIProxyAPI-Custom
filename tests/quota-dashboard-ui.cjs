@@ -27,7 +27,7 @@ const fs = require('node:fs');
     await page.locator('.quota-provider-summary').first().waitFor();
     console.log('Dashboard loaded');
     assert.equal(await page.locator('.quota-provider-summary').count(), 6);
-    assert.equal(await page.locator('.quota-ledger-row').count(), 12);
+    assert.equal(await page.locator('.quota-ledger-row').count(), 13);
     assert.match(await page.locator('.quota-summary-total').first().innerText(), /Unavailable/);
 
     await page.getByRole('button', { name: 'Refresh Quota', exact: true }).click();
@@ -35,10 +35,10 @@ const fs = require('node:fs');
     await page.getByRole('button', { name: 'Refresh Quota', exact: true }).waitFor();
     await page.waitForFunction(() => document.querySelectorAll('.quota-row-list').length >= 10);
     const claude = page.getByRole('article', { name: 'Claude', exact: true });
-    assert.match(await claude.innerText(), /59%/);
-    await claude.getByRole('combobox').selectOption({ label: '5-hour window' });
+    assert.match(await claude.innerText(), /68%/);
+    await claude.getByRole('combobox').selectOption({ label: '5-hour limit' });
     assert.match(await claude.innerText(), /76%/);
-    await claude.getByRole('combobox').selectOption({ label: '7-day window' });
+    await claude.getByRole('combobox').selectOption({ label: 'Weekly limit' });
 
     // The upstream lookup remains separate and shares fetched quota data.
     await page.getByRole('button', { name: 'Quota Lookup', exact: true }).click();
@@ -48,7 +48,7 @@ const fs = require('node:fs');
     assert.ok(await page.locator('.quota-page .quota-row-list').count() >= 10);
     await page.getByRole('button', { name: 'Subscription Usage', exact: true }).click();
     await page.locator('.quota-provider-summary').first().waitFor();
-    assert.equal(await page.locator('.quota-ledger-row').count(), 12);
+    assert.equal(await page.locator('.quota-ledger-row').count(), 13);
 
     const filters = page.getByRole('group', { name: 'Filter by provider' });
     await filters.getByRole('button', { name: /Codex/ }).click();
@@ -77,7 +77,7 @@ const fs = require('node:fs');
     assert.equal(await page.locator('.real-quota-card').count(), 0);
     assert.equal(await page.getByRole('button', { name: 'Refresh visible (0)', exact: true }).isDisabled(), true);
     await page.getByRole('button', { name: 'Clear search', exact: true }).click();
-    assert.equal(await page.locator('.real-quota-card').count(), 12);
+    assert.equal(await page.locator('.real-quota-card').count(), 13);
     await page.getByLabel('Sort accounts', { exact: true }).selectOption('remaining');
     await page.getByLabel('Sort accounts', { exact: true }).selectOption('reset');
     await page.getByLabel('Sort accounts', { exact: true }).selectOption('name');
@@ -109,7 +109,7 @@ const fs = require('node:fs');
 
     const routing = page.locator('.account-routing-panel');
     await routing.locator('summary').click();
-    const affinity = routing.getByRole('checkbox', { name: 'Session Affinity', exact: true });
+    const affinity = routing.getByRole('switch', { name: 'Session Affinity', exact: true });
     const ttl = routing.getByLabel('Affinity idle timeout', { exact: true });
     assert.equal(await affinity.isChecked(), true);
     await affinity.uncheck();
@@ -128,8 +128,11 @@ const fs = require('node:fs');
     const output = path.resolve(__dirname, '../.codex/quota-dashboard');
     fs.mkdirSync(output, { recursive: true });
     for (const theme of ['dark', 'light']) {
-      await page.getByRole('button', { name: theme === 'dark' ? 'Dark' : 'Light', exact: true }).click();
+      await page.locator('.theme-selector-trigger:visible').click();
+      await page.locator(`.theme-selector-mode[data-value="${theme}"]`).click();
+      await page.locator(`.theme-selector-card[data-theme-id="${theme}"]`).click();
       await page.waitForFunction((value) => document.documentElement.dataset.theme === value, theme);
+      await page.keyboard.press('Escape');
       await page.screenshot({ path: path.join(output, `${theme}.png`), fullPage: true });
     }
     for (const width of [1024, 640, 390]) {

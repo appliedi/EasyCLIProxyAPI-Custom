@@ -11,6 +11,31 @@ struct TestCore {
     client: reqwest::Client,
 }
 
+#[tokio::test]
+#[ignore = "requires an explicitly prepared isolated CPA_DESKTOP_E2E_CONFIG; never use a production config"]
+async fn desktop_e2e_prepare_isolated_gateway_profile() {
+    let path = PathBuf::from(std::env::var_os("CPA_DESKTOP_E2E_CONFIG").expect("set isolated config path"));
+    let native: serde_json::Value = serde_norway::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let port = native["server"]["port"].as_u64().unwrap() as u16;
+    assert_ne!(port, 8317, "Never modify the production kernel");
+    assert_eq!(native["server"]["host"], "127.0.0.1");
+    let key = native["access"]["api-keys"][0].as_str().unwrap();
+    let gui = GuiConfigFile { port,
+        management_secret_key: "claude-e2e-local-management".into(),
+        api_keys: vec![GuiApiKeyEntry {key:key.into(),remark:String::new()}],
+        ..GuiConfigFile::default() };
+    let models = fetch_agent_models(port, key).await.unwrap();
+    let mappings = ClaudeDesktopModelMappings {
+        desktop_models: Some(vec![ClaudeDesktopModelMapping {
+            model:"grok-4.7-build-fast".into(), alias:"claude-sonnet-5-cc".into(), context_1m:true,
+        }]), ..ClaudeDesktopModelMappings::all("grok-4.7-build-fast") };
+    let profile = commit_agent_with_core(&gui, Some(mappings), &models, |mappings| {
+        build_claude_desktop_profile(None, &managed_core_loopback_origin(port), key,
+            "grok-4.7-build-fast", &models, mappings)
+    }).await.unwrap();
+    fs::write(path.parent().unwrap().join("desktop-profile.json"), profile).unwrap();
+}
+
 impl Drop for TestCore {
     fn drop(&mut self) {
         self.stop();
@@ -184,8 +209,8 @@ async fn check_claude_model_routes(legacy_marker: Option<&str>) {
         }]),
         ..ClaudeDesktopModelMappings::all("model-one")
     };
-    let profile = commit_agent_with_core(&gui, Some(&mappings), &desktop.models, || {
-        build_claude_desktop_profile(None, &core.origin, "isolated-client-key", "model-one", &desktop.models, Some(&mappings))
+    let profile = commit_agent_with_core(&gui, Some(mappings), &desktop.models, |mappings| {
+        build_claude_desktop_profile(None, &core.origin, "isolated-client-key", "model-one", &desktop.models, mappings)
     }).await.unwrap();
     let profile: serde_json::Value = serde_json::from_str(&profile).unwrap();
     assert_eq!(profile["inferenceModels"][0]["name"], "claude-sonnet-custom");
@@ -568,4 +593,56 @@ async fn v8_reloads_usage_after_repeated_gui_saves_in_both_config_layouts() {
         }
         upstream_task.await.unwrap();
     }
+}
+
+#[tokio::test]
+#[ignore = "requires CPA_V8_TEST_CORE and CPA_LOCAL_TEST_PLUGIN"]
+async fn local_plugin_copy_is_discovered_and_loads_in_real_kernel() {
+    let executable = fs::canonicalize(env::var_os("CPA_V8_TEST_CORE").expect("set CPA_V8_TEST_CORE")).unwrap();
+    let source = fs::canonicalize(env::var_os("CPA_LOCAL_TEST_PLUGIN").expect("set CPA_LOCAL_TEST_PLUGIN")).unwrap();
+    let directory = agent_test_home("v8-contract-local-plugin");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let mut core = TestCore {
+        child: None, config: directory.join("config.yaml"), directory, executable,
+        origin: format!("http://127.0.0.1:{port}"),
+        client: reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(3)).build().unwrap(),
+    };
+    let gui = GuiConfigFile {
+        port, plugins_enabled: true, management_secret_key: "isolated-test-secret".into(),
+        auth_dir: path_to_string(&core.directory.join("auth")),
+        api_keys: vec![GuiApiKeyEntry { key: "isolated-client-key".into(), remark: String::new() }],
+        ..GuiConfigFile::default()
+    };
+    let initial = "config-version: 8\nmanagement: {disable-control-panel: true, disable-auto-update-panel: true}\nplugins: {enabled: true, dir: plugins}\n";
+    fs::write(&core.config, merge_core_config_yaml(initial, None, &gui).unwrap()).unwrap();
+    core.start().await;
+    let list = |client: reqwest::Client, origin: String| async move {
+        client.get(format!("{origin}/v8/management/plugins")).bearer_auth("isolated-test-secret")
+            .send().await.unwrap().error_for_status().unwrap().json::<serde_json::Value>().await.unwrap()
+    };
+    let before = list(core.client.clone(), core.origin.clone()).await;
+    let returned_dir = PathBuf::from(before["plugins_dir"].as_str().unwrap());
+    let root = if returned_dir.is_absolute() { returned_dir } else { core.directory.join(returned_dir) };
+    let os = if cfg!(windows) { "windows" } else if cfg!(target_os="macos") { "darwin" } else { "linux" };
+    let arch = if cfg!(target_arch="aarch64") { "arm64" } else { "amd64" };
+    let extension = source.extension().unwrap().to_str().unwrap();
+    let installed = crate::plugins::local_install::copy_plugin(&source, &root.join(os).join(arch), extension).unwrap();
+    assert_eq!(fs::read(&installed).unwrap(), fs::read(&source).unwrap());
+    let after = list(core.client.clone(), core.origin.clone()).await;
+    let entry = after["plugins"].as_array().unwrap().iter().find(|entry| {
+        Path::new(entry["path"].as_str().unwrap_or("")).file_name() == source.file_name()
+    }).expect("copied plugin must be discovered");
+    let id = entry["id"].as_str().unwrap().to_string();
+    core.client.put(format!("{}/v8/management/config/plugins/configs/{id}/enabled", core.origin))
+        .bearer_auth("isolated-test-secret").json(&true)
+        .send().await.unwrap().error_for_status().unwrap();
+    core.stop();
+    core.start().await;
+    let loaded = list(core.client.clone(), core.origin.clone()).await;
+    let entry = loaded["plugins"].as_array().unwrap().iter().find(|entry| entry["id"] == id).unwrap();
+    assert_eq!(entry["registered"], true, "plugin must load: {entry}");
+    assert_eq!(entry["effective_enabled"], true, "plugin must be enabled: {entry}");
+    println!("Verified actual kernel discovery and loading: {id}");
 }

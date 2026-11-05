@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { AuthFileQuotaPanel } from '../src/components/AuthFileQuotaPanel';
 import { I18nProvider } from '../src/i18n';
 import type { QuotaState } from '../src/services/quotaService';
-import { QuotaCard } from '../src/pages/QuotaPage';
+import { QuotaCard } from '../src/pages/SubscriptionUsagePage';
 
 const render = (quota: QuotaState) => renderToStaticMarkup(<I18nProvider><AuthFileQuotaPanel file={{ name: 'test.json' }} quota={quota} disabled={false} onRefresh={() => {}} /></I18nProvider>);
 

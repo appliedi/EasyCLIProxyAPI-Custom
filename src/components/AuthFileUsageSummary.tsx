@@ -22,7 +22,11 @@ export function AuthFileUsageSummary({ file }: { file: Record<string, unknown> }
   ];
 
   return (
-    <div className="auth-file-usage" role="group" aria-label={t('authFiles.usage.title')} title={t('authFiles.requests.totalsHint')}>
+    <div className="auth-file-usage" role="group" aria-label={t('authFiles.usage.title')}>
+      <div className="auth-file-usage-scope">
+        <span>{t('authFiles.usage.runtimeTotals')}</span>
+        <small title={t('authFiles.requests.totalsHint')}>{t('authFiles.requests.totalsHint')}</small>
+      </div>
       <div className="auth-file-usage-metrics">
         {metrics.map(({ key, Icon, value, label }) => (
           <span key={key} className={`auth-file-usage-metric ${key}`} role="img" title={label} aria-label={label}>

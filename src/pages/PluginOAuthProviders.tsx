@@ -1,9 +1,10 @@
+import { Notice } from '../components/Notice';
+import { getPluginSupport, pluginsApi, type PluginListEntry } from '../services/plugins';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { LogIn, Puzzle, RefreshCw } from 'lucide-react';
+import { LogIn, RefreshCw } from 'lucide-react';
+import { PluginLogo } from '../components/ProviderLogo';
 import { useI18n } from '../i18n';
 import { pluginOAuthText } from '../i18n/pluginOAuth';
-import { pluginsApi, type PluginListEntry } from '../services/plugins';
 import { collectPluginOAuthProviders } from '../services/pluginOAuthProviders';
 import { getPluginTitle, PLUGIN_RESOURCES_REFRESH_EVENT } from '../services/pluginResources';
 import { PluginOAuthDialog } from './PluginOAuthDialog';
@@ -32,7 +33,7 @@ export function PluginOAuthProviders({ builtInProviderIds, browser = 'default' }
     const refresh = async (attempt: number) => {
       try {
         if (attempt === 0) {
-          const supported = await invoke<boolean>('get_plugin_support');
+          const supported = await getPluginSupport();
           if (!active()) return;
           if (!supported) {
             setPlugins([]);
@@ -84,18 +85,17 @@ export function PluginOAuthProviders({ builtInProviderIds, browser = 'default' }
 
   const selectedPlugin = plugins.find(plugin => plugin.oauthProvider === selectedProvider);
   return <>
-    {error && <div className="plugin-oauth-provider-status" role="alert">
-      <span>{pluginOAuthText('loadFailed', locale)}</span>
+    {error && <Notice tone="error" icon={false} className="plugin-oauth-provider-status" action={
       <button type="button" className="secondary-button" disabled={loading} onClick={() => void load()}>
         <RefreshCw size={16} aria-hidden="true" />{t('common.refresh')}
       </button>
-    </div>}
+    }>{pluginOAuthText('loadFailed', locale)}</Notice>}
     {plugins.map(plugin => {
       const provider = plugin.oauthProvider!;
       const authorized = completed.has(provider);
-      return <section className="panel oauth-card" key={provider}>
+      return <section className="panel surface-panel oauth-card" key={provider}>
         <div className="provider-title-row">
-          <Puzzle className="provider-logo" size={40} aria-hidden="true" />
+          <PluginLogo src={plugin.logo || plugin.metadata?.logo} size={40} />
           <div>
             <h2>{pluginOAuthText('providerTitle', locale).replace('{name}', getPluginTitle(plugin))}</h2>
             {authorized && <span className="state-pill success">{t('oauth.status.completed')}</span>}

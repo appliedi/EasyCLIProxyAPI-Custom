@@ -1,5 +1,30 @@
 use super::*;
 
+type UsageViewPreferences = std::collections::BTreeMap<String, String>;
+
+#[tauri::command]
+pub(crate) fn get_usage_view_preferences() -> Result<UsageViewPreferences, String> {
+    let path = core_base_dir()?.join("usage-view-preferences.json");
+    match fs::read(&path) {
+        Ok(content) => serde_json::from_slice(&content)
+            .map_err(|error| format!("Failed to parse usage preferences: {error}")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Default::default()),
+        Err(error) => Err(format!("Failed to read usage preferences: {error}")),
+    }
+}
+
+#[tauri::command]
+pub(crate) fn save_usage_view_preferences(values: UsageViewPreferences) -> Result<(), String> {
+    if values.iter().any(|(key, value)| {
+        !(key.starts_with("cpa-gui.usage-") || key == "cpa-gui.pricing-sync-source.v1")
+            || key.len() > 128 || value.len() > 16_384
+    }) || values.len() > 100 {
+        return Err("Invalid usage preferences".into());
+    }
+    let content = serde_json::to_vec_pretty(&values).map_err(|error| error.to_string())?;
+    write_bytes_atomically(&core_base_dir()?.join("usage-view-preferences.json"), &content)
+}
+
 #[tauri::command]
 pub(crate) fn health_check() -> &'static str {
     "EasyCLIProxyAPI Rust backend is ready"
@@ -115,7 +140,7 @@ fn find_api_access_record_remark(
     exact_remark
 }
 
-fn resolve_api_access_remark(
+pub(crate) fn resolve_api_access_remark(
     config: &GuiConfigFile,
     query: &ApiAccessRemarkQuery,
 ) -> Result<String, String> {
@@ -768,11 +793,9 @@ pub(crate) fn resolve_windows_close_request(
     match action {
         WindowsCloseAction::Exit => app.exit(0),
         WindowsCloseAction::MinimizeToTray => {
-            let window = app
-                .get_webview_window("main")
-                .ok_or_else(|| "Main window does not exist".to_string())?;
-            window
-                .hide()
+            let window =
+                main_window(&app).ok_or_else(|| "Main window does not exist".to_string())?;
+            crate::window_activity::hide(&window)
                 .map_err(|error| format!("Failed to hide main window: {error}"))?;
         }
     }

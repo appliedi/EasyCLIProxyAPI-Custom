@@ -46,11 +46,7 @@ fn validate_alias_api_access_preserved(current: &str, updated: &str) -> Result<(
     };
     let current = parse(current)?;
     let updated = parse(updated)?;
-    for section in MODEL_ALIAS_CONFIG_SECTIONS
-        .iter()
-        .copied()
-        .chain(["vertex-api-key", "xai-api-key", "interactions-api-key"])
-    {
+    for (section, _) in V8_PROVIDER_FAMILIES {
         let without_models = |root: &serde_norway::Value| -> Result<_, String> {
             let mut value = root
                 .get(section)
@@ -62,11 +58,9 @@ fn validate_alias_api_access_preserved(current: &str, updated: &str) -> Result<(
             let providers = value
                 .as_sequence_mut()
                 .ok_or_else(|| format!("{section} must be an array; alias was not saved"))?;
-            if MODEL_ALIAS_CONFIG_SECTIONS.contains(&section) {
-                for provider in providers {
-                    if let Some(provider) = provider.as_mapping_mut() {
-                        provider.remove(yaml_key("models"));
-                    }
+            for provider in providers {
+                if let Some(provider) = provider.as_mapping_mut() {
+                    provider.remove(yaml_key("models"));
                 }
             }
             Ok(value)
@@ -102,11 +96,10 @@ pub(crate) async fn commit_management_alias_config_changes<T>(
     let _guard = SAVE_LOCK.lock().await;
     validate_alias_api_access_preserved(current, updated)?;
     let changes = management_alias_config_changes(current, updated)?;
+    // The management API applies only the alias/payload/provider sections below.
+    // Do not reject an edit merely because an unrelated setting changed while the
+    // editor was open; the targeted writer preserves those unrelated sections.
     let native_before = fetch_management_raw_config_yaml(config).await?;
-    let latest = management_v8_yaml_to_legacy_view(&native_before)?;
-    if !alias_config_is_unchanged(current, &latest)? {
-        return Err("Configuration changed. Close the editor, refresh, and try again".to_string());
-    }
     let result = async {
         if let Some(aliases) = changes.oauth_model_aliases.as_ref() {
             put_management_oauth_model_aliases(config, aliases).await?;

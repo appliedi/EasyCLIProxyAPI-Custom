@@ -1,6 +1,8 @@
+import { Notice } from './Notice';
+import { Select } from '../components/Select';
 import { useEffect, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { open } from '@tauri-apps/plugin-dialog';
+import { invoke } from '../services/platform';
+import { open } from '../services/platform';
 import { Database, FolderOpen, HardDrive } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { templateText } from '../i18n/templateConfig';
@@ -69,15 +71,15 @@ export function DataStoragePanel() {
   return <div className="data-storage-panel">
     <h2><HardDrive size={20} aria-hidden="true" />{st('title')}</h2>
     <p>{st('description')}</p>
-    {error && <p role="alert" className="data-storage-error">{error}</p>}
-    {message && <p role="status">{message}</p>}
-    {!settings ? <><p role="status">{busy ? st('loading') : ''}</p><button className="secondary-button" disabled={busy} onClick={() => void load()}>{st('retry')}</button></> : <>
+    {error && <Notice tone="error" variant="text" className="data-storage-error">{error}</Notice>}
+    {message && <Notice tone="info" variant="text">{message}</Notice>}
+    {!settings ? <><Notice tone="info" variant="text">{busy ? st('loading') : ''}</Notice><button className="secondary-button" disabled={busy} onClick={() => void load()}>{st('retry')}</button></> : <>
       <div className="data-storage-current"><strong>{st('current')}</strong><code>{settings.directory}</code><button className="secondary-button compact-button" disabled={busy} onClick={() => void run(async () => { await invoke('open_data_directory'); })}><FolderOpen size={16} />{st('open')}</button></div>
-      {settings.lastError && <p role="alert" className="data-storage-error">{settings.lastError}</p>}
-      {settings.lastResult && <p role="status">{settings.lastResult}</p>}
+      {settings.lastError && <Notice tone="error" variant="text" className="data-storage-error">{settings.lastError}</Notice>}
+      {settings.lastResult && <Notice tone="info" variant="text">{settings.lastResult}</Notice>}
       {settings.pending && <div className="data-storage-pending" role="status"><strong>{st('pending')}</strong><code>{settings.pending.destination}</code><div className="data-storage-actions"><button className="primary-button" disabled={busy} onClick={() => void run(async () => { await invoke('restart_for_storage_operation'); })}>{st('restart')}</button><button className="secondary-button" disabled={busy} onClick={() => void run(async () => { await invoke('cancel_storage_operation'); setSettings(await invoke<DataStorageSettings>('get_data_storage_settings')); })}>{st('cancel')}</button></div></div>}
       <fieldset disabled={disabled}><legend>{st('location')}</legend>
-        <label>{st('location')}<select aria-label={st('location')} value={mode} onChange={e => setMode(e.currentTarget.value as StorageMode)}><option value="user">{st('user')}</option><option value="portable">{st('portable')}</option><option value="custom">{st('custom')}</option></select></label>
+        <label>{st('location')}<Select aria-label={st('location')} value={mode} onChange={e => setMode(e.currentTarget.value as StorageMode)}><option value="user">{st('user')}</option><option value="portable">{st('portable')}</option><option value="custom">{st('custom')}</option></Select></label>
         <label>{st('destination')}<input value={destination} readOnly={mode !== 'custom'} onChange={e => setCustom(e.currentTarget.value)} spellCheck={false} /></label>
         {mode === 'custom' && <button className="secondary-button compact-button" onClick={() => browse(setCustom, 'EasyCLIProxyAPI-data')}>{st('parent')}</button>}
         <p>{mode === 'portable' ? st('portableHint') : st('newFolder')}</p><p>{st('restartHint')}</p>
@@ -98,7 +100,7 @@ export function DataStoragePanel() {
       </fieldset>
       <p className="data-storage-locator">{st('locator')}<code>{settings.locator}</code></p>
     </>}
-    {busy && settings && <p role="status">{st('working')}</p>}
+    {busy && settings && <Notice tone="info" variant="text">{st('working')}</Notice>}
     {confirmationDialog}
   </div>;
 }

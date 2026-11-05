@@ -1,30 +1,37 @@
+import { AuthFileBatchDialog } from '../components/AuthFileBatchDialog';
+import { CredentialTagManager } from '../components/CredentialTagManager';
+import { refreshCredential } from '../services/authFileOperations';
+import { mergeCredentialTags } from '../services/credentialTags';
+import { EmptyState } from '../components/EmptyState';
+import { Checkbox } from '../components/Checkbox';
+import { commitFetchedQuota } from '../services/quotaEnrichment';
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useConfirmation } from '../components/ConfirmationDialog';
 import { QuotaActionFeedback } from '../components/QuotaActionFeedback';
 import { AuthFileQuotaPanel } from '../components/AuthFileQuotaPanel';
 import { AuthFileSettingsDialog } from '../components/AuthFileSettingsDialog';
 import { useQuotaReset } from '../components/useQuotaReset';
+import { CardLayoutGrid, CardLayoutSwitch, useCardLayout, useExpandedCards, useSettledHeights, type StackedColumns } from '../components/CardLayout';
+import { estimateCredentialCardHeight, lowestQuotaRow } from '../services/quotaLayout';
 import './AuthFileManagementPage.css';
 import { MessageNotice, FloatingNotice, useAppNotice } from '../appNotice';
 import { AuthFileModelsDialog } from '../components/AuthFileModelsDialog';
 import { AuthFileRequestStatus } from '../components/AuthFileRequestStatus';
 import { AuthFileHealthStatus } from '../components/AuthFileHealthStatus';
 import { AuthFileUsageSummary } from '../components/AuthFileUsageSummary';
-import { useDialogFocusTrap } from '../components/useDialogFocusTrap';
+import { Dialog } from '../components/Dialog';
 import {
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
-  Copy,
   FileDown,
   FolderOpen,
   Import,
   LoaderCircle,
-  Network,
   RefreshCw,
   Search,
   Settings2,
-  Trash2,
   X,
 } from 'lucide-react';
 import antigravityIcon from '../assets/icons/antigravity.svg';
@@ -47,12 +54,11 @@ import {
 import {
   idleQuota,
   loadQuota,
-  providerForFile as quotaProviderForFile,
+  quotaProviderForFile,
   quotaKey,
 } from '../services/quotaService';
 import {
   captureQuotaCacheGeneration,
-  commitQuotaCacheIfCurrent,
   getQuotaCacheSnapshot,
   pruneQuotaCache,
   updateQuotaCache,
@@ -60,6 +66,9 @@ import {
 } from '../services/quotaCache';
 import {
   authFileName,
+  authFileIdentities,
+  countAuthFileTags,
+  normalizeAuthFileTags,
   authFileCooldownResetIndex,
   dedupeAuthFiles,
   isOAuthCredentialFile,
@@ -88,6 +97,10 @@ import {
   type OAuthModelTarget,
 } from '../services/oauthModelSettings';
 import { getCurrentLocale, translate, useI18n } from '../i18n';
+import { usePrivacyMask } from '../privacy';
+import { Select } from '../components/Select';
+import { PluginLogo, usePluginList } from '../components/ProviderLogo';
+import { findPluginLogo, resolveProviderIcon } from '../services/pluginLogos';
 
 type AuthFile = Record<string, unknown>;
 
@@ -120,9 +133,14 @@ const providerKey = (file: AuthFile) => {
 const fileName = authFileName;
 
 const isRuntimeOnly = isRuntimeOnlyAuthFile;
+const hasQuota = (file: AuthFile) => Boolean(quotaProviderForFile(file));
 
-export function AuthFileManagementPage() {
+// Stacked matches .auth-file-card-grid (420px minimum, 12px gap); Compact packs narrower glance cards.
+const credentialColumns: StackedColumns = { stacked: { minWidth: 420, gap: 12 }, compact: { minWidth: 280, gap: 8 } };
+
+export function AuthFileManagementPage({ initialProvider }: { initialProvider?: string } = {}) {
   const { t } = useI18n();
+  const privacy = usePrivacyMask();
   const now = useQuotaClock();
   const { askConfirmation, confirmationDialog } = useConfirmation();
   const [fileSnapshot, setFileSnapshot] = useState<{
@@ -132,13 +150,25 @@ export function AuthFileManagementPage() {
   }>({ files: [], receivedAtMs: 0 });
   const { files, receivedAtMs, observedAt } = fileSnapshot;
   const [filter, setFilter] = useState('');
+  const [tagFilter, setTagFilter] = useState('');
+  const [untaggedOnly, setUntaggedOnly] = useState(false);
+  const [tagManagerOpen, setTagManagerOpen] = useState(false);
+
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(() => new Set());
-  const [providerFilter, setProviderFilter] = useState('all');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled' | 'runtime'>('all');
+  const [layout, setLayout] = useCardLayout('cpa-gui.auth-files-layout.v1');
+  const [openGlances, toggleGlance] = useExpandedCards();
+  const settledHeight = useSettledHeights();
+  const [providerFilter, setProviderFilter] = useState(() => (
+    initialProvider ? providerName({ provider: initialProvider }) : 'all'
+  ));
+  const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled' | 'runtime' | 'problem'>('all');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchScope, setBatchScope] = useState<Set<string>>(new Set());
+  const refreshPending = useRef(false);
   const [quotaRefreshing, setQuotaRefreshing] = useState(false);
   const [cooldownResetting, setCooldownResetting] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState('');
@@ -151,6 +181,10 @@ export function AuthFileManagementPage() {
   const [oauthModelSettings, setOauthModelSettings] = useState<OAuthModelSettings | null>(null);
   const [oauthExcludedRulesText, setOauthExcludedRulesText] = useState('');
   const [modelViewName, setModelViewName] = useState<string | null>(null);
+  // Display-only names; requests, filters and copy keep the raw file name.
+  const shownName = privacy.credentialName;
+  const shownNameFor = (name: string) =>
+    privacy.text(name, authFileIdentities(files.find((file) => fileName(file) === name) ?? {}));
   const [oauthModelSearch, setOauthModelSearch] = useState('');
   const [oauthModelLoading, setOauthModelLoading] = useState(false);
   const [oauthModelSaving, setOauthModelSaving] = useState(false);
@@ -176,7 +210,7 @@ export function AuthFileManagementPage() {
     try {
       const payload = await managementApi.get('/credentials');
       if (!mountedRef.current || requestId !== fileRequestRef.current) return;
-      const nextFiles = sortAuthFilesByPriority(dedupeAuthFiles(responseList(payload, 'files')));
+      const nextFiles = sortAuthFilesByPriority(mergeCredentialTags(dedupeAuthFiles(responseList(payload, 'files'))));
       setFileSnapshot({ files: nextFiles, receivedAtMs: Date.now(), observedAt: readString(payload, 'observed_at') });
       const validQuotaKeys = new Set(nextFiles.map(quotaKey));
       pruneQuotaCache(validQuotaKeys);
@@ -199,7 +233,7 @@ export function AuthFileManagementPage() {
     const authIndex = authFileCooldownResetIndex(file);
     if (!authIndex || busy || loading || cooldownResetPendingRef.current.has(authIndex)
       || !normalizeAuthFileCooldowns(file.cooldowns, receivedAtMs, observedAt)?.records?.length) return;
-    const name = fileName(file);
+    const name = shownName(file);
     cooldownResetPendingRef.current.add(authIndex);
     try {
       const confirmed = await askConfirmation({
@@ -243,14 +277,12 @@ export function AuthFileManagementPage() {
     const cacheGeneration = captureQuotaCacheGeneration();
     updateQuotaCache((current) => ({ ...current, [key]: { status: 'loading', rows: [] } }));
     const result = await loadQuota(file);
-    commitQuotaCacheIfCurrent(cacheGeneration, () => {
-      updateQuotaCache((current) => ({ ...current, [key]: result }));
-    });
+    commitFetchedQuota(cacheGeneration, file, result);
   };
 
   const refreshAllQuotas = async () => {
     if (quotaRefreshing || busy || loading) return;
-    const queryable = files.filter((file) => !readBoolean(file, 'disabled') && quotaProviderForFile(file));
+    const queryable = files.filter((file) => !readBoolean(file, 'disabled') && hasQuota(file));
     if (!queryable.length) return;
     setQuotaRefreshing(true);
     setError('');
@@ -269,11 +301,6 @@ export function AuthFileManagementPage() {
     setOauthModelTarget(null);
     setOauthModelSettings(null);
   };
-  const oauthModelsDialogRef = useDialogFocusTrap<HTMLElement>({
-    active: Boolean(oauthModelTarget),
-    onEscape: oauthModelSaving ? undefined : closeOauthModels,
-    preventEscape: oauthModelSaving,
-  });
 
   const openOauthModelSettings = async (target: OAuthModelTarget) => {
     if (oauthModelSaveRef.current) return;
@@ -306,7 +333,7 @@ export function AuthFileManagementPage() {
     try {
       await saveOAuthModelSettings(settings, oauthExcludedRules);
       showNotice(settings.target.scope === 'credential'
-        ? { key: 'authFiles.models.credentialUpdated', variables: { name: settings.target.name } }
+        ? { key: 'authFiles.models.credentialUpdated', variables: { name: shownNameFor(settings.target.name) } }
         : { key: 'authFiles.models.updated', variables: { provider: settings.target.label } });
       oauthModelSaveRef.current = false;
       closeOauthModels();
@@ -334,6 +361,8 @@ export function AuthFileManagementPage() {
     );
   };
 
+  const plugins = usePluginList();
+
   useEffect(() => {
     mountedRef.current = true;
     void loadFiles();
@@ -348,6 +377,14 @@ export function AuthFileManagementPage() {
     [files],
   );
 
+  const tags = useMemo(() => [...new Set(files.flatMap(file => normalizeAuthFileTags(file.tags)))].sort((left, right) => left.localeCompare(right)), [files]);
+  const tagCounts = useMemo(() => countAuthFileTags(files), [files]);
+  const untaggedFilterValue = `untagged:${JSON.stringify(tags)}`;
+  useEffect(() => {
+    if (tagFilter && !tagCounts.has(tagFilter)) setTagFilter('');
+  }, [tagFilter, tagCounts]);
+  const tagIdentities = files.flatMap(authFileIdentities);
+
   const visibleFiles = useMemo(() => {
     const query = filter.trim().toLowerCase();
     return files.filter((file) => {
@@ -357,21 +394,22 @@ export function AuthFileManagementPage() {
         statusFilter === 'all' ||
         (statusFilter === 'disabled' && disabled) ||
         (statusFilter === 'enabled' && !disabled) ||
-        (statusFilter === 'runtime' && isRuntimeOnly(file));
+        (statusFilter === 'runtime' && isRuntimeOnly(file)) ||
+        (statusFilter === 'problem' && !disabled && (['error', 'warning'].includes(authFileHealth(file).tone) || (Array.isArray(file.cooldowns) && file.cooldowns.length > 0)));
       const searchMatch =
         !query ||
-        [fileName(file), providerName(file), readString(file, 'email', 'account', 'label')]
+        [fileName(file), providerName(file), readString(file, 'email', 'account', 'label'), readString(file, 'note'), readString(file, 'prefix'), ...normalizeAuthFileTags(file.tags)]
           .join(' ')
           .toLowerCase()
           .includes(query);
-      return providerMatch && runtimeMatch && searchMatch;
+      return providerMatch && runtimeMatch && searchMatch && (untaggedOnly ? !normalizeAuthFileTags(file.tags).length : !tagFilter || normalizeAuthFileTags(file.tags).includes(tagFilter));
     });
-  }, [files, filter, providerFilter, statusFilter]);
+  }, [files, filter, providerFilter, statusFilter, tagFilter, untaggedOnly]);
 
   const pageCount = Math.max(1, Math.ceil(visibleFiles.length / pageSize));
   const currentPage = Math.min(page, pageCount);
   const pageFiles = visibleFiles.slice((currentPage - 1) * pageSize, currentPage * pageSize);
-  useEffect(() => setPage(1), [filter, providerFilter, statusFilter, pageSize]);
+  useEffect(() => setPage(1), [filter, providerFilter, statusFilter, tagFilter, untaggedOnly, pageSize]);
   useEffect(() => setPage((current) => Math.min(current, pageCount)), [pageCount]);
 
   const toggleDetails = (key: string) => setExpandedFiles((current) => {
@@ -407,6 +445,20 @@ export function AuthFileManagementPage() {
     }
   };
 
+  const refreshToken = async (file: AuthFile) => {
+    if (refreshPending.current || busy || loading) return;
+    refreshPending.current = true;
+    setBusy(true);
+    setError('');
+    try {
+      await refreshCredential(file);
+      if (!mountedRef.current) return;
+      showNotice({ key: 'authFiles.operations.done', variables: { success: 1, failed: 0 } });
+      await loadFiles(false);
+    } catch (reason) { if (mountedRef.current) setError(String(reason)); }
+    finally { refreshPending.current = false; if (mountedRef.current) setBusy(false); }
+  };
+
   const toggleStatus = async (file: AuthFile) => {
     feedback.clearNotice();
     setBusy(true);
@@ -427,7 +479,7 @@ export function AuthFileManagementPage() {
       setError(t('authFiles.runtimeDeleteError'));
       return;
     }
-    if (!await askConfirmation({ title: t('common.delete'), message: t('authFiles.deleteConfirm', { name }), confirmText: t('common.delete'), variant: 'danger' })) return;
+    if (!await askConfirmation({ title: t('common.delete'), message: t('authFiles.deleteConfirm', { name: shownName(file) }), confirmText: t('common.delete'), variant: 'danger' })) return;
     setBusy(true);
     setError('');
     try {
@@ -472,20 +524,22 @@ export function AuthFileManagementPage() {
       <header className="auth-files-heading">
         <div><h2>{t('authFiles.title')}</h2><p>{t('authFiles.summary', { files: files.length, disabled: disabledCount })}</p></div>
         <div className="auth-files-heading-actions">
-        <button type="button" className="secondary-button compact-button auth-toolbar-quiet" disabled={loading || busy || oauthModelSaving || oauthModelProviders.length === 0} onClick={() => {
+        <button type="button" className="secondary-button small-button ghost" disabled={loading || busy || oauthModelSaving || oauthModelProviders.length === 0} onClick={() => {
           const provider = oauthModelProviders.find((item) => item.label === providerFilter) ?? oauthModelProviders[0];
           if (provider) void openOauthModelSettings({ ...provider, scope: 'provider' });
         }}><Settings2 size={15} />{t('authFiles.models.toolbarButton')}</button>
-        <button type="button" className="secondary-button compact-button auth-toolbar-quiet" disabled={busy} onClick={() => void openAuthFilesDirectory()}><FolderOpen size={15} />{t('authFiles.openDirectory')}</button>
-        <button type="button" className="secondary-button compact-button" onClick={() => void loadFiles()} disabled={loading || busy}>
+        <button type="button" className="secondary-button small-button ghost" disabled={busy} onClick={() => void openAuthFilesDirectory()}><FolderOpen size={15} />{t('authFiles.openDirectory')}</button>
+        <button type="button" className="secondary-button small-button" onClick={() => void loadFiles()} disabled={loading || busy}>
           <RefreshCw size={16} className={loading ? 'spin' : ''} />{t('authFiles.toolbar.refreshList')}
         </button>
-        <button type="button" className="secondary-button compact-button auth-toolbar-quiet" onClick={() => void refreshAllQuotas()} disabled={loading || busy || quotaRefreshing || !files.some((file) => !readBoolean(file, 'disabled') && quotaProviderForFile(file))}>
+        <button type="button" className="secondary-button small-button ghost" onClick={() => void refreshAllQuotas()} disabled={loading || busy || quotaRefreshing || !files.some((file) => !readBoolean(file, 'disabled') && hasQuota(file))}>
           <RefreshCw size={16} className={quotaRefreshing ? 'spin' : ''} />{t('authFiles.toolbar.refreshQuota')}
         </button>
-        <button type="button" className="primary-button compact-button" onClick={() => fileInputRef.current?.click()} disabled={busy}>
+        <button type="button" className="secondary-button small-button" onClick={() => fileInputRef.current?.click()} disabled={busy}>
           <Import size={16} />{t('authFiles.import')}
         </button>
+        <button type="button" className="secondary-button small-button ghost" disabled={busy || loading} onClick={() => { setBatchScope(new Set(visibleFiles.map(quotaKey))); setBatchOpen(true); }}>{t('authFiles.operations.title')}</button>
+        <button type="button" className="secondary-button small-button" disabled={busy || loading} onClick={() => setTagManagerOpen(true)}>{t('authFiles.tags.manage')}</button>
         <input ref={fileInputRef} type="file" accept=".json,application/json" multiple hidden onChange={(event) => void handleUpload(event)} />
         </div>
       </header>
@@ -493,29 +547,48 @@ export function AuthFileManagementPage() {
       {error ? <MessageNotice message={error} onDismiss={() => setError('')} /> : null}
       <FloatingNotice key={feedback.revision} notice={feedback.notice} onDismiss={feedback.clearNotice} />
 
-      <section className="panel auth-files-panel real-auth-files-panel">
+      <section className="panel surface-bare auth-files-panel real-auth-files-panel">
         <div className="auth-files-toolbar">
-          <div className="auth-files-search"><Search size={16} aria-hidden="true" />
+          <div className="auth-files-search search-control" data-size="compact"><Search size={16} aria-hidden="true" />
           <input value={filter} onChange={(event) => setFilter(event.currentTarget.value)} placeholder={t('authFiles.searchPlaceholder')} aria-label={t('authFiles.searchPlaceholder')} />
           </div>
           <div className="auth-files-filters">
-          <select value={providerFilter} onChange={(event) => setProviderFilter(event.currentTarget.value)} aria-label={t('authFiles.filter.allProviders')}>
+          <Select value={untaggedOnly ? untaggedFilterValue : tagFilter} onChange={(event) => { setUntaggedOnly(event.currentTarget.selectedIndex === 1); setTagFilter(event.currentTarget.selectedIndex === 1 ? '' : event.currentTarget.value); }} aria-label={t('authFiles.tags.label')}>
+            <option value="">{t('authFiles.tags.all')}</option>
+            <option value={untaggedFilterValue}>{t('authFiles.tags.untagged')} ({files.filter(file => !normalizeAuthFileTags(file.tags).length).length})</option>
+            {tags.map(tag => <option key={tag} value={tag}>{privacy.text(tag, tagIdentities)} ({tagCounts.get(tag) ?? 0})</option>)}
+          </Select>
+          {tagFilter || untaggedOnly ? (
+            <button
+              type="button"
+              className="filter-chip auth-active-tag-badge"
+              onClick={() => { setTagFilter(''); setUntaggedOnly(false); }}
+              title={t("authFiles.tags.filterClear")}
+              aria-label={t("authFiles.tags.filterClear")}
+            >
+              <span>{untaggedOnly ? t('authFiles.tags.untagged') : privacy.text(tagFilter, tagIdentities)}</span>
+              <X size={12} aria-hidden="true" />
+            </button>
+          ) : null}
+          <Select value={providerFilter} onChange={(event) => setProviderFilter(event.currentTarget.value)} aria-label={t('authFiles.filter.allProviders')}>
             <option value="all">{t('authFiles.filter.allProviders')}</option>
             {providers.map((provider) => <option key={provider} value={provider}>{provider}</option>)}
-          </select>
-          <select value={statusFilter} onChange={(event) => setStatusFilter(event.currentTarget.value as typeof statusFilter)} aria-label={t('authFiles.filter.allStatuses')}>
+          </Select>
+          <Select value={statusFilter} onChange={(event) => setStatusFilter(event.currentTarget.value as typeof statusFilter)} aria-label={t('authFiles.filter.allStatuses')}>
             <option value="all">{t('authFiles.filter.allStatuses')}</option>
             <option value="enabled">{t('authFiles.filter.enabled')}</option>
             <option value="disabled">{t('authFiles.filter.disabled')}</option>
+            <option value="problem">{t('authFiles.filter.problem')}</option>
             <option value="runtime">{t('authFiles.filter.runtime')}</option>
-          </select>
+          </Select>
           </div>
+          <CardLayoutSwitch className="auth-files-layout-control" value={layout} onChange={setLayout} />
         </div>
 
         {loading ? (
           <div className="management-loading"><LoaderCircle size={20} className="spin" />{t('authFiles.loading')}</div>
         ) : visibleFiles.length === 0 ? (
-          <div className="management-empty"><FileDown size={24} /><strong>{files.length ? t('authFiles.empty.filtered') : t('authFiles.empty.none')}</strong><span>{files.length ? t('authFiles.empty.tryFilter') : t('authFiles.empty.upload')}</span></div>
+          <EmptyState className="management-empty" icon={<FileDown size={24} />} title={files.length ? t('authFiles.empty.filtered') : t('authFiles.empty.none')}>{files.length ? t('authFiles.empty.tryFilter') : t('authFiles.empty.upload')}</EmptyState>
         ) : (
           <div className="auth-file-table-scroll">
           <div className="auth-file-list-head" aria-hidden="true">
@@ -525,15 +598,24 @@ export function AuthFileManagementPage() {
             <span>{t('authFiles.list.quota')}</span>
             <span>{t('authFiles.list.actions')}</span>
           </div>
-          <div className="auth-file-card-grid" role="list" aria-label={t('authFiles.title')}>
+          <CardLayoutGrid layout={layout} className="auth-file-card-grid" role="list" aria-label={t('authFiles.title')} columns={credentialColumns}
+            heights={pageFiles.map((file) => settledHeight(quotaKey(file), estimateCredentialCardHeight({
+              quota: quotas[quotaKey(file)] ?? idleQuota(),
+              tags: normalizeAuthFileTags(file.tags).length > 0,
+              cooldown: Boolean(normalizeAuthFileCooldowns(file.cooldowns, receivedAtMs, observedAt)?.records?.length),
+              expanded: expandedFiles.has(quotaKey(file)),
+              glance: layout === 'compact' && !openGlances.has(quotaKey(file)),
+            }), (quotas[quotaKey(file)] ?? idleQuota()).status === 'loading'))}>
             {pageFiles.map((file) => {
               const name = fileName(file);
               const key = quotaKey(file);
-              const icon = providerIcons[providerKey(file)] ?? geminiIcon;
+              const icon = resolveProviderIcon(providerKey(file), providerIcons, findPluginLogo(plugins, providerKey(file), readString(file, 'quota_plugin_id', 'quotaPluginId')));
               const disabled = readBoolean(file, 'disabled');
               const priority = parseAuthFilePriority(file.priority) ?? 0;
-              const identity = readString(file, 'email', 'project_id', 'label');
-              const note = readString(file, 'note');
+              const identities = authFileIdentities(file);
+              const identity = privacy.text(readString(file, 'email', 'project_id', 'label'), identities);
+              const displayName = privacy.text(name, identities);
+              const note = privacy.text(readString(file, 'note'), identities);
               const quota = quotas[quotaKey(file)] ?? idleQuota();
               const quotaProvider = quotaProviderForFile(file);
               const metadata = providerKey(file) === 'codex' ? codexMetadataFor(file) : undefined;
@@ -549,42 +631,73 @@ export function AuthFileManagementPage() {
               const detailsId = `auth-file-details-${encodeURIComponent(key)}`;
               const cooldownResetIndex = authFileCooldownResetIndex(file);
               const resettingCooldown = Boolean(cooldownResetIndex && cooldownResetting.has(cooldownResetIndex));
+              const glance = layout === 'compact' && !openGlances.has(key);
+              const lowest = glance ? lowestQuotaRow(quota) : null;
               return (
-                <article className={`auth-file-card ${disabled ? 'is-disabled' : ''}`} key={key} role="listitem" aria-label={identity || name}>
+                <article className={`auth-file-card surface-card ${disabled ? 'is-disabled' : ''}`} key={key} role="listitem" aria-label={identity || displayName} data-glance={glance ? '' : undefined}>
                   <div className="auth-credential-row">
                   <header className={`auth-card-header auth-list-cell ${identity ? '' : 'filename-only'}`}>
-                    <img src={icon} alt="" data-provider={providerKey(file)} className={providerKey(file) === 'devin' ? 'provider-logo devin-logo' : 'provider-logo'} />
+                    {icon.kind === 'builtin'
+                      ? <img src={icon.src} alt="" data-provider={providerKey(file)} className={providerKey(file) === 'devin' ? 'provider-logo devin-logo' : 'provider-logo'} />
+                      : <PluginLogo src={icon.kind === 'plugin' ? icon.src : ''} size={35} />}
                     <div className="auth-card-identity">
-                      <strong title={identity || name}>{identity || name}</strong>
-                      <span className="auth-card-filename" title={name}>{identity ? name : providerName(file)}</span>
+                      <strong title={identity || displayName}>{identity || displayName}</strong>
+                      {glance ? <span className="auth-card-glance-line">{plan ? <span className="auth-card-glance-plan" title={plan}>{plan}</span> : null}{lowest ? <span title={`${lowest.label} · ${t('authFiles.settings.quotaRemaining')}`}>{lowest.label} {Math.round(Math.max(0, Math.min(100, lowest.remainingPercent ?? 0)))}%</span> : null}</span> : null}
+                      <span className="auth-card-filename" title={displayName}>{identity ? displayName : providerName(file)}</span>
+                      {normalizeAuthFileTags(file.tags).length > 0 ? <div className="auth-card-tags-container">
+                        <div className="auth-file-tags" role="group" aria-label={t("authFiles.tags.label")}>
+                          {normalizeAuthFileTags(file.tags).map((tag) => (
+                            <button
+                              key={tag}
+                              type="button"
+                              className={`filter-chip auth-tag-chip ${tagFilter === tag ? "active" : ""}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setUntaggedOnly(false);
+                                setTagFilter((current) => (current === tag ? "" : tag));
+                              }}
+                              title={t(tagFilter === tag ? "authFiles.tags.filterClear" : "authFiles.tags.filterBy", {
+                                tag: privacy.text(tag, identities),
+                              })}
+                              aria-pressed={tagFilter === tag}
+                            >
+                              <span>{privacy.text(tag, identities)}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div> : null}
                       {isRuntimeOnly(file) ? <span className="auth-card-provider">{t('authFiles.runtime')}</span> : null}
                     </div>
                   </header>
                   <div className="auth-list-cell auth-list-plan" data-label={t('authFiles.list.plan')}>
-                    <span title={plan || undefined}>{plan || '—'}</span>
+                    {plan ? <span title={plan}>{plan}</span> : null}
                     {expiryMs !== undefined ? <small title={t('authFiles.list.expiry', { time: formatDate(new Date(expiryMs).toISOString()) })}>{expiryMs <= now ? t('authFiles.list.expired') : t('authFiles.list.daysRemaining', { count: Math.ceil((expiryMs - now) / 86_400_000) })}</small> : null}
                   </div>
                   <div className="auth-list-cell auth-list-status" data-label={t('authFiles.list.status')}>
                     <span className={`auth-status-badge ${hasCooldown && !health.disabled ? 'warning' : health.tone}`} title={statusLabel}>{statusLabel}</span>
                     <small>{t('authFiles.priority.button', { priority })}</small>
+                    {layout === 'compact' ? <button type="button" className="secondary-button tiny-button auth-card-glance-toggle" onClick={() => toggleGlance(key)} aria-expanded={!glance}
+                      aria-label={`${t(glance ? 'cardLayout.details.show' : 'cardLayout.details.hide')}: ${identity || displayName}`} title={t(glance ? 'cardLayout.details.show' : 'cardLayout.details.hide')}>
+                      <ChevronDown size={14} aria-hidden="true" />
+                    </button> : null}
                   </div>
                   <div className="auth-list-cell auth-list-recent" data-label={t('authFiles.list.recent')}><AuthFileRequestStatus file={file} compact /></div>
                   <div className="auth-list-cell auth-list-usage" data-label={t('authFiles.usage.title')}><AuthFileUsageSummary file={file} /></div>
                   <div className="auth-list-cell auth-list-quota" data-label={t('authFiles.list.quota')}>
                     {quotaProvider ? <AuthFileQuotaPanel compact dense quota={quota} file={file} disabled={busy || disabled} onRefresh={() => void refreshQuota(file)} onReset={quotaProvider === 'codex' || quotaProvider === 'claude' ? () => void resetQuota(file, quota) : undefined} /> : <span className="auth-list-muted">{t('authFiles.list.noQuota')}</span>}
-                    <QuotaActionFeedback quota={quota} name={name} />
+                    <QuotaActionFeedback quota={quota} name={displayName} />
                   </div>
                   <footer className="auth-card-actions auth-list-cell" data-label={t('authFiles.list.actions')}>
                     <div className="auth-list-icon-actions">
-                      <button type="button" className="auth-list-action" onClick={() => void refreshQuota(file)} disabled={busy || disabled || !quotaProvider || quota.status === 'loading'} title={t('authFiles.quota.refresh')} aria-label={t('authFiles.quota.refresh')}><RefreshCw size={15} className={quota.status === 'loading' ? 'spin' : ''} aria-hidden="true" /></button>
-                      <button type="button" className="auth-list-action" onClick={() => setSettingsName(name)} disabled={busy || resettingCooldown || !isOAuthCredentialFile(file)} title={t(isOAuthCredentialFile(file) ? 'authFiles.settings.title' : 'authFiles.fileOnly')} aria-label={t('authFiles.settings.title')}><Settings2 size={15} aria-hidden="true" /></button>
-                      <button type="button" className="auth-list-action" onClick={() => setModelViewName(name)} disabled={busy || !providerKey(file)} title={t('authFiles.models.viewTitle')} aria-label={t('authFiles.models.viewTitle')}><Network size={15} aria-hidden="true" /></button>
-                      <button type="button" className="auth-list-action muted" onClick={() => void copyName(name)} disabled={busy} title={t('authFiles.copyName')} aria-label={t('authFiles.copyName')}>{copied === name ? <Check size={15} aria-hidden="true" /> : <Copy size={15} aria-hidden="true" />}</button>
-                      <button type="button" className="auth-list-action danger" onClick={() => void deleteFile(file)} disabled={busy || resettingCooldown || isRuntimeOnly(file)} title={t('common.delete')} aria-label={t('common.delete')}><Trash2 size={15} aria-hidden="true" /></button>
+                      <button type="button" className="secondary-button small-button" onClick={() => void refreshQuota(file)} disabled={busy || disabled || !quotaProvider || quota.status === 'loading'} title={t('authFiles.quota.refresh')}><RefreshCw size={14} className={quota.status === 'loading' ? 'spin' : ''} aria-hidden="true" />{t('authFiles.action.refreshQuota')}</button>
+                      <button type="button" className="secondary-button small-button" onClick={() => setSettingsName(name)} disabled={busy || resettingCooldown || !isOAuthCredentialFile(file)} title={t(isOAuthCredentialFile(file) ? 'authFiles.settings.title' : 'authFiles.fileOnly')}>{t('authFiles.action.settings')}</button>
+                      <button type="button" className="secondary-button small-button" onClick={() => setModelViewName(name)} disabled={busy || !providerKey(file)} title={t('authFiles.models.viewTitle')}>{t('authFiles.action.models')}</button>
+                      <button type="button" className="secondary-button small-button" onClick={() => void copyName(name)} disabled={busy} title={t('authFiles.copyName')}>{copied === name ? <Check size={14} aria-hidden="true" /> : null}{t('authFiles.action.copy')}</button>
+                      <button type="button" className="danger-button small-button" onClick={() => void deleteFile(file)} disabled={busy || resettingCooldown || isRuntimeOnly(file)} title={t('common.delete')}>{t('common.delete')}</button>
                     </div>
                     <div className="auth-list-main-actions">
-                      <button type="button" className="auth-list-switch" role="switch" aria-checked={!disabled} aria-label={`${t(disabled ? 'common.enable' : 'common.disable')} ${identity || name}`} onClick={() => void toggleStatus(file)} disabled={busy || resettingCooldown || !isOAuthCredentialFile(file)} title={t(isOAuthCredentialFile(file) ? disabled ? 'common.enable' : 'common.disable' : 'authFiles.fileOnly')}><span /></button>
-                      <button type="button" className="auth-list-details-button" onClick={() => toggleDetails(key)} aria-expanded={expanded} aria-controls={detailsId}>{t(expanded ? 'authFiles.list.collapse' : 'authFiles.list.details')}</button>
+                      <button type="button" className={`${disabled ? 'primary-button' : 'secondary-button'} compact-button auth-card-toggle`} role="switch" aria-checked={!disabled} aria-label={`${t(disabled ? 'common.enable' : 'common.disable')} ${identity || displayName}`} onClick={() => void toggleStatus(file)} disabled={busy || resettingCooldown || !isOAuthCredentialFile(file)} title={t(isOAuthCredentialFile(file) ? disabled ? 'common.enable' : 'common.disable' : 'authFiles.fileOnly')}>{t(disabled ? 'common.enable' : 'common.disable')}</button>
+                      <button type="button" className="secondary-button small-button auth-list-details-button" onClick={() => toggleDetails(key)} aria-expanded={expanded} aria-controls={detailsId}>{t(expanded ? 'authFiles.list.collapse' : 'authFiles.list.details')}</button>
                     </div>
                   </footer>
                   </div>
@@ -594,8 +707,9 @@ export function AuthFileManagementPage() {
                   <div className="auth-list-details" id={detailsId} hidden={!expanded}>
                     {!showCooldown ? <AuthFileHealthStatus file={file} receivedAtMs={receivedAtMs} observedAt={observedAt} /> : null}
                     <AuthFileRequestStatus file={file} summary />
+                    {isOAuthCredentialFile(file) ? <button type="button" className="secondary-button small-button" disabled={busy || disabled || resettingCooldown} onClick={() => void refreshToken(file)}>{t('authFiles.operations.refresh')}</button> : null}
                     <div className="auth-card-meta">
-                      <strong title={name}>{name}</strong>
+                      <strong title={displayName}>{displayName}</strong>
                       <span>{t('authFiles.priority.button', { priority })}</span>
                       {expiryMs !== undefined ? <span>{t('authFiles.list.expiry', { time: formatDate(new Date(expiryMs).toISOString()) })}</span> : null}
                       <span>{t('authFiles.list.size')} · {readNumber(file, 'size') === null ? t('authFiles.unknownSize') : `${Math.ceil((readNumber(file, 'size') ?? 0) / 1024)} KB`}</span>
@@ -606,109 +720,112 @@ export function AuthFileManagementPage() {
                 </article>
               );
             })}
-          </div>
+          </CardLayoutGrid>
           </div>
         )}
         {!loading && visibleFiles.length > 0 && files.length > 10 ? <nav className="auth-list-pagination" aria-label={t('authFiles.title')}>
           <span>{t('authFiles.list.pageSummary', { page: currentPage, pages: pageCount, start: (currentPage - 1) * pageSize + 1, end: Math.min(currentPage * pageSize, visibleFiles.length), total: visibleFiles.length })}</span>
-          <label>{t('authFiles.list.pageSize')}<select value={pageSize} onChange={(event) => setPageSize(Number(event.currentTarget.value))}>
+          <label>{t('authFiles.list.pageSize')}<Select value={pageSize} onChange={(event) => setPageSize(Number(event.currentTarget.value))}>
             {[10, 20, 50].map((size) => <option key={size} value={size}>{t('authFiles.list.perPage', { count: size })}</option>)}
-          </select></label>
-          <button type="button" className="secondary-button compact-button" disabled={currentPage === 1} onClick={() => setPage(currentPage - 1)}><ChevronLeft size={14} aria-hidden="true" />{t('authFiles.list.previous')}</button>
-          <button type="button" className="secondary-button compact-button" disabled={currentPage === pageCount} onClick={() => setPage(currentPage + 1)}>{t('authFiles.list.next')}<ChevronRight size={14} aria-hidden="true" /></button>
+          </Select></label>
+          <button type="button" className="secondary-button small-button" disabled={currentPage === 1} onClick={() => setPage(currentPage - 1)}><ChevronLeft size={14} aria-hidden="true" />{t('authFiles.list.previous')}</button>
+          <button type="button" className="secondary-button small-button" disabled={currentPage === pageCount} onClick={() => setPage(currentPage + 1)}>{t('authFiles.list.next')}<ChevronRight size={14} aria-hidden="true" /></button>
         </nav> : null}
       </section>
       {runtimeCount > 0 ? <p className="page-footnote">{t('authFiles.runtimeFootnote', { count: runtimeCount })}</p> : null}
 
-      {settingsName ? <AuthFileSettingsDialog key={settingsName} name={settingsName} onClose={() => setSettingsName(null)} onSaved={() => {
-        showNotice({ key: 'authFiles.settings.updated', variables: { name: settingsName } });
+      {batchOpen ? <AuthFileBatchDialog files={files.filter(file => batchScope.has(quotaKey(file)))} onClose={() => setBatchOpen(false)} onChanged={() => loadFiles(false)} /> : null}
+      {tagManagerOpen ? <CredentialTagManager files={files} onClose={() => setTagManagerOpen(false)} onChanged={() => loadFiles(false)} onFilter={tag => {
+        setTagFilter(tag ?? ''); setUntaggedOnly(tag === null); setTagManagerOpen(false);
+      }} /> : null}
+      {settingsName ? <AuthFileSettingsDialog key={settingsName} name={settingsName} displayName={shownNameFor(settingsName)} provider={providerKey(files.find((file) => fileName(file) === settingsName) ?? {})}
+          existingTags={tags} existingTagCounts={tagCounts} onClose={() => { setSettingsName(null); void loadFiles(false); }} onSaved={() => {
+        showNotice({ key: 'authFiles.settings.updated', variables: { name: shownNameFor(settingsName) } });
         setSettingsName(null);
         void loadFiles(false);
       }} /> : null}
 
-      {modelViewName ? <AuthFileModelsDialog name={modelViewName} onClose={() => setModelViewName(null)} /> : null}
+      {modelViewName ? <AuthFileModelsDialog name={modelViewName} displayName={shownNameFor(modelViewName)} onClose={() => setModelViewName(null)} /> : null}
 
       {oauthModelTarget ? (
-        <div className="model-discovery-backdrop" onMouseDown={(event) => event.currentTarget === event.target && !oauthModelSaving && closeOauthModels()}>
-          <section ref={oauthModelsDialogRef} className="model-discovery-dialog auth-model-dialog" role="dialog" aria-modal="true" aria-labelledby="oauth-model-title">
-            <div className="model-discovery-header">
-              <div>
-                <h2 id="oauth-model-title">{t(oauthModelTarget.scope === 'credential' ? 'authFiles.models.title' : 'authFiles.models.globalButton')}</h2>
-                {oauthModelTarget.scope === 'credential' ? (
-                  <span className="auth-model-target" title={oauthModelTarget.name}>{oauthModelTarget.name}</span>
-                ) : (
-                  <label className="auth-model-provider">
-                    <span>{t('authFiles.models.provider')}</span>
-                    <select value={oauthModelTarget.provider} disabled={oauthModelSaving} onChange={(event) => {
-                      const provider = oauthModelProviders.find((item) => item.provider === event.currentTarget.value);
-                      if (provider) void openOauthModelSettings({ ...provider, scope: 'provider' });
-                    }}>
-                      {oauthModelProviders.map((provider) => <option key={provider.provider} value={provider.provider}>{provider.label}</option>)}
-                    </select>
-                  </label>
-                )}
-                <span>{t(oauthModelTarget.scope === 'credential' ? 'authFiles.models.description' : 'authFiles.models.globalDescription', { provider: oauthModelTarget.label })}</span>
-              </div>
-              <button type="button" className="icon-button quiet" onClick={closeOauthModels} disabled={oauthModelSaving} title={t('common.close')} aria-label={t('common.close')}><X size={18} aria-hidden="true" /></button>
-            </div>
-
-            <div className="model-discovery-search">
-              <Search size={16} aria-hidden="true" />
-              <input autoFocus value={oauthModelSearch} onChange={(event) => setOauthModelSearch(event.currentTarget.value)} placeholder={t('authFiles.models.search')} />
-            </div>
-
-            <div className="model-discovery-toolbar">
-              <span>{t('authFiles.models.summary', { total: oauthModels.length, excluded: excludedOauthModelCount })}</span>
-              <div>
-                <button type="button" className="secondary-button compact-button" onClick={() => setOauthModelsExcluded(oauthModels, true)} disabled={oauthModelLoading || oauthModelSaving || oauthModels.length === 0} title={t('authFiles.models.excludeAllHint')}>{t('authFiles.models.excludeAll')}</button>
-                <button type="button" className="secondary-button compact-button" onClick={() => setOauthModelsExcluded(oauthModels, false)} disabled={oauthModelLoading || oauthModelSaving || oauthModels.length === 0} title={t('authFiles.models.clearHint')}>{t('authFiles.models.clearSelected')}</button>
-              </div>
-            </div>
-
-            <div className="model-discovery-content">
-              {oauthModelLoading ? (
-                <div className="model-discovery-message"><LoaderCircle size={20} className="spin" />{t('authFiles.models.loading')}</div>
-              ) : oauthModelError && !oauthModelSettings ? (
-                <div className="model-discovery-message error"><strong>{t('authFiles.models.loadFailed')}</strong><span>{oauthModelError}</span></div>
+        <Dialog className="model-discovery-dialog auth-model-dialog" backdropClassName="model-discovery-backdrop" labelledBy="oauth-model-title" onClose={closeOauthModels} closeDisabled={oauthModelSaving} dismissOnBackdrop>
+          <div className="model-discovery-header">
+            <div>
+              <h2 id="oauth-model-title">{t(oauthModelTarget.scope === 'credential' ? 'authFiles.models.title' : 'authFiles.models.globalButton')}</h2>
+              {oauthModelTarget.scope === 'credential' ? (
+                <span className="auth-model-target" title={shownNameFor(oauthModelTarget.name)}>{shownNameFor(oauthModelTarget.name)}</span>
               ) : (
-                <div className="model-discovery-results">
-                  <div>
-                    {oauthModelError ? <MessageNotice message={oauthModelError} onDismiss={() => setOauthModelError('')} /> : null}
-                    {oauthModelSettings?.catalogError ? <MessageNotice tone="info" message={t('authFiles.models.catalogUnavailable')} /> : null}
-                  </div>
-                  {visibleOauthModels.length === 0 ? (
-                    <div className="model-discovery-message"><strong>{oauthModels.length ? t('authFiles.models.noMatch') : t('authFiles.models.empty')}</strong></div>
-                  ) : (
-                    <div className="model-discovery-list">
-                      {visibleOauthModels.map((model) => {
-                        const wildcardRule = oauthExcludedRules.find((rule) => rule.includes('*') && modelMatchesRule(model.id, rule));
-                        const checked = oauthExcludedRules.some((rule) => modelMatchesRule(model.id, rule));
-                        return (
-                          <label className={['model-discovery-row', checked ? 'selected' : '', wildcardRule ? 'rule-blocked' : ''].join(' ')} key={model.id}>
-                            <input type="checkbox" checked={checked} disabled={oauthModelSaving || Boolean(wildcardRule)} onChange={(event) => setOauthModelsExcluded([model], event.currentTarget.checked)} />
-                            <span><strong title={model.id}>{model.id}</strong>{model.displayName ? <small title={model.displayName}>{model.displayName}</small> : null}{wildcardRule ? <small>{t('authFiles.models.wildcardBlocked', { rule: wildcardRule })}</small> : null}</span>
-                            {checked ? <Check size={16} aria-hidden="true" /> : null}
-                          </label>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
+                <label className="auth-model-provider">
+                  <span>{t('authFiles.models.provider')}</span>
+                  <Select value={oauthModelTarget.provider} disabled={oauthModelSaving} onChange={(event) => {
+                    const provider = oauthModelProviders.find((item) => item.provider === event.currentTarget.value);
+                    if (provider) void openOauthModelSettings({ ...provider, scope: 'provider' });
+                  }}>
+                    {oauthModelProviders.map((provider) => <option key={provider.provider} value={provider.provider}>{provider.label}</option>)}
+                  </Select>
+                </label>
               )}
+              <span>{t(oauthModelTarget.scope === 'credential' ? 'authFiles.models.description' : 'authFiles.models.globalDescription', { provider: oauthModelTarget.label })}</span>
             </div>
+            <button type="button" className="icon-button quiet" onClick={closeOauthModels} disabled={oauthModelSaving} title={t('common.close')} aria-label={t('common.close')}><X size={18} aria-hidden="true" /></button>
+          </div>
 
-            <label className="auth-model-rules" htmlFor="oauth-model-rules">
-              <span>{t('authFiles.models.rulesLabel')}</span>
-              <textarea id="oauth-model-rules" rows={3} spellCheck={false} value={oauthExcludedRulesText} disabled={oauthModelLoading || oauthModelSaving || !oauthModelSettings} onChange={(event) => setOauthExcludedRulesText(event.currentTarget.value)} placeholder={t('authFiles.models.rulesPlaceholder')} aria-describedby="oauth-model-rules-hint" />
-              <small id="oauth-model-rules-hint">{t('authFiles.models.rulesHint')}</small>
-            </label>
+          <div className="model-discovery-search search-control" data-size="default">
+            <Search size={16} aria-hidden="true" />
+            <input autoFocus value={oauthModelSearch} onChange={(event) => setOauthModelSearch(event.currentTarget.value)} placeholder={t('authFiles.models.search')} />
+          </div>
 
-            <div className="model-discovery-actions">
-              <button type="button" className="secondary-button" onClick={closeOauthModels} disabled={oauthModelSaving}>{t('common.cancel')}</button>
-              <button type="button" className="primary-button" onClick={() => void saveOauthModels()} disabled={oauthModelLoading || oauthModelSaving || !oauthModelSettings}>{oauthModelSaving ? t('common.saving') : t('authFiles.models.save', { count: oauthExcludedRules.length })}</button>
+          <div className="model-discovery-toolbar">
+            <span>{t('authFiles.models.summary', { total: oauthModels.length, excluded: excludedOauthModelCount })}</span>
+            <div>
+              <button type="button" className="secondary-button small-button" onClick={() => setOauthModelsExcluded(oauthModels, true)} disabled={oauthModelLoading || oauthModelSaving || oauthModels.length === 0} title={t('authFiles.models.excludeAllHint')}>{t('authFiles.models.excludeAll')}</button>
+              <button type="button" className="secondary-button small-button" onClick={() => setOauthModelsExcluded(oauthModels, false)} disabled={oauthModelLoading || oauthModelSaving || oauthModels.length === 0} title={t('authFiles.models.clearHint')}>{t('authFiles.models.clearSelected')}</button>
             </div>
-          </section>
-        </div>
+          </div>
+
+          <div className="surface-section model-discovery-content">
+            {oauthModelLoading ? (
+              <div className="model-discovery-message"><LoaderCircle size={20} className="spin" />{t('authFiles.models.loading')}</div>
+            ) : oauthModelError && !oauthModelSettings ? (
+              <div className="model-discovery-message error"><strong>{t('authFiles.models.loadFailed')}</strong><span>{oauthModelError}</span></div>
+            ) : (
+              <div className="model-discovery-results">
+                <div>
+                  {oauthModelError ? <MessageNotice message={oauthModelError} onDismiss={() => setOauthModelError('')} /> : null}
+                  {oauthModelSettings?.catalogError ? <MessageNotice tone="info" message={t('authFiles.models.catalogUnavailable')} /> : null}
+                </div>
+                {visibleOauthModels.length === 0 ? (
+                  <div className="model-discovery-message"><strong>{oauthModels.length ? t('authFiles.models.noMatch') : t('authFiles.models.empty')}</strong></div>
+                ) : (
+                  <div className="model-discovery-list">
+                    {visibleOauthModels.map((model) => {
+                      const wildcardRule = oauthExcludedRules.find((rule) => rule.includes('*') && modelMatchesRule(model.id, rule));
+                      const checked = oauthExcludedRules.some((rule) => modelMatchesRule(model.id, rule));
+                      return (
+                        <label className={['model-discovery-row', checked ? 'selected' : '', wildcardRule ? 'rule-blocked' : ''].join(' ')} key={model.id}>
+                          <Checkbox checked={checked} disabled={oauthModelSaving || Boolean(wildcardRule)} onChange={(event) => setOauthModelsExcluded([model], event.currentTarget.checked)} />
+                          <span><strong title={model.id}>{model.id}</strong>{model.displayName ? <small title={model.displayName}>{model.displayName}</small> : null}{wildcardRule ? <small>{t('authFiles.models.wildcardBlocked', { rule: wildcardRule })}</small> : null}</span>
+                          {checked ? <Check size={16} aria-hidden="true" /> : null}
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <label className="auth-model-rules" htmlFor="oauth-model-rules">
+            <span>{t('authFiles.models.rulesLabel')}</span>
+            <textarea id="oauth-model-rules" rows={3} spellCheck={false} value={oauthExcludedRulesText} disabled={oauthModelLoading || oauthModelSaving || !oauthModelSettings} onChange={(event) => setOauthExcludedRulesText(event.currentTarget.value)} placeholder={t('authFiles.models.rulesPlaceholder')} aria-describedby="oauth-model-rules-hint" />
+            <small id="oauth-model-rules-hint">{t('authFiles.models.rulesHint')}</small>
+          </label>
+
+          <div className="model-discovery-actions">
+            <button type="button" className="secondary-button" onClick={closeOauthModels} disabled={oauthModelSaving}>{t('common.cancel')}</button>
+            <button type="button" className="primary-button" onClick={() => void saveOauthModels()} disabled={oauthModelLoading || oauthModelSaving || !oauthModelSettings}>{oauthModelSaving ? t('common.saving') : t('authFiles.models.save', { count: oauthExcludedRules.length })}</button>
+          </div>
+        </Dialog>
       ) : null}
     </section>
   );

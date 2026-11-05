@@ -1,3 +1,4 @@
+import { EmptyState } from './EmptyState';
 import { useId, useMemo, useRef, useState } from 'react';
 import { ArrowRight, Search, X } from 'lucide-react';
 import { useI18n } from '../i18n';
@@ -22,7 +23,7 @@ export function ModelSelectionPanel({ models, selected, loading, onMove }: Model
   const searchLabel = t(selected ? 'apiAccess.modelDialog.searchSelected' : 'apiAccess.modelDialog.searchUnselected');
 
   return (
-    <section className="model-transfer-panel" aria-labelledby={titleId} aria-busy={loading}>
+    <section className="surface-section model-transfer-panel" aria-labelledby={titleId} aria-busy={loading}>
       <div className="model-transfer-panel-heading">
         <h3 id={titleId}>{t(selected ? 'apiAccess.modelDialog.selected' : 'apiAccess.modelDialog.unselected')}</h3>
         <span className="model-transfer-count">{query ? `${visibleModels.length} / ${models.length}` : models.length}</span>
@@ -37,7 +38,7 @@ export function ModelSelectionPanel({ models, selected, loading, onMove }: Model
             : query ? 'apiAccess.modelDialog.addResults' : 'apiAccess.modelDialog.addAll')}
         </button>
       </div>
-      <div className="model-transfer-search">
+      <div className="model-transfer-search search-control" data-size="default">
         <Search size={15} aria-hidden="true" />
         <input ref={searchRef} value={search} onChange={(event) => setSearch(event.currentTarget.value)} placeholder={searchLabel} aria-label={searchLabel} />
         {search ? (
@@ -67,9 +68,9 @@ export function ModelSelectionPanel({ models, selected, loading, onMove }: Model
             {selected ? <X size={16} aria-hidden="true" /> : <ArrowRight size={16} aria-hidden="true" />}
           </button>
         )) : (
-          <div className="model-transfer-empty">
+          <EmptyState variant="compact" className="model-transfer-empty">
             {t(query ? 'apiAccess.modelDialog.noMatch' : loading ? 'apiAccess.modelDialog.fetching' : selected ? 'apiAccess.modelDialog.emptySelected' : 'apiAccess.modelDialog.emptyUnselected')}
-          </div>
+          </EmptyState>
         )}
       </div>
     </section>

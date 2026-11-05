@@ -2,6 +2,321 @@ use super::support::*;
 use super::*;
 
 #[test]
+fn core_install_restores_runtime_for_either_startup_setting_or_running_core() {
+    for was_running in [false, true] {
+        for start_core_on_launch in [false, true] {
+            for run_on_startup in [false, true] {
+                let config = GuiConfigFile {
+                    start_core_on_launch,
+                    run_on_startup,
+                    ..GuiConfigFile::default()
+                };
+                assert_eq!(
+                    should_restore_core_after_install(was_running, &config, false),
+                    was_running || start_core_on_launch || run_on_startup
+                );
+                assert!(!should_restore_core_after_install(was_running, &config, true));
+            }
+        }
+    }
+}
+
+#[test]
+fn core_startup_retries_transient_failures_and_stops_after_success() {
+    let mut calls = 0;
+    let result = retry_core_operation(3, Duration::ZERO, || {
+        calls += 1;
+        if calls < 3 {
+            Err("port busy")
+        } else {
+            Ok(())
+        }
+    });
+    assert_eq!(result, Ok(()));
+    assert_eq!(calls, 3);
+
+    calls = 0;
+    let result = retry_core_operation(3, Duration::ZERO, || {
+        calls += 1;
+        Ok::<_, String>(())
+    });
+    assert!(result.is_ok());
+    assert_eq!(calls, 1);
+}
+
+#[test]
+fn core_startup_retry_returns_last_failure() {
+    let mut calls = 0;
+    let result = retry_core_operation(3, Duration::ZERO, || {
+        calls += 1;
+        Err::<(), _>(calls)
+    });
+    assert_eq!(result, Err(3));
+    assert_eq!(calls, 3);
+}
+
+#[test]
+fn core_port_check_waits_for_release_and_rejects_busy_ports() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    assert!(!wait_for_core_port_release(address));
+    drop(listener);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        listener.accept().unwrap();
+        drop(listener);
+    });
+    assert!(wait_for_core_port_release(address));
+    server.join().unwrap();
+}
+
+#[test]
+fn core_adoption_requires_a_live_process_and_ready_management_port() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    assert!(!core_processes_ready(&[], address));
+    assert!(core_processes_ready(&[std::process::id()], address));
+    assert!(!core_processes_ready(
+        &[std::process::id()],
+        SocketAddr::from(([127, 0, 0, 1], 0))
+    ));
+
+    let mut child = Command::new(if cfg!(windows) { "cmd" } else { "sh" })
+        .args(if cfg!(windows) {
+            ["/C", "exit 0"]
+        } else {
+            ["-c", "exit 0"]
+        })
+        .spawn()
+        .unwrap();
+    let process_id = child.id();
+    child.wait().unwrap();
+    assert!(!core_processes_ready(&[process_id], address));
+}
+
+#[test]
+fn core_version_list_normalizes_sorts_and_filters_releases() {
+    let releases = serde_json::from_str::<Vec<CoreReleaseVersion>>(
+        r#"[
+        {"tag_name":"v1.9.0"},
+        {"tag_name":"1.10.0"},
+        {"tag_name":"v1.10.0"},
+        {"tag_name":"v2.0.0-beta.1"},
+        {"tag_name":"v3.0.0","draft":true},
+        {"tag_name":"invalid"},
+        {"tag_name":"v1.8.0","prerelease":true}
+    ]"#,
+    )
+    .unwrap();
+    let versions = core_version_options(releases, &current_core_platform().unwrap());
+    assert_eq!(
+        versions
+            .iter()
+            .map(|version| version.version.as_str())
+            .collect::<Vec<_>>(),
+        ["v2.0.0-beta.1", "v1.10.0", "v1.9.0", "v1.8.0"]
+    );
+    assert!(versions[0].prerelease);
+    assert!(versions[3].prerelease);
+    assert!(!versions[1].prerelease);
+    assert!(!versions[1].asset_name.is_empty());
+}
+
+#[test]
+fn core_version_list_falls_back_to_multiple_atom_entries() {
+    for (status, api_body) in [
+        ("403 Forbidden", r#"{"message":"rate limit exceeded"}"#),
+        ("429 Too Many Requests", "rate limited"),
+        ("200 OK", "invalid json"),
+        ("200 OK", "[]"),
+    ] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let source = VersionDownloadCandidate::custom(&format!(
+            "http://{}/",
+            listener.local_addr().unwrap()
+        ));
+        let server = thread::spawn(move || {
+            let feed = r#"<feed>
+                <entry><link href="https://github.com/router-for-me/CLIProxyAPI/releases/tag/v1.9.0"/></entry>
+                <entry><title>v2.0.0-rc.1</title></entry>
+                <entry><title>v1.10.0</title></entry>
+                <entry><title>v1.10.0</title></entry>
+                <entry><title>invalid</title></entry>
+            </feed>"#;
+            for (path, response_status, body) in [
+                (CORE_RELEASES_API_URL, status, api_body),
+                (RELEASE_ATOM_URL, "200 OK", feed),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut buffer = [0; 8192];
+                let count = stream.read(&mut buffer).unwrap();
+                assert!(String::from_utf8_lossy(&buffer[..count]).contains(path));
+                write!(stream, "HTTP/1.1 {response_status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let releases = runtime
+            .block_on(fetch_core_versions_from_source(&client, &source, None))
+            .unwrap();
+        let versions = core_version_options(releases, &current_core_platform().unwrap());
+        assert_eq!(
+            versions
+                .iter()
+                .map(|version| version.version.as_str())
+                .collect::<Vec<_>>(),
+            ["v2.0.0-rc.1", "v1.10.0", "v1.9.0"]
+        );
+        assert!(versions[0].prerelease);
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn archived_failed_rollback_survives_a_successful_retry_without_installed_binary() {
+    let root = agent_test_home("archive-failed-rollback-retry");
+    let install = root.join("cpa-core");
+    let staging = root.join("cpa-core.staging");
+    let rollback = root.join("cpa-core.rollback");
+    fs::create_dir_all(&install).unwrap();
+    fs::create_dir_all(&staging).unwrap();
+    fs::write(install.join(core_binary_name()), b"original").unwrap();
+    fs::write(staging.join(core_binary_name()), b"replacement").unwrap();
+    backup_core_for_rollback(&install, &staging, &rollback).unwrap();
+    fs::remove_file(install.join(core_binary_name())).unwrap();
+
+    let archived = archive_previous_core_rollback(&rollback).unwrap().unwrap();
+    assert!(!rollback.exists());
+    apply_staged_core_with_rollback(&install, &staging, &rollback, || Ok(())).unwrap();
+    assert_eq!(fs::read(install.join(core_binary_name())).unwrap(), b"replacement");
+    assert_eq!(fs::read(archived.join("files").join(core_binary_name())).unwrap(), b"original");
+    assert!(archived.join("added-files.txt").is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn retry_with_stale_backup_can_succeed_or_roll_back_without_losing_history() {
+    for fail_restart in [false, true] {
+        let root = agent_test_home(if fail_restart { "archive-retry-restart-failure" } else { "archive-retry-success" });
+        let install = root.join("cpa-core");
+        let staging = root.join("cpa-core.staging");
+        let rollback = root.join("cpa-core.rollback");
+        fs::create_dir_all(&install).unwrap();
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(install.join(core_binary_name()), b"historical").unwrap();
+        fs::write(staging.join(core_binary_name()), b"next").unwrap();
+        backup_core_for_rollback(&install, &staging, &rollback).unwrap();
+        // Model an earlier update whose backup cleanup did not complete.
+        fs::write(install.join(core_binary_name()), b"current").unwrap();
+        let archived = archive_previous_core_rollback(&rollback).unwrap().unwrap();
+        let result = apply_staged_core_with_rollback(&install, &staging, &rollback, || {
+            if fail_restart { Err("restart failed".to_string()) } else { Ok(()) }
+        });
+        assert_eq!(result.is_err(), fail_restart);
+        let expected: &[u8] = if fail_restart { b"current" } else { b"next" };
+        assert_eq!(fs::read(install.join(core_binary_name())).unwrap(), expected);
+        assert_eq!(fs::read(archived.join("files").join(core_binary_name())).unwrap(), b"historical");
+        assert!(!rollback.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn rollback_archiving_handles_empty_partial_and_repeated_backups() {
+    let root = agent_test_home("archive-partial-rollback");
+    let rollback = root.join("cpa-core.rollback");
+    assert!(archive_previous_core_rollback(&rollback).unwrap().is_none());
+    fs::create_dir_all(&rollback).unwrap();
+    let empty = archive_previous_core_rollback(&rollback).unwrap().unwrap();
+    fs::create_dir_all(rollback.join("files")).unwrap();
+    fs::write(rollback.join("files").join("partial"), b"retain me").unwrap();
+    let partial = archive_previous_core_rollback(&rollback).unwrap().unwrap();
+    assert_ne!(empty, partial);
+    assert!(empty.is_dir());
+    assert_eq!(fs::read(partial.join("files").join("partial")).unwrap(), b"retain me");
+    assert!(!rollback.exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn rollback_archive_failure_preserves_original_backup() {
+    let root = agent_test_home("archive-rollback-failure");
+    let rollback = root.join("cpa-core.rollback");
+    fs::create_dir_all(&rollback).unwrap();
+    fs::write(rollback.join("original"), b"recoverable").unwrap();
+    // A file at the history path deterministically prevents directory creation.
+    fs::write(root.join("cpa-core.rollback-history"), b"occupied").unwrap();
+    let error = archive_previous_core_rollback(&rollback).unwrap_err();
+    assert!(error.contains("backup has been preserved"));
+    assert_eq!(fs::read(rollback.join("original")).unwrap(), b"recoverable");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn retry_must_preserve_backup_from_failed_rollback() {
+    let root = agent_test_home("review-preserve-failed-rollback");
+    let install = root.join("cpa-core");
+    let staging = root.join("cpa-core.staging");
+    let rollback = root.join("cpa-core.rollback");
+    fs::create_dir_all(&install).unwrap();
+    fs::create_dir_all(&staging).unwrap();
+    fs::write(install.join(core_binary_name()), b"working-original").unwrap();
+    fs::write(staging.join(core_binary_name()), b"broken-update").unwrap();
+    backup_core_for_rollback(&install, &staging, &rollback).unwrap();
+    // A failed restore leaves the new binary installed and the original in rollback.
+    fs::write(install.join(core_binary_name()), b"broken-update").unwrap();
+    let error = apply_staged_core_with_rollback(&install, &staging, &rollback, || {
+        panic!("a blocked update must not restart the kernel")
+    }).unwrap_err();
+    assert!(error.contains("will not be overwritten"));
+    assert_eq!(fs::read(install.join(core_binary_name())).unwrap(), b"broken-update");
+    assert!(staging.is_dir());
+
+    // A missing installed binary must not allow a subsequent successful update
+    // to delete the only remaining backup either.
+    fs::remove_file(install.join(core_binary_name())).unwrap();
+    assert!(apply_staged_core_with_rollback(&install, &staging, &rollback, || {
+        panic!("a missing installed binary must not bypass backup protection")
+    }).is_err());
+    let retained = fs::read(rollback.join("files").join(core_binary_name())).unwrap();
+    fs::remove_dir_all(root).unwrap();
+    assert_eq!(retained, b"working-original", "retry destroyed the recoverable original binary");
+}
+
+#[test]
+fn restored_rollback_allows_a_subsequent_successful_update() {
+    let root = agent_test_home("rollback-restore-then-retry");
+    let install = root.join("cpa-core");
+    let staging = root.join("cpa-core.staging");
+    let rollback = root.join("cpa-core.rollback");
+    fs::create_dir_all(&install).unwrap();
+    fs::create_dir_all(&staging).unwrap();
+    fs::write(install.join(core_binary_name()), b"working-original").unwrap();
+    fs::write(staging.join(core_binary_name()), b"working-update").unwrap();
+    backup_core_for_rollback(&install, &staging, &rollback).unwrap();
+    assert!(backup_core_for_rollback(&install, &staging, &rollback).is_err());
+    fs::write(install.join(core_binary_name()), b"broken-update").unwrap();
+    restore_core_rollback(&install, &rollback).unwrap();
+    assert_eq!(fs::read(install.join(core_binary_name())).unwrap(), b"working-original");
+    assert!(!rollback.exists());
+    apply_staged_core_with_rollback(&install, &staging, &rollback, || Ok(())).unwrap();
+    assert_eq!(fs::read(install.join(core_binary_name())).unwrap(), b"working-update");
+    assert!(!rollback.exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn core_process_starting_state_tracks_automatic_launch() {
     let state = CoreProcessState::new(true);
     assert!(state.is_starting());
@@ -48,6 +363,56 @@ fn core_child_sleep_command() -> Command {
         .stderr(Stdio::null());
     configure_background_command(&mut command);
     command
+}
+
+#[test]
+fn observed_child_exit_schedules_recovery_once_without_a_new_monitor() {
+    let state = CoreProcessState::new(false);
+    let pid = state.store_child(spawn_core_child(core_child_sleep_command()).unwrap()).unwrap();
+    assert_eq!(state.managed_pid(), Some(pid));
+    assert!(state.recovery.status().is_none());
+    {
+        let mut child = state.child.lock().unwrap();
+        let child = child.as_mut().unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+    assert_eq!(state.managed_pid(), None);
+    let status = state.recovery.status().unwrap();
+    assert_eq!(status.phase, "waiting");
+    assert_eq!(status.attempt, 1);
+    assert!(status.detail.contains(&pid.to_string()));
+    assert_eq!(state.managed_pid(), None);
+    assert_eq!(state.recovery.status().unwrap().attempt, 1);
+    state.recovery.cancel();
+}
+
+#[test]
+fn intentional_child_stop_does_not_request_recovery() {
+    let state = CoreProcessState::new(false);
+    state.store_child(spawn_core_child(core_child_sleep_command()).unwrap()).unwrap();
+    // Same ordering as stop_core_process_inner, without scanning or stopping
+    // any real installed kernels in the developer's workspace.
+    state.recovery.cancel();
+    let mut child = state.take_child().unwrap();
+    terminate_child(&mut child).unwrap();
+    drop(child);
+    assert_eq!(state.managed_pid(), None);
+    assert!(!state.recovery.wants_running());
+    assert!(state.recovery.status().is_none());
+}
+
+#[test]
+fn adopted_process_exit_also_requests_recovery() {
+    let state = CoreProcessState::new(false);
+    let mut child = spawn_core_child(core_child_sleep_command()).unwrap();
+    state.adopt_process_ids(&env::current_exe().unwrap(), vec![child.id()]).unwrap();
+    assert_eq!(state.managed_pid(), Some(child.id()));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(state.managed_pid(), None);
+    assert_eq!(state.recovery.status().unwrap().phase, "waiting");
+    state.recovery.cancel();
 }
 
 fn assert_core_child_survives(child: &mut Child) {
@@ -774,6 +1139,17 @@ fn v8_migration_preserves_network_settings_over_template_defaults() {
 }
 
 #[test]
+fn v8_migration_preserves_github_token() {
+    let template = "config-version: 8\nserver: {github-token: ''}\n";
+    let migrated = migrate_legacy_core_config_to_v8(template, "github-token: legacy-token\n").unwrap();
+    let value: serde_norway::Value = serde_norway::from_str(&migrated).unwrap();
+    assert_eq!(value["server"]["github-token"], "legacy-token");
+    assert!(value.get("github-token").is_none());
+    let current = "config-version: 8\nserver: {github-token: current-token}\n";
+    assert_eq!(migrate_legacy_core_config_to_v8(template, current).unwrap(), current);
+}
+
+#[test]
 fn v8_migration_preserves_explicit_canonical_clears_and_existing_v8_files() {
     let template = "config-version: 8\nserver: {trusted-proxies: [192.0.2.1]}\n";
     let old = "trusted-proxies: [127.0.0.1]\nserver: {trusted-proxies: []}\nclaude-header-defaults: {user-agent: legacy}\nclaude: {model-level-cooling: true}\noauth: {providers: {claude: null}, model-alias: {}}\noauth-model-alias: {claude: [{name: original, alias: old-alias}]}\n";
@@ -928,6 +1304,43 @@ fn handled_bundled_core_does_not_undo_a_manual_rollback_on_restart() {
 
     fs::remove_file(binary).unwrap();
     assert!(core_needs_bundled_install(&install_dir, "v7.3.17"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn manual_core_install_prevents_bundled_core_auto_install_on_restart() {
+    let root = agent_test_home("manual-core-install-older");
+    let install_dir = root.join("cpa-core");
+    let staging_dir = root.join("cpa-core.staging");
+    let rollback_dir = root.join("cpa-core.rollback");
+    fs::create_dir_all(&install_dir).unwrap();
+    fs::create_dir_all(&staging_dir).unwrap();
+
+    let bundled_version = "v8.0.52";
+    let older_manual_version = "v8.0.50";
+
+    fs::write(staging_dir.join(core_binary_name()), b"manual-older-core-binary").unwrap();
+    write_core_metadata(
+        &staging_dir,
+        &CoreMetadata {
+            version: older_manual_version.to_string(),
+            asset_name: "CLIProxyAPI_8.0.50_linux_amd64.tar.gz".to_string(),
+            installed_at_unix: 1,
+        },
+    )
+    .unwrap();
+
+    assert!(core_needs_bundled_install(&install_dir, bundled_version));
+
+    apply_staged_core_with_rollback(&install_dir, &staging_dir, &rollback_dir, || Ok(())).unwrap();
+    mark_bundled_core_version_handled(&install_dir, bundled_version).unwrap();
+
+    let installed_metadata = read_core_metadata(&install_dir).unwrap();
+    assert_eq!(installed_metadata.version, older_manual_version);
+
+    assert!(!core_needs_bundled_install(&install_dir, bundled_version));
+    assert!(core_needs_bundled_install(&install_dir, "v8.0.53"));
+
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1162,3 +1575,116 @@ fn core_start_log_captures_stdout_and_stderr() {
     assert_eq!(restarted_output.matches("===== CPA kernel startup").count(), 2);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn apply_staged_core_with_rollback_restores_previous_binary_on_restart_failure() {
+    let root = agent_test_home("core-staged-rollback");
+    let install_dir = root.join("cpa-core");
+    let staging_dir = root.join("cpa-core.staging");
+    let rollback_dir = root.join("cpa-core.rollback");
+    fs::create_dir_all(&install_dir).unwrap();
+    fs::create_dir_all(&staging_dir).unwrap();
+
+    fs::write(install_dir.join(core_binary_name()), b"working-v1-binary").unwrap();
+    write_core_metadata(
+        &install_dir,
+        &CoreMetadata {
+            version: "v8.0.26".to_string(),
+            asset_name: "v8.0.26.tar.gz".to_string(),
+            installed_at_unix: 10,
+        },
+    )
+    .unwrap();
+
+    // 1. Empty staged binary is rejected before touching install_dir
+    fs::write(staging_dir.join(core_binary_name()), b"").unwrap();
+    assert!(apply_staged_core_with_rollback(&install_dir, &staging_dir, &rollback_dir, || Ok(())).is_err());
+    assert_eq!(
+        fs::read(install_dir.join(core_binary_name())).unwrap(),
+        b"working-v1-binary"
+    );
+
+    // 2. Staged binary that fails restart rolls back to working-v1-binary and metadata
+    fs::write(staging_dir.join(core_binary_name()), b"broken-v2-binary").unwrap();
+    write_core_metadata(
+        &staging_dir,
+        &CoreMetadata {
+            version: "v8.0.27".to_string(),
+            asset_name: "v8.0.27.tar.gz".to_string(),
+            installed_at_unix: 20,
+        },
+    )
+    .unwrap();
+
+    let err = apply_staged_core_with_rollback(&install_dir, &staging_dir, &rollback_dir, || {
+        Err("new binary exited immediately".to_string())
+    })
+    .unwrap_err();
+    assert!(err.contains("was rolled back to the previous version"));
+    assert_eq!(
+        fs::read(install_dir.join(core_binary_name())).unwrap(),
+        b"working-v1-binary"
+    );
+    let restored_meta = read_core_metadata(&install_dir).unwrap();
+    assert_eq!(restored_meta.version, "v8.0.26");
+    assert!(!rollback_dir.exists());
+
+    // 3. Staged binary that succeeds restart keeps new binary and cleans up rollback_dir
+    fs::create_dir_all(&staging_dir).unwrap();
+    fs::write(staging_dir.join(core_binary_name()), b"healthy-v2-binary").unwrap();
+    write_core_metadata(
+        &staging_dir,
+        &CoreMetadata {
+            version: "v8.0.27".to_string(),
+            asset_name: "v8.0.27.tar.gz".to_string(),
+            installed_at_unix: 30,
+        },
+    )
+    .unwrap();
+    apply_staged_core_with_rollback(&install_dir, &staging_dir, &rollback_dir, || Ok(())).unwrap();
+    assert_eq!(
+        fs::read(install_dir.join(core_binary_name())).unwrap(),
+        b"healthy-v2-binary"
+    );
+    assert_eq!(read_core_metadata(&install_dir).unwrap().version, "v8.0.27");
+    assert!(!rollback_dir.exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn rollback_removes_files_added_by_the_failed_update_and_keeps_user_files() {
+    let root = agent_test_home("core-staged-rollback-added-files");
+    let install_dir = root.join("cpa-core");
+    let staging_dir = root.join("cpa-core.staging");
+    let rollback_dir = root.join("cpa-core.rollback");
+    fs::create_dir_all(install_dir.join("static")).unwrap();
+    fs::create_dir_all(staging_dir.join("static")).unwrap();
+    fs::create_dir_all(staging_dir.join("plugins")).unwrap();
+
+    fs::write(install_dir.join(core_binary_name()), b"working-v1-binary").unwrap();
+    fs::write(install_dir.join("README.md"), b"v1 readme").unwrap();
+    fs::write(install_dir.join("static").join("app.js"), b"v1 js").unwrap();
+    fs::write(install_dir.join("user-notes.txt"), b"not part of any package").unwrap();
+
+    fs::write(staging_dir.join(core_binary_name()), b"broken-v2-binary").unwrap();
+    fs::write(staging_dir.join("README.md"), b"v2 readme").unwrap();
+    fs::write(staging_dir.join("static").join("app.js"), b"v2 js").unwrap();
+    fs::write(staging_dir.join("static").join("new.css"), b"v2 css").unwrap();
+    fs::write(staging_dir.join("plugins").join("extra.so"), b"v2 plugin").unwrap();
+
+    let err = apply_staged_core_with_rollback(&install_dir, &staging_dir, &rollback_dir, || {
+        Err("new binary exited immediately".to_string())
+    })
+    .unwrap_err();
+
+    assert!(err.contains("was rolled back to the previous version"));
+    assert_eq!(fs::read(install_dir.join(core_binary_name())).unwrap(), b"working-v1-binary");
+    assert_eq!(fs::read(install_dir.join("README.md")).unwrap(), b"v1 readme");
+    assert_eq!(fs::read(install_dir.join("static").join("app.js")).unwrap(), b"v1 js");
+    assert_eq!(fs::read(install_dir.join("user-notes.txt")).unwrap(), b"not part of any package");
+    assert!(!install_dir.join("static").join("new.css").exists());
+    assert!(!install_dir.join("plugins").exists());
+    assert!(!rollback_dir.exists());
+    fs::remove_dir_all(root).unwrap();
+}
+

@@ -2,6 +2,136 @@ use super::support::*;
 use super::*;
 
 #[test]
+fn claude_response_language_round_trip_preserves_custom_and_unrelated_settings() {
+    let directory = agent_test_home("response-language");
+    let path = directory.join("settings.json");
+    let models = test_agent_models(&["route-model"]);
+    let existing = r#"{"language":"  日本語（関西弁）  ","permissions":{"allow":["Read"]},"env":{"KEEP":"yes"}}"#;
+    let mut mappings = ClaudeDesktopModelMappings::all("route-model");
+    for language in [None, Some("Japanese"), Some("  日本語（関西弁）  ")] {
+        mappings.response_language = language.map(str::to_string);
+        let rendered = build_claude_agent_config(Some(existing), "http://localhost:8317", "fixture-key", "route-model", &models, Some(&mappings)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(value["language"], language.unwrap_or("  日本語（関西弁）  "));
+        assert_eq!(value["permissions"]["allow"][0], "Read");
+        assert_eq!(value["env"]["KEEP"], "yes");
+        assert!(value["env"].get("language").is_none());
+        fs::write(&path, &rendered).unwrap();
+        let inspected = inspect_claude_code_model_mappings(&path).unwrap().unwrap();
+        assert_eq!(inspected.response_language.as_deref(), value["language"].as_str());
+        let serialized = serde_json::to_string(&inspected).unwrap();
+        let mut reloaded: ClaudeDesktopModelMappings = serde_json::from_str(&serialized).unwrap();
+        reloaded.sonnet = "another-model".into();
+        let updated = build_claude_agent_config(Some(&rendered), "http://localhost:8317", "fixture-key", "route-model", &models, Some(&reloaded)).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&updated).unwrap()["language"], value["language"]);
+    }
+    fs::write(&path, r#"{"language":"Cymraeg"}"#).unwrap();
+    assert_eq!(inspect_claude_code_model_mappings(&path).unwrap().unwrap().response_language.as_deref(), Some("Cymraeg"));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn claude_response_language_reset_unmanaged_and_old_state() {
+    let models = test_agent_models(&["route-model"]);
+    let mut mappings: ClaudeDesktopModelMappings = serde_json::from_str(r#"{"opus":"route-model","sonnet":"route-model","haiku":"route-model"}"#).unwrap();
+    assert_eq!(mappings.response_language, None);
+    for existing in [r#"{"language":"custom dialect"}"#, r#"{"language":{"future":"format"}}"#, "{}"] {
+        let rendered = build_claude_agent_config(Some(existing), "http://localhost:8317", "fixture-key", "route-model", &models, Some(&mappings)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(value.get("language"), serde_json::from_str::<serde_json::Value>(existing).unwrap().get("language"));
+    }
+    for reset in ["", "  "] {
+        mappings.response_language = Some(reset.into());
+        let rendered = build_claude_agent_config(Some(r#"{"language":"custom dialect","unrelated":true}"#), "http://localhost:8317", "fixture-key", "route-model", &models, Some(&mappings)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert!(value.get("language").is_none());
+        assert_eq!(value["unrelated"], true);
+    }
+    mappings.response_language = Some("Gaeilge".into());
+    assert!(resolve_claude_code_model_mappings(AgentClient::ClaudeDesktop, &models, "route-model", Some(mappings.clone())).unwrap().is_none());
+    let desktop = resolve_claude_desktop_model_mappings(AgentClient::ClaudeDesktop, &models, "route-model", Some(mappings.clone())).unwrap().unwrap();
+    assert_eq!(desktop.response_language, None);
+    let profile = build_claude_desktop_profile(None, "http://localhost:8317", "fixture-key", "route-model", &models, Some(&mappings)).unwrap();
+    assert!(serde_json::from_str::<serde_json::Value>(&profile).unwrap().get("language").is_none());
+    let code = resolve_claude_code_model_mappings(AgentClient::ClaudeCode, &models, "route-model", Some(mappings)).unwrap().unwrap();
+    assert_eq!(code.response_language.as_deref(), Some("Gaeilge"));
+}
+
+#[test]
+fn claude_code_explicit_model_inputs_replace_clear_and_round_trip() {
+    let directory = agent_test_home("claude-code-explicit-models");
+    let path = directory.join("settings.json");
+    let models = test_agent_models(&["route-model"]);
+    let mut mappings = ClaudeDesktopModelMappings::all("route-model");
+    mappings.startup_model = Some(" custom-startup[1m] ".into());
+    mappings.subagent_model = Some("custom-worker".into());
+    let resolved = resolve_claude_code_model_mappings(
+        AgentClient::ClaudeCode, &models, "route-model", Some(mappings),
+    ).unwrap().unwrap();
+    let rendered = build_claude_agent_config(
+        Some(r#"{"model":"user-choice","env":{"KEEP":"yes","ANTHROPIC_MODEL":"old-startup","CLAUDE_CODE_SUBAGENT_MODEL":"old-worker"}}"#),
+        "http://127.0.0.1:8317", "test-key", "route-model", &models, Some(&resolved),
+    ).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    assert_eq!(value["model"], "custom-startup[1m]");
+    assert_eq!(value["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], "custom-worker");
+    assert_eq!(value["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "route-model");
+    assert_eq!(value["modelSettings"]["route-model"]["autoCompactWindow"], 200_000);
+    assert_eq!(value["modelSettings"]["custom-startup"]["autoCompactWindow"], 200_000);
+    assert_eq!(value["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "200000");
+    assert_eq!(value["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "200000");
+    assert_eq!(value["autoCompactWindow"], 200_000);
+    assert_eq!(value["model"], "custom-startup[1m]");
+    fs::write(&path, &rendered).unwrap();
+    let mut inspected = inspect_claude_code_model_mappings(&path).unwrap().unwrap();
+    assert_eq!(inspected.startup_model.as_deref(), Some("custom-startup[1m]"));
+    assert_eq!(inspected.subagent_model.as_deref(), Some("custom-worker"));
+    inspected.startup_model = Some(String::new());
+    inspected.subagent_model = Some(String::new());
+    let cleared = build_claude_agent_config(
+        Some(&rendered), "http://127.0.0.1:8317", "test-key", "route-model", &models, Some(&inspected),
+    ).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&cleared).unwrap();
+    assert!(value["env"].get("ANTHROPIC_MODEL").is_none());
+    assert!(value["env"].get("CLAUDE_CODE_SUBAGENT_MODEL").is_none());
+    assert!(value.get("model").is_none());
+    assert_eq!(value["env"]["KEEP"], "yes");
+}
+
+#[test]
+fn claude_code_role_selection_survives_mapping_changes_without_global_effort_override() {
+    let models = test_agent_models(&["route-a", "route-b"]);
+    let mut mappings = ClaudeDesktopModelMappings::all("route-a");
+    mappings.startup_model = Some("sonnet".into());
+    mappings.subagent_model = Some("haiku".into());
+    for route in ["route-a", "route-b"] {
+        mappings.sonnet = route.into();
+        mappings.sonnet_1m = true;
+        let rendered = build_claude_agent_config(
+            Some(r#"{"model":"user-choice","env":{"CLAUDE_CODE_EFFORT_LEVEL":"max"}}"#),
+            "http://127.0.0.1:8317", "test-key", route, &models, Some(&mappings),
+        ).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(value["model"], "sonnet");
+        assert_eq!(value["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], "haiku");
+        assert_eq!(value["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], format!("{route}[1m]"));
+        assert_eq!(value["modelSettings"][route]["autoCompactWindow"], 200_000);
+        assert_eq!(value["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "200000");
+        assert_eq!(value["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "200000");
+        assert!(value["env"].get("CLAUDE_CODE_EFFORT_LEVEL").is_none());
+        assert_eq!(value["model"], "sonnet");
+    }
+    mappings.sonnet_1m = false;
+    mappings.startup_model = Some("route-a[1m]".into());
+    let resolved = resolve_claude_code_model_mappings(
+        AgentClient::ClaudeCode, &models, "route-a", Some(mappings),
+    ).unwrap().unwrap();
+    assert_eq!(resolved.max_context_tokens, 200_000);
+    assert_eq!(resolved.startup_model.as_deref(), Some("route-a[1m]"));
+    assert_eq!(resolved.fable_1m, resolved.sonnet_1m);
+}
+
+#[test]
 fn claude_agent_config_preserves_existing_fields() {
     let rendered = build_claude_agent_config(
             Some(
@@ -27,14 +157,17 @@ fn claude_agent_config_preserves_existing_fields() {
         "1"
     );
     assert_eq!(value["env"][CLAUDE_CODE_AUTO_MODE_SERVER_ENV], "0");
-    assert_eq!(value["env"][CLAUDE_CODE_MAX_CONTEXT_TOKENS_ENV], "200000");
-    assert_eq!(value["env"][CLAUDE_AUTOCOMPACT_PCT_OVERRIDE_ENV], "90");
-    assert!(value["env"].get(DISABLE_AUTO_COMPACT_ENV).is_none());
+    assert_eq!(value["autoCompactWindow"], 200_000);
+    assert_eq!(value["autoCompactEnabled"], true);
     assert!(value["env"].get("CLAUDE_CODE_EFFORT_LEVEL").is_none());
     assert_eq!(value["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], "claude-test");
     assert_eq!(
         value["env"]["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"],
-        "claude-test (200K context)"
+        "claude-test"
+    );
+    assert_eq!(
+        value["env"]["ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"],
+        "Auto-compact window: 200K"
     );
     assert_eq!(value["model"], "claude-test");
 }
@@ -154,10 +287,18 @@ fn claude_code_role_mappings_drive_settings() {
         max_context_tokens: 272_000,
         auto_compact_pct: 80,
         disable_auto_compact: false,
+        manage_default_model: true,
+        manage_subagent_model: true,
+        fable: String::new(),
+        fable_1m: false,
+        startup_model: None,
+        subagent_model: None,
+        response_language: None,
     };
     let models = vec![
         AgentModelOption {
             input_modalities: None,
+            reasoning_levels: Vec::new(),
             harness_metadata: None,
             name: "gpt-opus-base".to_string(),
             alias: None,
@@ -166,6 +307,7 @@ fn claude_code_role_mappings_drive_settings() {
         },
         AgentModelOption {
             input_modalities: None,
+            reasoning_levels: Vec::new(),
             harness_metadata: None,
             name: mappings.opus.clone(),
             alias: Some("gpt-opus-base".to_string()),
@@ -174,6 +316,7 @@ fn claude_code_role_mappings_drive_settings() {
         },
         AgentModelOption {
             input_modalities: None,
+            reasoning_levels: Vec::new(),
             harness_metadata: None,
             name: mappings.sonnet.clone(),
             alias: None,
@@ -182,6 +325,7 @@ fn claude_code_role_mappings_drive_settings() {
         },
         AgentModelOption {
             input_modalities: None,
+            reasoning_levels: Vec::new(),
             harness_metadata: None,
             name: mappings.haiku.clone(),
             alias: None,
@@ -203,11 +347,58 @@ fn claude_code_role_mappings_drive_settings() {
     assert_eq!(value["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "gpt-opus");
     assert_eq!(value["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "gpt-sonnet");
     assert_eq!(value["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "gpt-haiku");
-    assert_eq!(value["env"][CLAUDE_CODE_MAX_CONTEXT_TOKENS_ENV], "272000");
+    assert_eq!(value["autoCompactWindow"], 272_000);
     assert_eq!(
         value["env"]["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"],
-        "gpt-sonnet (272K context)"
+        "gpt-sonnet"
     );
+}
+
+#[test]
+fn claude_code_can_leave_session_model_and_subagents_to_claude_code() {
+    let mappings = ClaudeDesktopModelMappings {
+        manage_default_model: false,
+        manage_subagent_model: false,
+        ..ClaudeDesktopModelMappings::all("gpt-sonnet")
+    };
+    let rendered = build_claude_agent_config(
+        Some(r#"{"model":"user-selected","env":{"ANTHROPIC_MODEL":"user-selected","CLAUDE_CODE_SUBAGENT_MODEL":"user-subagent"}}"#),
+        "http://127.0.0.1:8317",
+        "test-key",
+        "gpt-sonnet",
+        &test_agent_models(&["gpt-sonnet"]),
+        Some(&mappings),
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    assert_eq!(value["model"], "user-selected");
+    assert_eq!(value["env"]["ANTHROPIC_MODEL"], "user-selected");
+    assert_eq!(value["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], "user-subagent");
+    assert_eq!(value["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "gpt-sonnet");
+    assert_eq!(value["env"]["EASYCLIPROXY_MANAGE_CLAUDE_CODE_DEFAULT_MODEL"], "0");
+    assert_eq!(value["env"]["EASYCLIPROXY_MANAGE_CLAUDE_CODE_SUBAGENT_MODEL"], "0");
+}
+
+#[test]
+fn claude_code_unmanaged_mode_removes_previous_cpa_overrides() {
+    let mappings = ClaudeDesktopModelMappings {
+        manage_default_model: false,
+        manage_subagent_model: false,
+        ..ClaudeDesktopModelMappings::all("gpt-sonnet")
+    };
+    let rendered = build_claude_agent_config(
+        Some(r#"{"model":"gpt-sonnet","env":{"ANTHROPIC_MODEL":"gpt-sonnet","CLAUDE_CODE_SUBAGENT_MODEL":"gpt-sonnet"}}"#),
+        "http://127.0.0.1:8317",
+        "test-key",
+        "gpt-sonnet",
+        &test_agent_models(&["gpt-sonnet"]),
+        Some(&mappings),
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    assert!(value.get("model").is_none());
+    assert!(value["env"].get("ANTHROPIC_MODEL").is_none());
+    assert!(value["env"].get("CLAUDE_CODE_SUBAGENT_MODEL").is_none());
 }
 
 #[test]
@@ -223,10 +414,18 @@ fn claude_code_runtime_settings_keep_per_role_1m_suffixes() {
         max_context_tokens: 1_000_000,
         auto_compact_pct: 75,
         disable_auto_compact: true,
+        manage_default_model: true,
+        manage_subagent_model: true,
+        fable: String::new(),
+        fable_1m: false,
+        startup_model: None,
+        subagent_model: None,
+        response_language: None,
     };
     let models = vec![
         AgentModelOption {
             input_modalities: None,
+            reasoning_levels: Vec::new(),
             harness_metadata: None,
             name: "custom-pro".to_string(),
             alias: Some("Custom Pro".to_string()),
@@ -235,6 +434,7 @@ fn claude_code_runtime_settings_keep_per_role_1m_suffixes() {
         },
         AgentModelOption {
             input_modalities: None,
+            reasoning_levels: Vec::new(),
             harness_metadata: None,
             name: "custom-flash".to_string(),
             alias: Some("Custom Flash".to_string()),
@@ -253,9 +453,10 @@ fn claude_code_runtime_settings_keep_per_role_1m_suffixes() {
     .unwrap();
     let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
 
-    assert_eq!(value["env"][CLAUDE_CODE_MAX_CONTEXT_TOKENS_ENV], "1000000");
-    assert_eq!(value["env"][CLAUDE_AUTOCOMPACT_PCT_OVERRIDE_ENV], "75");
-    assert_eq!(value["env"][DISABLE_AUTO_COMPACT_ENV], "1");
+    assert_eq!(value["autoCompactWindow"], 1_000_000);
+    assert_eq!(value["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "1000000");
+    assert_eq!(value["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "1000000");
+    assert_eq!(value["autoCompactEnabled"], false);
     assert_eq!(value["env"]["ANTHROPIC_MODEL"], "custom-pro[1m]");
     assert_eq!(
         value["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"],
@@ -281,12 +482,22 @@ fn claude_code_runtime_settings_keep_per_role_1m_suffixes() {
     );
     assert_eq!(
         value["env"]["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"],
-        "Custom Pro (1M context)"
+        "Custom Pro[1m]"
     );
     assert_eq!(
         value["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL_NAME"],
-        "Custom Pro (Fable mapping, 1M context)"
+        "Fable · Custom Pro[1m]"
     );
+    assert_eq!(
+        value["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION"],
+        "1M enabled · Auto-compact window: 1M"
+    );
+    assert_eq!(value["env"]["ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"], "1M enabled · Auto-compact window: 1M");
+    assert_eq!(value["modelSettings"]["custom-flash"]["autoCompactWindow"], 1_000_000);
+    assert_eq!(value["modelSettings"]["custom-pro"]["autoCompactWindow"], 1_000_000);
+    assert_eq!(value["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "1000000");
+    assert_eq!(value["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "1000000");
+    assert_eq!(value["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION"], "1M enabled · Auto-compact window: 1M");
     assert_eq!(value["model"], "custom-pro[1m]");
 }
 
@@ -294,6 +505,7 @@ fn claude_code_runtime_settings_keep_per_role_1m_suffixes() {
 fn claude_desktop_omits_unsupported_context_window_when_1m_is_off() {
     let models = vec![AgentModelOption {
         input_modalities: None,
+        reasoning_levels: Vec::new(),
         harness_metadata: None,
         name: "runtime-model".to_string(),
         alias: None,
@@ -514,22 +726,22 @@ fn codex_status_requires_a_valid_catalog_containing_the_default_model() {
     )
     .unwrap();
 
-    let missing = inspect_agent_config(AgentClient::Codex, &home, 8317, DEFAULT_API_KEY);
+    let missing = inspect_agent_config_with_executables(AgentClient::Codex, &home, 8317, DEFAULT_API_KEY, None, None);
     assert!(!missing.configured);
     assert!(!missing.config_valid);
 
     fs::write(&catalog_path, "not json").unwrap();
-    let damaged = inspect_agent_config(AgentClient::Codex, &home, 8317, DEFAULT_API_KEY);
+    let damaged = inspect_agent_config_with_executables(AgentClient::Codex, &home, 8317, DEFAULT_API_KEY, None, None);
     assert!(!damaged.configured);
     assert!(!damaged.config_valid);
 
     fs::write(&catalog_path, test_codex_models(&["other-model"])).unwrap();
-    let wrong_model = inspect_agent_config(AgentClient::Codex, &home, 8317, DEFAULT_API_KEY);
+    let wrong_model = inspect_agent_config_with_executables(AgentClient::Codex, &home, 8317, DEFAULT_API_KEY, None, None);
     assert!(!wrong_model.configured);
     assert!(!wrong_model.config_valid);
 
     fs::write(&catalog_path, test_codex_models(&["gpt-test"])).unwrap();
-    let valid = inspect_agent_config(AgentClient::Codex, &home, 8317, DEFAULT_API_KEY);
+    let valid = inspect_agent_config_with_executables(AgentClient::Codex, &home, 8317, DEFAULT_API_KEY, None, None);
     assert!(valid.configured);
     assert!(valid.config_valid);
     fs::remove_dir_all(home).unwrap();
@@ -588,6 +800,9 @@ fn claude_desktop_config_builds_gateway_profile_and_index() {
         serde_json::json!(["*"])
     );
     assert_eq!(profile["inferenceGatewayApiKey"], DEFAULT_API_KEY);
+    assert_eq!(profile["inferenceCredentialKind"], "static");
+    assert_eq!(profile["modelDiscoveryEnabled"], false);
+    assert_eq!(profile["bootstrapEnabled"], false);
     assert_eq!(profile["inferenceGatewayBaseUrl"], "http://127.0.0.1:8317");
     assert_eq!(
         profile["inferenceModels"],
@@ -611,6 +826,63 @@ fn claude_desktop_config_builds_gateway_profile_and_index() {
 }
 
 #[test]
+fn claude_desktop_gateway_update_and_restore_handle_competing_sources() {
+    let original = serde_json::json!({
+        "inferenceProvider": "gateway", "inferenceCredentialKind": "helper-script",
+        "inferenceCredentialHelper": "/user/helper", "inferenceGatewayAuthScheme": "sso",
+        "bootstrapUrl": "https://config.example.test/settings", "bootstrapEnabled": true,
+        "selfHostedUrl": "https://sessions.example.test", "modelDiscoveryEnabled": true,
+        "defaultModelEffort": "high", "coworkEgressAllowedHosts": ["example.test"]
+    }).to_string();
+    let profile = build_claude_desktop_profile(Some(&original), "http://127.0.0.1:8317",
+        "test-key", "claude-sonnet-5", &[], None).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&profile).unwrap();
+    assert!(claude_desktop_profile_uses_local_gateway(&value));
+    assert!(value.get("selfHostedUrl").is_none());
+    assert_eq!(value["inferenceCredentialHelper"], "/user/helper");
+    assert_eq!(value["defaultModelEffort"], "high");
+    let restored = build_restored_claude_desktop_config(2, &profile, Some(&original)).unwrap().unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&restored).unwrap(),
+        serde_json::from_str::<serde_json::Value>(&original).unwrap());
+}
+
+#[test]
+fn claude_desktop_status_rejects_overridden_and_incomplete_profiles() {
+    let profile: serde_json::Value = serde_json::from_str(&build_claude_desktop_profile(
+        None, "http://127.0.0.1:8317", "key", "claude-sonnet-5", &[], None).unwrap()).unwrap();
+    for (key, value) in [
+        ("inferenceProvider", serde_json::json!("anthropic")),
+        ("inferenceCredentialKind", serde_json::json!("interactive")),
+        ("inferenceGatewayAuthScheme", serde_json::json!("sso")),
+        ("selfHostedUrl", serde_json::json!("https://host.example.test")),
+        ("inferenceModels", serde_json::json!([])),
+        ("inferenceModels", serde_json::json!([{"labelOverride":"only a label"}])),
+    ] {
+        let mut changed = profile.clone();
+        changed[key] = value;
+        assert!(!claude_desktop_profile_uses_local_gateway(&changed), "{key}");
+    }
+    let mut bootstrap = profile.clone();
+    bootstrap["bootstrapUrl"] = serde_json::json!("https://config.example.test");
+    assert!(claude_desktop_profile_uses_local_gateway(&bootstrap));
+    bootstrap["bootstrapEnabled"] = serde_json::json!(true);
+    assert!(!claude_desktop_profile_uses_local_gateway(&bootstrap));
+    let mut legacy = profile;
+    legacy.as_object_mut().unwrap().remove("inferenceCredentialKind");
+    assert!(claude_desktop_profile_uses_local_gateway(&legacy));
+}
+
+#[test]
+fn claude_desktop_current_family_tiers_include_fable_and_mythos() {
+    for (id, tier) in [("claude-fable-5-1", "fable"), ("claude-mythos-5", "mythos"),
+        ("claude-sonnet-5-cc", "sonnet"), ("claude-opus-5", "opus"), ("claude-haiku-4-5", "haiku")] {
+        assert_eq!(claude_desktop_family_tier(id), Some(tier));
+        let model = claude_desktop_inference_model(id, "source-model", false, &[]);
+        assert_eq!(model["anthropicFamilyTier"], tier);
+    }
+}
+
+#[test]
 fn claude_desktop_profile_keeps_non_claude_models_internal() {
     let mappings = ClaudeDesktopModelMappings {
         opus: "gpt-5.6-sol".to_string(),
@@ -624,6 +896,7 @@ fn claude_desktop_profile_keeps_non_claude_models_internal() {
     let models = vec![
         AgentModelOption {
             input_modalities: None,
+            reasoning_levels: Vec::new(),
             harness_metadata: None,
             name: mappings.opus.clone(),
             alias: None,
@@ -632,6 +905,7 @@ fn claude_desktop_profile_keeps_non_claude_models_internal() {
         },
         AgentModelOption {
             input_modalities: None,
+            reasoning_levels: Vec::new(),
             harness_metadata: None,
             name: mappings.sonnet.clone(),
             alias: None,
@@ -640,6 +914,7 @@ fn claude_desktop_profile_keeps_non_claude_models_internal() {
         },
         AgentModelOption {
             input_modalities: None,
+            reasoning_levels: Vec::new(),
             harness_metadata: None,
             name: mappings.haiku.clone(),
             alias: None,
@@ -751,7 +1026,7 @@ fn opencode_agent_config_preserves_other_providers() {
     let models = test_agent_models(&["gpt-test", "deepseek-test"]);
     let rendered = build_opencode_agent_config(
             Some(
-                r#"{"theme":"dark","provider":{"other":{"npm":"other"},"cpa-gui":{"custom":"keep","options":{"timeout":30}}}}"#,
+                r#"{"theme":"dark","provider":{"other":{"npm":"other"},"cpa-gui":{"custom":"keep","options":{"timeout":30},"models":{"gpt-test":{"custom_field":"preserve_me","name":"old-name"}}}}}"#,
             ),
             "http://127.0.0.1:8317/v1",
             DEFAULT_API_KEY,
@@ -776,8 +1051,196 @@ fn opencode_agent_config_preserves_other_providers() {
         "http://127.0.0.1:8317/v1"
     );
     assert_eq!(value["model"], "cpa-gui/gpt-test");
-    assert!(value["provider"][MANAGED_AGENT_PROVIDER_ID]["models"]["gpt-test"].is_object());
+    let gpt_entry = &value["provider"][MANAGED_AGENT_PROVIDER_ID]["models"]["gpt-test"];
+    assert!(gpt_entry.is_object());
+    assert_eq!(gpt_entry["name"], "gpt-test");
+    assert_eq!(gpt_entry["custom_field"], "preserve_me");
+    assert!(gpt_entry.get("attachment").is_none());
+    assert_eq!(
+        gpt_entry["modalities"],
+        serde_json::json!({
+            "input": ["text"],
+            "output": ["text"]
+        })
+    );
     assert!(value["provider"][MANAGED_AGENT_PROVIDER_ID]["models"]["deepseek-test"].is_object());
+}
+
+#[test]
+fn opencode_agent_config_declares_attachment_and_modalities_for_models() {
+    let mut multimodal_model = test_agent_models(&["custom-vision"])[0].clone();
+    multimodal_model.input_modalities = Some(vec!["text".to_string(), "image".to_string()]);
+
+    let models = vec![
+        multimodal_model,
+        test_agent_models(&["gemini-3.1-flash-image"])[0].clone(),
+        test_agent_models(&["deepseek-chat"])[0].clone(),
+    ];
+
+    let rendered = build_opencode_agent_config(
+        None,
+        "http://127.0.0.1:8317/v1",
+        DEFAULT_API_KEY,
+        "custom-vision",
+        &models,
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    let provider_models = &value["provider"][MANAGED_AGENT_PROVIDER_ID]["models"];
+
+    // a model with input_modalities Some(["text","image"]) gets attachment true and modalities input ["text","image","pdf"], output ["text"]
+    let custom_entry = &provider_models["custom-vision"];
+    assert_eq!(custom_entry["name"], "custom-vision");
+    assert_eq!(custom_entry["attachment"], true);
+    assert_eq!(
+        custom_entry["modalities"],
+        serde_json::json!({
+            "input": ["text", "image", "pdf"],
+            "output": ["text"]
+        })
+    );
+
+    // name "gemini-3.1-flash-image" gets output ["text","image"]
+    let gemini_entry = &provider_models["gemini-3.1-flash-image"];
+    assert_eq!(gemini_entry["name"], "gemini-3.1-flash-image");
+    assert_eq!(gemini_entry["attachment"], true);
+    assert_eq!(
+        gemini_entry["modalities"],
+        serde_json::json!({
+            "input": ["text", "image", "pdf"],
+            "output": ["text", "image"]
+        })
+    );
+
+    // name "deepseek-chat" (no modalities) gets modalities input ["text"] and no attachment key
+    let deepseek_entry = &provider_models["deepseek-chat"];
+    assert_eq!(deepseek_entry["name"], "deepseek-chat");
+    assert!(deepseek_entry.get("attachment").is_none());
+    assert_eq!(
+        deepseek_entry["modalities"],
+        serde_json::json!({
+            "input": ["text"],
+            "output": ["text"]
+        })
+    );
+}
+
+#[test]
+fn opencode_agent_config_preserves_existing_user_fields_under_model_entries() {
+    let models = test_agent_models(&["gpt-test", "deepseek-chat"]);
+    let existing = serde_json::json!({
+        "provider": {
+            MANAGED_AGENT_PROVIDER_ID: {
+                "models": {
+                    "gpt-test": {
+                        "name": "Outdated Display",
+                        "customField": "preserved-value",
+                        "temperature": 0.3
+                    },
+                    "deepseek-chat": {
+                        "name": "Old deepseek",
+                        "customField": "preserved",
+                        "attachment": true
+                    }
+                }
+            }
+        }
+    })
+    .to_string();
+
+    let rendered = build_opencode_agent_config(
+        Some(&existing),
+        "http://127.0.0.1:8317/v1",
+        DEFAULT_API_KEY,
+        "gpt-test",
+        &models,
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    let gpt_entry = &value["provider"][MANAGED_AGENT_PROVIDER_ID]["models"]["gpt-test"];
+
+    assert_eq!(gpt_entry["name"], "gpt-test");
+    assert_eq!(gpt_entry["customField"], "preserved-value");
+    assert_eq!(gpt_entry["temperature"], 0.3);
+    assert!(gpt_entry.get("attachment").is_none());
+    assert_eq!(
+        gpt_entry["modalities"],
+        serde_json::json!({
+            "input": ["text"],
+            "output": ["text"]
+        })
+    );
+
+    let deepseek_entry = &value["provider"][MANAGED_AGENT_PROVIDER_ID]["models"]["deepseek-chat"];
+    assert_eq!(deepseek_entry["name"], "deepseek-chat");
+    assert_eq!(deepseek_entry["customField"], "preserved");
+    // Pure text model omits attachment even if previously present in existing config
+    assert!(deepseek_entry.get("attachment").is_none());
+    assert_eq!(
+        deepseek_entry["modalities"],
+        serde_json::json!({
+            "input": ["text"],
+            "output": ["text"]
+        })
+    );
+}
+
+#[test]
+fn opencode_model_entry_heuristics_and_modality_resolution() {
+    // claude heuristic image
+    let claude = test_agent_models(&["claude-3-7-sonnet"])[0].clone();
+    let entry = opencode_model_entry(&claude, None);
+    assert_eq!(entry["attachment"], true);
+    assert_eq!(
+        entry["modalities"],
+        serde_json::json!({
+            "input": ["text", "image", "pdf"],
+            "output": ["text"]
+        })
+    );
+
+    // gpt-4o heuristic image
+    let gpt4o = test_agent_models(&["gpt-4o-mini"])[0].clone();
+    let entry = opencode_model_entry(&gpt4o, None);
+    assert_eq!(entry["attachment"], true);
+    assert_eq!(
+        entry["modalities"],
+        serde_json::json!({
+            "input": ["text", "image", "pdf"],
+            "output": ["text"]
+        })
+    );
+
+    // declared input_modalities overrides heuristic (e.g. declared text-only for gpt-4o)
+    let mut gpt4o_text_only = test_agent_models(&["gpt-4o"])[0].clone();
+    gpt4o_text_only.input_modalities = Some(vec!["text".to_string()]);
+    let entry = opencode_model_entry(&gpt4o_text_only, None);
+    assert!(entry.get("attachment").is_none());
+    assert_eq!(
+        entry["modalities"],
+        serde_json::json!({
+            "input": ["text"],
+            "output": ["text"]
+        })
+    );
+
+    // image output families: dall-e, flux, imagen, seedream, gpt-image
+    for model_name in [
+        "dall-e-3",
+        "flux-1-schnell",
+        "imagen-3.0-generate-002",
+        "seedream-v1",
+        "gpt-image-1",
+    ] {
+        let model = test_agent_models(&[model_name])[0].clone();
+        let entry = opencode_model_entry(&model, None);
+        assert_eq!(entry["attachment"], true, "Failed for {model_name}");
+        assert_eq!(
+            entry["modalities"]["output"],
+            serde_json::json!(["text", "image"]),
+            "Failed output for {model_name}"
+        );
+    }
 }
 
 #[test]
@@ -1050,30 +1513,443 @@ fn zcode_desktop_and_cli_share_the_provider_configuration() {
 }
 
 #[test]
+fn zcode_config_paths_follow_custom_data_base_dir() {
+    let home = agent_test_home("zcode-custom-data-dir");
+    let settings_dir = home.join(".zcode/v2");
+    fs::create_dir_all(&settings_dir).unwrap();
+    let custom_root = home.join("custom-zcode-data");
+    fs::write(
+        settings_dir.join("setting.json"),
+        serde_json::json!({ "dataBaseDir": custom_root.to_string_lossy() }).to_string(),
+    )
+    .unwrap();
+    let paths = agent_config_paths(AgentClient::ZCode, &home);
+    assert_eq!(paths.len(), 1);
+    assert_eq!(
+        paths[0],
+        custom_root.join(".zcode/v2/provider_config.json")
+    );
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn zcode_config_paths_fall_back_when_custom_dir_is_missing_or_invalid() {
+    let home = agent_test_home("zcode-custom-data-dir-fallback");
+    // No setting.json at all.
+    let paths = agent_config_paths(AgentClient::ZCode, &home);
+    assert_eq!(paths[0], home.join(".zcode/v2/provider_config.json"));
+
+    let settings_dir = home.join(".zcode/v2");
+    fs::create_dir_all(&settings_dir).unwrap();
+    // Relative or empty dataBaseDir values are ignored.
+    fs::write(
+        settings_dir.join("setting.json"),
+        serde_json::json!({ "dataBaseDir": "relative/path" }).to_string(),
+    )
+    .unwrap();
+    let paths = agent_config_paths(AgentClient::ZCode, &home);
+    assert_eq!(paths[0], home.join(".zcode/v2/provider_config.json"));
+
+    fs::write(
+        settings_dir.join("setting.json"),
+        serde_json::json!({ "dataBaseDir": "   " }).to_string(),
+    )
+    .unwrap();
+    let paths = agent_config_paths(AgentClient::ZCode, &home);
+    assert_eq!(paths[0], home.join(".zcode/v2/provider_config.json"));
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn zcode_defaults_to_image_input_and_preserves_explicit_input_settings() {
+    let mut models = test_agent_models(&["custom-alias", "text-only"]);
+    for model in &mut models {
+        model.context_window = None;
+        model.input_modalities = Some(vec!["text".into()]);
+    }
+    let render = |existing: Option<&str>| build_zcode_agent_config(
+        existing, "http://127.0.0.1:8317/v1", DEFAULT_API_KEY, "custom-alias", &models,
+    ).unwrap();
+    let rendered = render(None);
+    let mut value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    let rules = value["config"]["modelConfigRules"]["providerModelRules"].as_array_mut().unwrap();
+    assert_eq!(rules.len(), 2);
+    for rule in rules.iter() {
+        assert_eq!(rule["config"]["properties"]["inputFormat"]["supportsImage"], true);
+    }
+    rules[1]["config"]["properties"]["inputFormat"] = serde_json::json!({
+        "supportsImage": false, "supportsVideo": true
+    });
+    let updated = render(Some(&value.to_string()));
+    let value: serde_json::Value = serde_json::from_str(&updated).unwrap();
+    let rules = value["config"]["modelConfigRules"]["providerModelRules"].as_array().unwrap();
+    assert_eq!(rules[1]["config"]["properties"]["inputFormat"], serde_json::json!({
+        "supportsImage": false, "supportsVideo": true
+    }));
+    assert_eq!(render(Some(&updated)), updated);
+}
+
+#[test]
+fn zcode_catalog_editor_preserves_native_rule_fields_and_empty_visibility() {
+    let home = agent_test_home("zcode-catalog-native-fields");
+    let config_dir = zcode_config_directory(&home);
+    fs::create_dir_all(&config_dir).unwrap();
+    let path = config_dir.join(ZCODE_PROVIDER_CONFIG_FILE);
+    let models = test_agent_models(&["custom-model"]);
+    for section in ["providerModelRules", "manualProviderModelRules"] {
+        let rule = serde_json::json!({
+            "providerId": "cpa-gui",
+            "modelId": "custom-model",
+            "nativeRuleField": "keep",
+            "config": {
+                "nativeSetting": true,
+                "properties": {
+                    "supportsToolCall": false,
+                    "inputFormat": {"nativeFormat": true},
+                },
+                "optionSpecs": {
+                    "nativeOption": {"values": ["keep"]},
+                    "maxOutputTokens": {"min": 1, "max": 32000},
+                },
+            },
+        });
+        let mut root = serde_json::json!({
+            "schemaVersion": 1,
+            "config": {
+                "providerConfigRules": {"providerRules": [{
+                    "providerId": "cpa-gui", "config": {},
+                }]},
+                "modelConfigRules": {
+                    "providerModelRules": [], "manualProviderModelRules": [],
+                },
+            },
+        });
+        root["config"]["modelConfigRules"][section] = serde_json::json!([rule]);
+        fs::write(&path, root.to_string()).unwrap();
+        let snapshot = zcode_editor_snapshot(&home, &models).unwrap();
+        assert!(snapshot.models[0].enabled);
+        root["config"]["providerConfigRules"]["providerRules"][0]["config"]["personalModelIds"] = serde_json::json!([]);
+        fs::write(&path, root.to_string()).unwrap();
+        let mut snapshot = zcode_editor_snapshot(&home, &models).unwrap();
+        assert!(!snapshot.models[0].enabled);
+        snapshot.models[0].configuration.supports_image = false;
+        snapshot.models[0].configuration.context_window = Some(300_000);
+        let saved = save_zcode_editor(&home, &models, ZCodeCatalogEditorSaveRequest {
+            models: snapshot.models,
+            model_order: snapshot.model_order,
+        }).unwrap();
+        assert!(!saved.models[0].enabled);
+        let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let saved_rule = &value["config"]["modelConfigRules"][section][0];
+        assert_eq!(saved_rule["nativeRuleField"], rule["nativeRuleField"]);
+        assert_eq!(saved_rule["config"]["nativeSetting"], true);
+        assert_eq!(saved_rule["config"]["properties"]["supportsToolCall"], false);
+        assert_eq!(saved_rule["config"]["properties"]["inputFormat"]["nativeFormat"], true);
+        assert_eq!(saved_rule["config"]["properties"]["inputFormat"]["supportsImage"], false);
+        assert_eq!(saved_rule["config"]["properties"]["contextWindow"], 300_000);
+        assert_eq!(saved_rule["config"]["optionSpecs"]["nativeOption"], rule["config"]["optionSpecs"]["nativeOption"]);
+        assert_eq!(saved_rule["config"]["optionSpecs"]["maxOutputTokens"]["min"], 1);
+        let mut absent_rule = rule.clone();
+        absent_rule["modelId"] = serde_json::json!("temporarily-unavailable");
+        let mut value = value;
+        value["config"]["modelConfigRules"][section].as_array_mut().unwrap().push(absent_rule.clone());
+        value["config"]["providerConfigRules"]["providerRules"][0]["config"]["personalModelIds"] =
+            serde_json::json!(["temporarily-unavailable"]);
+        fs::write(&path, value.to_string()).unwrap();
+        let mut models = saved.models;
+        models[0].configuration.max_output_tokens = None;
+        save_zcode_editor(&home, &[], ZCodeCatalogEditorSaveRequest {
+            models,
+            model_order: saved.model_order,
+        }).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let rules = value["config"]["modelConfigRules"][section].as_array().unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules.iter().find(|rule| rule["modelId"] == "temporarily-unavailable"), Some(&absent_rule));
+        let saved_rule = rules.iter().find(|rule| rule["modelId"] == "custom-model").unwrap();
+        assert!(saved_rule["config"]["optionSpecs"].get("maxOutputTokens").is_none());
+        assert_eq!(value["config"]["providerConfigRules"]["providerRules"][0]["config"]["personalModelIds"],
+            serde_json::json!(["temporarily-unavailable"]));
+    }
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn zcode_preserves_catalog_visibility_and_model_order() {
+    let models = test_agent_models(&["first", "second"]);
+    let render = |existing: Option<&str>| build_zcode_agent_config(
+        existing, "http://127.0.0.1:8317/v1", DEFAULT_API_KEY, "first", &models,
+    ).unwrap();
+    let initial = render(None);
+    let mut root: serde_json::Value = serde_json::from_str(&initial).unwrap();
+    let provider = &root["config"]["providerConfigRules"]["providerRules"][0]["config"];
+    assert_eq!(provider["personalModelIds"], serde_json::json!(["first", "second"]));
+    assert_eq!(provider["modelOrder"], serde_json::json!(["first", "second"]));
+    for visible in [serde_json::json!(["second"]), serde_json::json!([])] {
+        let provider = &mut root["config"]["providerConfigRules"]["providerRules"][0]["config"];
+        provider["personalModelIds"] = visible.clone();
+        provider["modelOrder"] = serde_json::json!(["second", "first"]);
+        let updated: serde_json::Value = serde_json::from_str(&render(Some(&root.to_string()))).unwrap();
+        let provider = &updated["config"]["providerConfigRules"]["providerRules"][0]["config"];
+        assert_eq!(provider["personalModelIds"], visible);
+        assert_eq!(provider["modelOrder"], serde_json::json!(["second", "first"]));
+    }
+}
+
+#[test]
+fn zcode_catalog_preserves_explicit_context_and_reasoning_settings() {
+    let home = agent_test_home("zcode-explicit-model-settings");
+    let config_dir = zcode_config_directory(&home);
+    fs::create_dir_all(&config_dir).unwrap();
+    let path = config_dir.join(ZCODE_PROVIDER_CONFIG_FILE);
+    let mut models = test_agent_models(&["custom-model"]);
+    models[0].context_window = Some(1_000_000);
+    models[0].reasoning_levels = vec!["low".into(), "high".into()];
+    for section in ["providerModelRules", "manualProviderModelRules"] {
+        for reasoning in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!({})),
+            Some(serde_json::json!("")),
+            Some(serde_json::json!(false)),
+            Some(serde_json::json!({"values": []})),
+            Some(serde_json::json!({"values": ["disabled"], "map": "native-map"})),
+        ] {
+            let mut rule = serde_json::json!({
+                "providerId": "cpa-gui", "modelId": "custom-model",
+                "config": {"properties": {"contextWindow": 500000}, "optionSpecs": {}},
+            });
+            if let Some(ref value) = reasoning {
+                rule["config"]["optionSpecs"]["reasoningLevel"] = value.clone();
+            }
+            let mut root = serde_json::json!({
+                "schemaVersion": 1,
+                "config": {"modelConfigRules": {
+                    "providerModelRules": [], "manualProviderModelRules": [],
+                }},
+            });
+            root["config"]["modelConfigRules"][section] = serde_json::json!([rule]);
+            fs::write(&path, root.to_string()).unwrap();
+            let snapshot = zcode_editor_snapshot(&home, &models).unwrap();
+            let configuration = &snapshot.models[0].configuration;
+            assert_eq!(configuration.context_window, Some(500_000));
+            let expected_levels = match reasoning.as_ref() {
+                None => models[0].reasoning_levels.clone(),
+                Some(value) => value.get("values").and_then(serde_json::Value::as_array)
+                    .map(|values| values.iter().filter_map(serde_json::Value::as_str).map(String::from).collect())
+                    .unwrap_or_default(),
+            };
+            assert_eq!(configuration.reasoning_levels, expected_levels);
+            if expected_levels.is_empty() {
+                assert_eq!(configuration.reasoning_map, None);
+            } else if reasoning.is_some() {
+                assert_eq!(configuration.reasoning_map.as_deref(), Some("native-map"));
+            }
+            let saved = save_zcode_editor(&home, &models, ZCodeCatalogEditorSaveRequest {
+                models: snapshot.models, model_order: snapshot.model_order,
+            }).unwrap();
+            assert_eq!(saved.models[0].configuration.reasoning_levels, expected_levels);
+            assert_eq!(saved.models[0].configuration.context_window, Some(500_000));
+        }
+    }
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn zcode_runtime_reasoning_options_upgrade_aliases_and_preserve_native_settings() {
+    let mut models = test_agent_models(&["custom-alias", "unknown-model", "gpt-manual"]);
+    for model in &mut models { model.context_window = None; }
+    let runtime = codex_catalog::parse_runtime_models(&serde_json::json!({"models": [
+        {"slug": "custom-alias", "supported_reasoning_levels": [
+            {"effort": "low"}, "medium", {"effort": " HIGH "}, "high", "xhigh", "invalid"
+        ]},
+        {"slug": "gpt-manual", "supported_reasoning_levels": ["low", "high", "xhigh"]}
+    ]})).unwrap();
+    codex_catalog::merge_zcode_reasoning_levels(&mut models, &runtime);
+    let original = include_str!("fixtures/zcode-provider-config-3.14.4.json");
+    let render = |existing: &str, models: &[AgentModelOption]| build_zcode_agent_config(
+        Some(existing), "http://127.0.0.1:8317/v1", DEFAULT_API_KEY, "custom-alias", models,
+    ).unwrap();
+    let rendered = render(original, &models);
+    let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    let rules = value["config"]["modelConfigRules"]["providerModelRules"].as_array().unwrap();
+    let rule = rules.iter().find(|rule| rule["modelId"] == "custom-alias").unwrap();
+    assert_eq!(rule["config"]["optionSpecs"]["reasoningLevel"]["values"],
+        serde_json::json!(["low", "medium", "high", "xhigh"]));
+    assert_eq!(rule["config"]["optionSpecs"]["reasoningLevel"]["map"], "reasoningLevel == \"none\" || reasoningLevel == \"disabled\" ? {\"thinking\": {\"type\": \"disabled\"}} : {\"thinking\": {\"type\": \"adaptive\"}, \"output_config\": {\"effort\": reasoningLevel}}");
+    let unknown = rules.iter().find(|rule| rule["modelId"] == "unknown-model").unwrap();
+    assert_eq!(unknown["config"]["properties"]["inputFormat"]["supportsImage"], true);
+    assert!(unknown["config"].get("optionSpecs").is_none());
+    let original_value: serde_json::Value = serde_json::from_str(original).unwrap();
+    assert_eq!(value["config"]["modelConfigRules"]["manualProviderModelRules"],
+        original_value["config"]["modelConfigRules"]["manualProviderModelRules"]);
+    assert_eq!(render(&rendered, &models), rendered);
+
+    let mut legacy = value.clone();
+    let rules = legacy["config"]["modelConfigRules"]["providerModelRules"].as_array_mut().unwrap();
+    let rule = rules.iter_mut().find(|rule| rule["modelId"] == "custom-alias").unwrap();
+    rule["config"]["optionSpecs"]["reasoningLevel"]["map"] = serde_json::json!(
+        "reasoningLevel == \"none\" ? {\"thinking\": {\"type\": \"disabled\"}} : {\"thinking\": {\"type\": \"adaptive\"}, \"output_config\": {\"effort\": reasoningLevel}}"
+    );
+    assert_eq!(render(&legacy.to_string(), &models), rendered);
+
+    models[0].reasoning_levels = vec!["low".into(), "high".into()];
+    let updated: serde_json::Value = serde_json::from_str(&render(&rendered, &models)).unwrap();
+    let rules = updated["config"]["modelConfigRules"]["providerModelRules"].as_array().unwrap();
+    let rule = rules.iter().find(|rule| rule["modelId"] == "custom-alias").unwrap();
+    assert_eq!(rule["config"]["optionSpecs"]["reasoningLevel"]["values"], serde_json::json!(["low", "high"]));
+
+    let restored = build_restored_zcode_provider_config(&rendered, Some(original)).unwrap().unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&restored).unwrap(), original_value);
+}
+
+#[test]
 fn zcode_preserves_manual_model_rules_and_rejects_unknown_schema_versions() {
-    let existing = r#"{"schemaVersion":1,"config":{"providerConfigRules":{"providerRules":[]},"modelConfigRules":{"providerModelRules":[],"manualProviderModelRules":[{"providerId":"cpa-gui","modelId":"gpt-test","config":{"enabled":true,"properties":{"supportsToolCall":true}}}]}}}"#;
-    let mut models = test_agent_models(&["gpt-test", "without-context"]);
+    let fixture: serde_json::Value = serde_json::from_str(
+        include_str!("fixtures/zcode-provider-config-3.14.4.json"),
+    ).unwrap();
+    let existing = serde_json::json!({
+        "schemaVersion": 1,
+        "config": {
+            "providerConfigRules": {"providerRules": []},
+            "modelConfigRules": {
+                "providerModelRules": [],
+                "manualProviderModelRules": fixture["config"]["modelConfigRules"]["manualProviderModelRules"],
+            },
+        },
+    });
+    let mut models = test_agent_models(&["gpt-manual", "without-context"]);
     models[1].context_window = None;
     let rendered = build_zcode_agent_config(
-        Some(existing),
-        "http://127.0.0.1:8317",
+        Some(&existing.to_string()),
+        "http://127.0.0.1:8317/v1",
         DEFAULT_API_KEY,
-        "gpt-test",
+        "gpt-manual",
         &models,
     ).unwrap();
     let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
-    assert!(value["config"]["modelConfigRules"]["providerModelRules"]
-        .as_array().unwrap().is_empty());
+    let rules = value["config"]["modelConfigRules"]["providerModelRules"].as_array().unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0]["modelId"], "without-context");
+    assert_eq!(rules[0]["config"]["properties"]["inputFormat"]["supportsImage"], true);
     let manual = &value["config"]["modelConfigRules"]["manualProviderModelRules"][0];
-    assert_eq!(manual["config"]["properties"]["supportsToolCall"], true);
+    assert_eq!(manual["config"]["properties"]["inputFormat"]["supportsImage"], true);
     assert_eq!(manual["config"]["properties"]["contextWindow"], 200_000);
     assert!(build_zcode_agent_config(
         Some(r#"{"schemaVersion":2,"config":{}}"#),
-        "http://127.0.0.1:8317",
+        "http://127.0.0.1:8317/v1",
         DEFAULT_API_KEY,
-        "gpt-test",
-        &test_agent_models(&["gpt-test"]),
+        "gpt-manual",
+        &test_agent_models(&["gpt-manual"]),
     ).is_err());
+}
+
+#[test]
+fn zcode_latest_manual_rules_preserve_required_fields_without_runtime_context() {
+    let existing = include_str!("fixtures/zcode-provider-config-3.14.4.json");
+    let original: serde_json::Value = serde_json::from_str(existing).unwrap();
+    let mut models = test_agent_models(&["gpt-manual", "gpt-test"]);
+    for option in &mut models {
+        option.context_window = None;
+    }
+    let rendered = build_zcode_agent_config(
+        Some(existing),
+        "http://127.0.0.1:8317/v1",
+        DEFAULT_API_KEY,
+        "gpt-manual",
+        &models,
+    ).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    assert_eq!(
+        value["config"]["modelConfigRules"]["manualProviderModelRules"],
+        original["config"]["modelConfigRules"]["manualProviderModelRules"],
+    );
+    assert_eq!(value["config"]["defaultModelSelection"], original["config"]["defaultModelSelection"]);
+    let smart = &value["config"]["modelConfigRules"]["providerModelRules"][1];
+    assert!(smart["config"]["properties"].get("contextWindow").is_none());
+    assert_eq!(smart["config"]["properties"]["supportsToolCall"], true);
+    assert_eq!(
+        build_zcode_agent_config(
+            Some(&rendered), "http://127.0.0.1:8317/v1", DEFAULT_API_KEY, "gpt-manual", &models,
+        ).unwrap(),
+        rendered,
+    );
+}
+
+#[test]
+fn zcode_latest_manual_rules_update_context_and_restore_without_losing_native_options() {
+    let existing = include_str!("fixtures/zcode-provider-config-3.14.4.json");
+    let original: serde_json::Value = serde_json::from_str(existing).unwrap();
+    let mut models = test_agent_models(&["gpt-manual", "gpt-test"]);
+    models[0].context_window = Some(372_000);
+    let rendered = build_zcode_agent_config(
+        Some(existing),
+        "http://127.0.0.1:8317/v1",
+        DEFAULT_API_KEY,
+        "gpt-manual",
+        &models,
+    ).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    let mut expected_manual = original["config"]["modelConfigRules"]["manualProviderModelRules"].clone();
+    expected_manual[0]["config"]["properties"]["contextWindow"] = serde_json::json!(372_000);
+    assert_eq!(value["config"]["modelConfigRules"]["manualProviderModelRules"], expected_manual);
+    assert_eq!(value["config"]["defaultModelSelection"], original["config"]["defaultModelSelection"]);
+    assert_eq!(
+        value["config"]["providerConfigRules"]["providerRules"][0],
+        original["config"]["providerConfigRules"]["providerRules"][0],
+    );
+    assert_eq!(
+        value["config"]["providerConfigRules"]["providerRules"][1]["config"]["api"]["headers"],
+        original["config"]["providerConfigRules"]["providerRules"][1]["config"]["api"]["headers"],
+    );
+    // Restoring CPA must not undo later edits made in ZCode to another provider.
+    value["config"]["providerConfigRules"]["providerRules"][0]["providerName"] = serde_json::json!("Renamed in ZCode");
+    let restored = build_restored_zcode_provider_config(
+        &value.to_string(), Some(existing),
+    ).unwrap().unwrap();
+    let restored: serde_json::Value = serde_json::from_str(&restored).unwrap();
+    let mut expected = original;
+    expected["config"]["providerConfigRules"]["providerRules"][0]["providerName"] = serde_json::json!("Renamed in ZCode");
+    assert_eq!(restored, expected);
+}
+
+#[test]
+fn zcode_versioned_api_configuration_and_legacy_addresses_are_detected() {
+    let home = agent_test_home("zcode-versioned-api");
+    let paths = agent_config_paths(AgentClient::ZCode, &home);
+    let updates = build_agent_updates(
+        AgentClient::ZCode, &home, 8317, DEFAULT_API_KEY, "gpt-test",
+        &test_agent_models(&["gpt-test"]), None,
+    ).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&updates[0].after).unwrap();
+    assert_eq!(
+        value["config"]["providerConfigRules"]["providerRules"][0]["config"]["api"]["baseUrl"],
+        "http://127.0.0.1:8317/v1",
+    );
+    let fresh = fresh_agent_contents(AgentClient::ZCode, 8317, DEFAULT_API_KEY, "gpt-test").unwrap();
+    let fresh: serde_json::Value = serde_json::from_str(&fresh[0]).unwrap();
+    assert_eq!(
+        fresh["config"]["providerConfigRules"]["providerRules"][0]["config"]["api"]["baseUrl"],
+        "http://127.0.0.1:8317/v1",
+    );
+    fs::create_dir_all(paths[0].parent().unwrap()).unwrap();
+    for base_url in [
+        "http://127.0.0.1:8317/v1",
+        "http://127.0.0.1:8317/v1/",
+        "http://127.0.0.1:8317",
+        "http://127.0.0.1:8317/",
+        "http://127.0.0.1:8318/v1",
+        "http://127.0.0.1:8317/other/v1",
+    ] {
+        value["config"]["providerConfigRules"]["providerRules"][0]["config"]["api"]["baseUrl"] = serde_json::json!(base_url);
+        fs::write(&paths[0], value.to_string()).unwrap();
+        assert_eq!(
+            inspect_zcode_agent_config(&paths[0], 8317, DEFAULT_API_KEY).unwrap(),
+            (matches!(base_url.trim_end_matches('/'), "http://127.0.0.1:8317" | "http://127.0.0.1:8317/v1"), Some("gpt-test".to_string())),
+            "{base_url}",
+        );
+    }
+    fs::remove_dir_all(home).unwrap();
 }
 
 #[test]
@@ -1317,10 +2193,13 @@ api_key = "original-key"
 
 #[test]
 fn openclaw_agent_config_accepts_json5_and_preserves_unknown_fields() {
-    let models = test_agent_models(&["gpt-test", "deepseek-test"]);
+    let mut models = test_agent_models(&["gpt-test", "deepseek-test"]);
+    models[0].input_modalities = Some(vec!["text".to_string(), "image".to_string()]);
+    models[0].harness_metadata = Some(serde_json::json!({"maxTokens": 65536}));
+    models[1].harness_metadata = Some(serde_json::json!({"maxTokens": 32768}));
     let rendered = build_openclaw_agent_config(
             Some(
-                "// keep this comment\n{ theme: 'dark', models: { mode: 'merge', providers: { 'cpa-gui': { custom: 'keep' } } } }",
+                "// keep this comment\n{ theme: 'dark', models: { mode: 'merge', providers: { 'cpa-gui': { custom: 'keep', models: [{ id: 'deepseek-test', maxTokens: 16384 }] } } } }",
             ),
             "http://127.0.0.1:8317/v1",
             DEFAULT_API_KEY,
@@ -1344,13 +2223,17 @@ fn openclaw_agent_config_accepts_json5_and_preserves_unknown_fields() {
         value["agents"]["defaults"]["model"]["primary"],
         "cpa-gui/gpt-test"
     );
+    let provider_models = value["models"]["providers"][MANAGED_AGENT_PROVIDER_ID]["models"]
+        .as_array()
+        .unwrap();
+    assert_eq!(provider_models.len(), 2);
     assert_eq!(
-        value["models"]["providers"][MANAGED_AGENT_PROVIDER_ID]["models"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
+        provider_models[0]["input"],
+        serde_json::json!(["text", "image"])
     );
+    assert_eq!(provider_models[0]["maxTokens"], 65536);
+    assert!(provider_models[1].get("input").is_none());
+    assert_eq!(provider_models[1]["maxTokens"], 16384);
     assert!(value["agents"]["defaults"]["models"]["cpa-gui/gpt-test"].is_object());
     assert!(value["agents"]["defaults"]["models"]["cpa-gui/deepseek-test"].is_object());
 }
@@ -1408,6 +2291,7 @@ fn agent_model_list_parser_exposes_aliases_as_selectable_model_ids() {
         vec![
             AgentModelOption {
                 input_modalities: None,
+                reasoning_levels: Vec::new(),
                 harness_metadata: None,
                 name: "gpt-5".to_string(),
                 alias: Some("GPT 5".to_string()),
@@ -1416,6 +2300,7 @@ fn agent_model_list_parser_exposes_aliases_as_selectable_model_ids() {
             },
             AgentModelOption {
                 input_modalities: None,
+                reasoning_levels: Vec::new(),
                 harness_metadata: None,
                 name: "claude-sonnet".to_string(),
                 alias: None,
@@ -1424,6 +2309,7 @@ fn agent_model_list_parser_exposes_aliases_as_selectable_model_ids() {
             },
             AgentModelOption {
                 input_modalities: None,
+                reasoning_levels: Vec::new(),
                 harness_metadata: None,
                 name: "claude-sonnet-xhigh".to_string(),
                 alias: Some("claude-sonnet".to_string()),
@@ -1432,6 +2318,7 @@ fn agent_model_list_parser_exposes_aliases_as_selectable_model_ids() {
             },
             AgentModelOption {
                 input_modalities: None,
+                reasoning_levels: Vec::new(),
                 harness_metadata: None,
                 name: "visible-alias".to_string(),
                 alias: Some("hidden-original".to_string()),
@@ -1440,6 +2327,7 @@ fn agent_model_list_parser_exposes_aliases_as_selectable_model_ids() {
             },
             AgentModelOption {
                 input_modalities: None,
+                reasoning_levels: Vec::new(),
                 harness_metadata: None,
                 name: "deepseek-chat".to_string(),
                 alias: None,
@@ -1457,7 +2345,7 @@ async fn codex_configuration_uses_public_v1_model_ids_for_selection_and_files() 
     let port = listener.local_addr().unwrap().port();
     let server = std::thread::spawn(move || {
         let mut paths = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..3 {
             let (mut socket, _) = listener.accept().unwrap();
             socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             let mut request = Vec::new();
@@ -1471,7 +2359,10 @@ async fn codex_configuration_uses_public_v1_model_ids_for_selection_and_files() 
             let path = request.split_whitespace().nth(1).unwrap().to_string();
             let body = if path == "/v1/models" {
                 assert!(request.to_lowercase().contains("authorization: bearer public-test-key\r\n"));
-                r#"{"data":[{"id":"public-model","alias":"not-an-id","slug":"not-public","context_length":64000},{"id":"another-model"}]}"#
+                r#"{"data":[{"id":"public-model","alias":"not-an-id","slug":"not-public"},{"id":"another-model"}]}"#
+            } else if path.starts_with("/v1/models?client_version=") {
+                assert!(request.to_lowercase().contains("authorization: bearer public-test-key\r\n"));
+                r#"{"models":[{"id":"public-model","context_window":1048576,"supported_reasoning_levels":["low","medium","high"],"default_reasoning_level":"medium"},{"id":"client-only-model","context_window":1048576}]}"#
             } else {
                 assert_eq!(path, "/v8/management/config.yaml");
                 "config-version: 8\n"
@@ -1480,6 +2371,8 @@ async fn codex_configuration_uses_public_v1_model_ids_for_selection_and_files() 
             paths.push(path);
         }
         assert!(paths.iter().any(|path| path == "/v1/models"));
+        assert!(paths.iter().any(|path| path.starts_with("/v1/models?client_version=")));
+        assert!(paths.iter().any(|path| path == "/v8/management/config.yaml"));
     });
     let config = GuiConfigFile {
         port,
@@ -1496,6 +2389,120 @@ async fn codex_configuration_uses_public_v1_model_ids_for_selection_and_files() 
     let mut written: Vec<_> = catalog["models"].as_array().unwrap().iter().map(|model| model["slug"].as_str().unwrap()).collect();
     written.sort();
     assert_eq!(ids, written);
+    let public_model = catalog["models"].as_array().unwrap().iter().find(|model| model["slug"] == "public-model").unwrap();
+    assert_eq!(public_model["context_window"], 1_048_576);
+    assert_eq!(public_model["max_context_window"], 1_048_576);
+    assert_eq!(public_model["default_reasoning_level"], "medium");
+    assert_eq!(public_model["supported_reasoning_levels"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn omp_configuration_stores_credentials_and_preserves_unmanaged_settings() {
+    let home = agent_test_home("omp-provider");
+    let existing_models = "providers:\n  other:\n    baseUrl: https://example.test/v1\n    apiKey: KEEP_OTHER\n";
+    let existing_settings = "shellPath: E:/software/toolchain/w64devkit/bin/bash.exe\nmodelRoles:\n  tiny: local/lfm2.5-230m\n";
+    let models = build_omp_models_config(Some(existing_models), "http://127.0.0.1:8317/v1", "secret-value").unwrap();
+    let settings = build_omp_settings_config(Some(existing_settings), "gpt-test").unwrap();
+    let models_value: serde_norway::Value = serde_norway::from_str(&models).unwrap();
+    let settings_value: serde_norway::Value = serde_norway::from_str(&settings).unwrap();
+    let provider = &models_value["providers"]["easy-cliproxyapi"];
+    assert_eq!(provider["baseUrl"].as_str(), Some("http://127.0.0.1:8317/v1"));
+    assert_eq!(provider["apiKey"].as_str(), Some("secret-value"));
+    assert_eq!(provider["api"].as_str(), Some("openai-responses"));
+    assert_eq!(provider["discovery"]["type"].as_str(), Some("openai-models-list"));
+    assert!(provider.get("models").is_none());
+    assert_eq!(models_value["providers"]["other"]["apiKey"].as_str(), Some("KEEP_OTHER"));
+    assert_eq!(settings_value["shellPath"].as_str(), Some("E:/software/toolchain/w64devkit/bin/bash.exe"));
+    assert_eq!(settings_value["modelRoles"]["tiny"].as_str(), Some("local/lfm2.5-230m"));
+    assert_eq!(settings_value["modelRoles"]["default"].as_str(), Some("easy-cliproxyapi/gpt-test"));
+
+    let paths = agent_config_paths(AgentClient::Omp, &home);
+    fs::create_dir_all(paths[0].parent().unwrap()).unwrap();
+    fs::write(&paths[0], models).unwrap();
+    fs::write(&paths[1], settings).unwrap();
+    let (configured, model) = inspect_omp_agent_config(&paths, 8317, "secret-value").unwrap();
+    assert!(configured);
+    assert_eq!(model.as_deref(), Some("gpt-test"));
+    assert!(omp_has_managed_marker(&paths).unwrap());
+
+    let removed = prepare_omp_managed_removal(&paths).unwrap();
+    for (path, bytes) in removed {
+        match bytes {
+            Some(bytes) => fs::write(&path, bytes).unwrap(),
+            None => fs::write(&path, "").unwrap(),
+        }
+    }
+    let restored_models = fs::read_to_string(&paths[0]).unwrap();
+    let restored_settings = fs::read_to_string(&paths[1]).unwrap();
+    assert!(!restored_models.contains("easy-cliproxyapi"));
+    assert!(restored_models.contains("KEEP_OTHER"));
+    assert!(!restored_settings.contains("easy-cliproxyapi"));
+    assert!(restored_settings.contains("shellPath"));
+    assert!(restored_settings.contains("local/lfm2.5-230m"));
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn omp_legacy_environment_configuration_requires_update_and_migrates() {
+    let home = agent_test_home("omp-legacy-credentials");
+    let paths = agent_config_paths(AgentClient::Omp, &home);
+    fs::create_dir_all(paths[0].parent().unwrap()).unwrap();
+    let original = "providers:\n  other:\n    apiKey: KEEP_OTHER\n  easy-cliproxyapi:\n    baseUrl: http://127.0.0.1:8317/v1\n    apiKey: EASYCLIPROXYAPI_API_KEY\n    api: openai-responses\n    discovery:\n      type: openai-models-list\n";
+    fs::write(&paths[0], original).unwrap();
+    fs::write(&paths[1], build_omp_settings_config(None, "gpt-test").unwrap()).unwrap();
+
+    let (configured, model) = inspect_omp_agent_config(&paths, 8317, "test-cpa-key").unwrap();
+    assert!(!configured);
+    assert_eq!(model.as_deref(), Some("gpt-test"));
+    assert_eq!(agent_connection_state(configured, true, omp_has_managed_marker(&paths)), "needs-update");
+
+    let updated = build_omp_models_config(Some(original), "http://127.0.0.1:8317/v1", "test-cpa-key").unwrap();
+    fs::write(&paths[0], &updated).unwrap();
+    assert!(inspect_omp_agent_config(&paths, 8317, "test-cpa-key").unwrap().0);
+    assert!(!updated.contains("EASYCLIPROXYAPI_API_KEY"));
+    assert!(updated.contains("KEEP_OTHER"));
+    assert_eq!(build_omp_models_config(Some(&updated), "http://127.0.0.1:8317/v1", "test-cpa-key").unwrap(), updated);
+
+    let restored = build_restored_omp_models(&updated, Some(original)).unwrap().unwrap();
+    let restored: serde_norway::Value = serde_norway::from_str(&restored).unwrap();
+    let original: serde_norway::Value = serde_norway::from_str(original).unwrap();
+    assert_eq!(restored, original);
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn omp_detects_rotated_credentials_and_round_trips_yaml_sensitive_keys() {
+    let home = agent_test_home("omp-rotated-credentials");
+    let paths = agent_config_paths(AgentClient::Omp, &home);
+    fs::create_dir_all(paths[0].parent().unwrap()).unwrap();
+    fs::write(&paths[1], build_omp_settings_config(None, "gpt-test").unwrap()).unwrap();
+    let mut models = build_omp_models_config(None, "http://127.0.0.1:8317/v1", "old-test-key").unwrap();
+    fs::write(&paths[0], &models).unwrap();
+    assert!(!inspect_omp_agent_config(&paths, 8317, "new-test-key").unwrap().0);
+
+    for key in ["new-test-key", "test: key # with 'quotes' and \"double quotes\"", "true", "0123"] {
+        models = build_omp_models_config(Some(&models), "http://127.0.0.1:8317/v1", key).unwrap();
+        fs::write(&paths[0], &models).unwrap();
+        assert!(inspect_omp_agent_config(&paths, 8317, key).unwrap().0);
+        assert!(!inspect_omp_agent_config(&paths, 8318, key).unwrap().0);
+    }
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+#[ignore = "requires an isolated live-test directory containing cpa-core/config.yaml"]
+fn export_omp_live_configuration() {
+    let root = PathBuf::from(env::var("EZCPA_OMP_LIVE_ROOT").expect("isolated test directory"));
+    let config: serde_norway::Value = serde_norway::from_str(
+        &fs::read_to_string(root.join("cpa-core/config.yaml")).unwrap(),
+    ).expect("valid copied core configuration");
+    let port = config["server"]["port"].as_u64().expect("test port") as u16;
+    assert_eq!(port, 8320);
+    let key = config["access"]["api-keys"][0].as_str().expect("configured test key");
+    let directory = root.join("omp-agent");
+    fs::create_dir_all(&directory).unwrap();
+    let rendered = build_omp_models_config(None, &format!("http://127.0.0.1:{port}/v1"), key).unwrap();
+    fs::write(directory.join("models.yml"), rendered).unwrap();
 }
 
 #[test]
@@ -1515,6 +2522,7 @@ fn kimi_grok_and_zcode_use_cpa_runtime_context_windows() {
         AgentClient::OpenClaw,
         AgentClient::Hermes,
         AgentClient::DeepSeekHarness,
+        AgentClient::Omp,
     ] {
         assert!(!agent_uses_cpa_runtime_context_windows(client));
     }
@@ -1591,6 +2599,7 @@ agent-default-model:
     let models = vec![
         AgentModelOption {
             input_modalities: None,
+            reasoning_levels: Vec::new(),
             harness_metadata: None,
             name: "gpt-selected".to_string(),
             alias: Some("Selected Model".to_string()),
@@ -1599,6 +2608,7 @@ agent-default-model:
         },
         AgentModelOption {
             input_modalities: None,
+            reasoning_levels: Vec::new(),
             harness_metadata: None,
             name: "gpt-other".to_string(),
             alias: None,
@@ -2164,6 +3174,7 @@ fn claude_desktop_uses_selected_alias_directly_with_original_context() {
     let models = vec![
         AgentModelOption {
             input_modalities: None,
+            reasoning_levels: Vec::new(),
             harness_metadata: None,
             name: "gpt-original".to_string(),
             alias: None,
@@ -2172,6 +3183,7 @@ fn claude_desktop_uses_selected_alias_directly_with_original_context() {
         },
         AgentModelOption {
             input_modalities: None,
+            reasoning_levels: Vec::new(),
             harness_metadata: None,
             name: "gpt-high".to_string(),
             alias: Some("gpt-original".to_string()),
@@ -2408,6 +3420,7 @@ fn codex_model_list_is_empty_when_cpa_has_no_writable_models() {
 fn agent_model_validation_only_accepts_models_in_current_list() {
     let models = vec![AgentModelOption {
         input_modalities: None,
+        reasoning_levels: Vec::new(),
         harness_metadata: None,
         name: "gpt-5.4".to_string(),
         alias: Some("GPT 5.4".to_string()),
@@ -2523,4 +3536,37 @@ fn windows_batch_agent_commands_use_call_without_embedded_quotes() {
         r"C:\tools\agent.exe"
     );
     assert_eq!(native.get_args().count(), 0);
+}
+
+#[test]
+fn claude_code_fable_mapping_is_independent_and_round_trips() {
+    let directory = agent_test_home("fable-mapping");
+    let path = directory.join("settings.json");
+    let models = test_agent_models(&["route-sonnet", "route-fable"]);
+    let mut mappings = ClaudeDesktopModelMappings::all("route-sonnet");
+    mappings.fable = "route-fable".into();
+    mappings.fable_1m = true;
+    mappings.startup_model = Some("fable".into());
+    let resolved = resolve_claude_code_model_mappings(AgentClient::ClaudeCode, &models, "route-sonnet", Some(mappings)).unwrap().unwrap();
+    let rendered = build_claude_agent_config(None, "http://127.0.0.1:8317", "test-key", "route-sonnet", &models, Some(&resolved)).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    assert_eq!(value["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"], "route-fable[1m]");
+    assert_eq!(value["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "route-sonnet");
+    assert_eq!(value["model"], "fable");
+    fs::write(&path, rendered).unwrap();
+    let inspected = inspect_claude_code_model_mappings(&path).unwrap().unwrap();
+    assert_eq!(inspected.fable, "route-fable");
+    assert!(inspected.fable_1m);
+}
+
+
+#[test]
+fn default_tauri_capability_grants_app_version() {
+    let raw = include_str!("../../capabilities/default.json");
+    let parsed: serde_json::Value = serde_json::from_str(raw).unwrap();
+    let permissions = parsed["permissions"].as_array().unwrap();
+    assert!(
+        permissions.iter().any(|entry| entry.as_str() == Some("core:app:allow-version")),
+        "src-tauri/capabilities/default.json must include core:app:allow-version"
+    );
 }

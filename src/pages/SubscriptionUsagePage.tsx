@@ -1,3 +1,5 @@
+import { EmptyState } from '../components/EmptyState';
+import { Select } from '../components/Select';
 import { ResetCreditExpiries } from '../components/ResetCreditExpiries';
 import { MessageNotice } from '../appNotice';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -11,8 +13,11 @@ import claudeIcon from '../assets/icons/claude.svg';
 import codexIcon from '../assets/icons/codex.svg';
 import grokIcon from '../assets/icons/grok.svg';
 import devinIcon from '../assets/icons/devin.svg';
+import metaIcon from '../assets/icons/meta.svg';
+import zaiIcon from '../assets/icons/zai.svg';
 import kimiIcon from '../assets/icons/kimi-light.svg';
 import { managementApi, readBoolean, responseList } from '../services/managementApi';
+import { quotaResetExpiries } from '../services/quotaService';
 import { formatQuotaReset, useQuotaClock } from '../services/quotaTime';
 import {
   fileName,
@@ -45,11 +50,13 @@ const providerMeta: Record<QuotaProvider, { label: string; icon: string }> = {
   codex: { label: 'Codex', icon: codexIcon },
   kimi: { label: 'Kimi', icon: kimiIcon },
   xai: { label: 'xAI', icon: grokIcon },
+  meta: { label: 'Muse', icon: metaIcon },
+  zai: { label: 'z.ai', icon: zaiIcon },
   devin: { label: 'Devin', icon: devinIcon },
   antigravity: { label: 'Antigravity', icon: antigravityIcon },
 };
 
-const providerOrder: QuotaProvider[] = ['claude', 'antigravity', 'codex', 'xai', 'kimi', 'devin'];
+const providerOrder: QuotaProvider[] = ['claude', 'antigravity', 'codex', 'xai', 'kimi', 'devin', 'meta', 'zai'];
 const REFRESH_CONCURRENCY = 4;
 
 export function SubscriptionUsagePage() {
@@ -184,37 +191,37 @@ export function SubscriptionUsagePage() {
       {loading ? (
         <div className="management-loading"><LoaderCircle size={20} className="spin" />{t('quota.loadingFiles')}</div>
       ) : grouped.length === 0 ? (
-        <div className="management-empty"><AlertCircle size={24} /><strong>{t('quota.empty.title')}</strong><span>{t('quota.empty.description')}</span></div>
+        <EmptyState className="management-empty" icon={<AlertCircle size={24} />} title={t('quota.empty.title')}>{t('quota.empty.description')}</EmptyState>
       ) : (
         <>
         <div className="quota-toolbar">
           <div className="quota-provider-filters" role="group" aria-label={t('quota.filterProviders')}>
-            <button type="button" aria-pressed={providerFilter === 'all'} onClick={() => setProviderFilter('all')}>{t('quota.allProviders')}<span>{files.length}</span></button>
-            {providerOrder.map((provider) => <button type="button" key={provider} aria-pressed={providerFilter === provider} onClick={() => setProviderFilter(provider)}>
+            <button type="button" className="secondary-button compact-button" aria-pressed={providerFilter === 'all'} onClick={() => setProviderFilter('all')}>{t('quota.allProviders')}<span>{files.length}</span></button>
+            {providerOrder.map((provider) => <button type="button" className="secondary-button compact-button" key={provider} aria-pressed={providerFilter === provider} onClick={() => setProviderFilter(provider)}>
               <img src={providerMeta[provider].icon} alt="" className={`quota-icon-${provider}`} />{providerMeta[provider].label}<span>{grouped.find(([key]) => key === provider)?.[1].length ?? 0}</span>
             </button>)}
           </div>
-          <label className="quota-layout-control">{t('quota.view')}<select aria-label={t('quota.view')} value={layout} onChange={(event) => setLayout(event.target.value as 'ledger' | 'cards')}>
+          <label className="quota-layout-control">{t('quota.view')}<Select aria-label={t('quota.view')} value={layout} onChange={(event) => setLayout(event.target.value as 'ledger' | 'cards')}>
             <option value="ledger">{t('quota.ledger')}</option><option value="cards">{t('quota.cards')}</option>
-          </select></label>
+          </Select></label>
         </div>
         <p className="quota-summary-hint">{t('quota.summaryHint')}</p>
         {visibleGroups.length ? <div className="quota-overview">
           {visibleGroups.map(([provider, items]) => <ProviderQuotaSummary key={provider} provider={provider} items={items} />)}
-        </div> : <div className="management-empty">{t('quota.noProviderCredentials')}</div>}
+        </div> : <EmptyState className="management-empty">{t('quota.noProviderCredentials')}</EmptyState>}
         <div className="quota-account-toolbar">
           <input type="search" className="quota-account-search" aria-label={t('quota.searchAccounts')} placeholder={t('quota.searchAccounts')} value={search} onChange={(event) => setSearch(event.target.value)} />
-          <label className="quota-layout-control">{t('quota.sort')}<select aria-label={t('quota.sort')} value={sort} onChange={(event) => setSort(event.target.value as QuotaSort)}>
+          <label className="quota-layout-control">{t('quota.sort')}<Select aria-label={t('quota.sort')} value={sort} onChange={(event) => setSort(event.target.value as QuotaSort)}>
             <option value="name">{t('quota.sortName')}</option>
             <option value="remaining">{t('quota.sortRemaining')}</option>
             <option value="reset">{t('quota.sortReset')}</option>
-          </select></label>
+          </Select></label>
           <button type="button" className="secondary-button compact-button" onClick={() => void refreshMany(visibleFiles)} disabled={refreshing || loading || querying || !visibleFiles.length}>
             <RefreshCw size={16} />{t('quota.refreshVisible', { count: visibleFiles.length })}
           </button>
         </div>
         {search.trim() ? <p className="quota-summary-hint" role="status">{t('quota.searchScope', { count: visibleFiles.length })}</p> : null}
-        {visibleGroups.length > 0 && !accountGroups.length ? <div className="management-empty">{t('quota.noMatchingAccounts')}<button type="button" className="secondary-button compact-button" onClick={() => setSearch('')}>{t('quota.clearSearch')}</button></div> : null}
+        {visibleGroups.length > 0 && !accountGroups.length ? <EmptyState className="management-empty">{t('quota.noMatchingAccounts')}<button type="button" className="secondary-button compact-button" onClick={() => setSearch('')}>{t('quota.clearSearch')}</button></EmptyState> : null}
         <div className={`quota-group-list quota-layout-${layout}`}>
           {accountGroups.map(([provider, items]) => (
             <section className="quota-provider-group" key={provider}>
@@ -241,9 +248,9 @@ export function ProviderQuotaSummary({ provider, items }: { provider: QuotaProvi
   const reset = summary ? formatQuotaReset(summary.earliestResetAtMs, undefined, locale, now) : '';
   return <article className="panel quota-provider-summary" aria-label={providerMeta[provider].label}>
     <div className="quota-summary-heading"><strong><img src={providerMeta[provider].icon} alt="" className={`quota-icon-${provider}`} />{providerMeta[provider].label}</strong><span>{t(items.length === 1 ? 'quota.credentials.one' : 'quota.credentials.other', { count: items.length })}</span></div>
-    {summary ? <select className="quota-window-select" aria-label={t('quota.summaryWindow', { provider: providerMeta[provider].label })} value={summary.label} onChange={(event) => setSelectedLabel(event.target.value)}>
+    {summary ? <Select className="quota-window-select" aria-label={t('quota.summaryWindow', { provider: providerMeta[provider].label })} value={summary.label} onChange={(event) => setSelectedLabel(event.target.value)}>
       {summaries.map(({ label }) => <option key={label} value={label}>{label}</option>)}
-    </select> : <span className="quota-summary-placeholder">{t(items.some(({ quota }) => quota.status === 'loading') ? 'quota.querying' : items.some(({ quota }) => quota.status === 'error') ? 'quota.summaryUnavailable' : 'quota.notFetched')}</span>}
+    </Select> : <span className="quota-summary-placeholder">{t(items.some(({ quota }) => quota.status === 'loading') ? 'quota.querying' : items.some(({ quota }) => quota.status === 'error') ? 'quota.summaryUnavailable' : 'quota.notFetched')}</span>}
     <div className="quota-summary-total"><strong>{summary?.reported ? `${Math.round(summary.totalRemaining)}%` : '—'}</strong><span>{summary?.reported ? t('quota.summaryCapacity', { capacity: summary.capacity }) : t('quota.summaryUnavailable')}</span></div>
     <div className="quota-summary-segments" aria-label={t('quota.accountRemaining')}>
       {items.map(({ file }, index) => {
@@ -264,7 +271,7 @@ export function QuotaCard({ file, quota, onRefresh, onReset, onEdit, ledger = fa
   const name = fileName(file);
   const disabled = readBoolean(file, 'disabled');
   return (
-    <article className={`panel real-quota-card${ledger ? ' quota-ledger-row' : ''}`}>
+    <article className={`panel real-quota-card surface-card${ledger ? ' quota-ledger-row' : ''}`}>
       <div className="real-quota-card-header">
         <div><strong title={name}>{name}</strong><span>{provider ? providerMeta[provider].label : t('quota.unknownProvider')}{quota.plan ? ' · ' + quota.plan : ''}</span>
           {quota.subscriptionActiveUntil ? <small>{t('quota.expiresAt', { time: formatQuotaTimestamp(quota.subscriptionActiveUntil, locale) })}</small> : null}
@@ -282,7 +289,7 @@ export function QuotaCard({ file, quota, onRefresh, onReset, onEdit, ledger = fa
       {quota.status === 'error' ? <>
         <div className="quota-card-error"><AlertCircle size={18} /><span>{t('authFiles.quota.failed')}{quota.error ? <small>{quota.error}</small> : null}</span></div>
       </> : null}
-      {quota.status === 'success' && (provider === 'codex' || provider === 'claude') ? <div className="quota-reset-credit-summary">
+      {quota.status === 'success' && (provider === 'codex' || provider === 'claude') && (quota.creditsUnlimited || quota.creditBalance !== undefined || quotaResetExpiries(quota).length > 0) ? <div className="quota-reset-credit-summary surface-section surface-muted">
         {(quota.creditsUnlimited || quota.creditBalance !== undefined) ? <span>{t('quota.creditBalance')} <strong>{quota.creditsUnlimited ? t('quota.creditUnlimited') : quota.creditBalance}</strong></span> : null}
         <ResetCreditExpiries quota={quota} />
         <MessageNotice message={quota.resetCreditsError ? name + ': ' + t('quota.resetCreditsWarning', { error: quota.resetCreditsError }) : null} />
@@ -290,8 +297,8 @@ export function QuotaCard({ file, quota, onRefresh, onReset, onEdit, ledger = fa
       {quota.status === 'success' ? <div className="quota-row-list">{quota.rows.map((row, index) => {
         const reset = formatQuotaReset(row.resetAtMs, row.reset, locale, now);
         return <div className="real-quota-row" key={`${row.label}-${index}`}>
-          <div><span>{row.label}</span><strong>{row.remainingPercent === null ? '—' : t('quota.remaining', { percent: Math.round(row.remainingPercent) })}</strong></div>
-          {row.remainingPercent !== null ? <div className={`real-quota-track quota-tone-${quotaTone(row.remainingPercent)}`}><span style={{ width: `${Math.max(0, Math.min(100, row.remainingPercent))}%` }} /></div> : null}
+          <div><span>{row.label}</span><strong>{row.remainingPercent === null || !Number.isFinite(row.remainingPercent) ? '—' : t('quota.remaining', { percent: Math.round(row.remainingPercent) })}</strong></div>
+          {row.remainingPercent !== null && Number.isFinite(row.remainingPercent) ? <div className={`real-quota-track quota-tone-${quotaTone(row.remainingPercent)}`}><span style={{ width: `${Math.max(0, Math.min(100, row.remainingPercent))}%` }} /></div> : null}
           <small>{[row.detail, reset].filter(Boolean).join(' · ')}</small>
         </div>;
       })}</div> : null}

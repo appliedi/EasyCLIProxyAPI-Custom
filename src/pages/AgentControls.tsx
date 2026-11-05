@@ -1,21 +1,28 @@
+import { Notice } from '../components/Notice';
 import { MessageNotice } from '../appNotice';
-import { AppWindow, LoaderCircle, Play, RefreshCw, Square, Terminal, Trash2 } from 'lucide-react';
+import type { ReactNode } from 'react';
+import { AgentEnvironmentDirectory } from './AgentEnvironmentDirectory';
+import type { AgentClientId } from '../services/agents';
+import { AppWindow, FolderOpen, LoaderCircle, Play, RefreshCw, Square, Terminal, Trash2 } from 'lucide-react';
 import { useI18n } from '../i18n';
 
 type LaunchTarget = { id: 'app' | 'cli'; label: string; detail: string };
 
 export function AgentRunControls({
-  name, dualTargets, desktop, targets, enabled, busyAction, harness, onLaunch, onRestart, onStop, onRestartWeb, error, onErrorDismiss,
+  name, dualTargets, desktop, cliService, cliServiceRestarting, targets, enabled, busyAction, harness, onLaunch, onRestart, onRestartCli, onStop, onRestartWeb, error, onErrorDismiss,
 }: {
   name: string;
   dualTargets: boolean;
   desktop: boolean;
+  cliService: boolean;
+  cliServiceRestarting: boolean;
   targets: LaunchTarget[];
   enabled: boolean;
   busyAction: string | null;
   harness: { running: boolean; pid: number | null; mode: string | null } | null;
   onLaunch: (target: LaunchTarget | null) => void;
   onRestart: () => void;
+  onRestartCli: () => void;
   onStop: () => void;
   onRestartWeb: () => void;
   error: string;
@@ -29,7 +36,7 @@ export function AgentRunControls({
     const action = dualTargets ? `launch-${kind}` : 'launch';
     const starting = busyAction === action;
     return <button type="button" className="secondary-button agent-launch-button"
-      disabled={busy || !enabled || !target} onClick={() => onLaunch(target)}
+      disabled={busy || !enabled || !target || (cliServiceRestarting && target.id === 'cli')} onClick={() => onLaunch(target)}
       title={target?.detail ?? t('agents.launch.unavailable')}>
       {starting ? <LoaderCircle size={16} className="spin" />
         : target?.id === 'cli' ? <Terminal size={16} />
@@ -41,6 +48,12 @@ export function AgentRunControls({
   return <section className="agent-run-controls" aria-label={t('agents.run.title')}>
     <div className="agent-section-heading"><div><strong>{t('agents.run.title')}</strong></div></div>
     <div className="agent-launch-actions">
+      {cliService ? <button type="button" className="secondary-button agent-launch-button"
+        onClick={onRestartCli} disabled={busy || cliServiceRestarting || !enabled || !cli}
+        title={cliServiceRestarting ? t('agents.launch.restartingCliDetail') : cli?.detail ?? t('agents.launch.unavailable')}>
+        {cliServiceRestarting ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}
+        {t(cliServiceRestarting ? 'agents.launch.restartingCli' : 'agents.launch.restartCli')}
+      </button> : null}
       {harness?.running ? <button type="button" className="danger-button agent-launch-button"
           disabled={busy} onClick={onStop} title={t('agents.deepseekLaunch.runningDetail', { pid: harness.pid ?? '—', mode: harness.mode ?? '—' })}>
           {busyAction === 'stop-deepseek' ? <LoaderCircle size={16} className="spin" /> : <Square size={16} />}
@@ -75,18 +88,50 @@ export function AgentConfigurationFeedback({ pending, description, status = '' }
 }
 
 export function AgentConfigManagementPanel({
+  codexProviderControl, codexRemoteCompactionControl, codexApprovalModelControl,
   pi, codex, busyAction, canTemplate, canUpdatePi, canUninstallPi, pluginInstalled, pluginVersion, updateLabel,
-  onBackup, onRestore, onTemplate, onClear, onUpdatePi, onUninstallPi, canClearIntegration, onClearIntegration,
+  executablePath, onChooseExecutablePath, onClearExecutablePath, onBackup, onRestore, onTemplate, onClear, onUpdatePi, onUninstallPi, canClearIntegration, onClearIntegration,
+  dualTargets, desktopExecutablePath, onChooseDesktopExecutablePath, onClearDesktopExecutablePath,
+  client, configDirectory, onSaveConfigDirectory, onChooseConfigDirectory,
 }: {
+  codexProviderControl?: ReactNode;
+  codexRemoteCompactionControl?: ReactNode;
+  codexApprovalModelControl?: ReactNode;
   pi: boolean; codex: boolean; busyAction: string | null; canTemplate: boolean;
   canUpdatePi: boolean; canUninstallPi: boolean; pluginInstalled: boolean; pluginVersion: string | null; updateLabel: string;
+  executablePath: string; onChooseExecutablePath: () => void; onClearExecutablePath: () => void;
+  dualTargets: boolean; desktopExecutablePath: string;
+  onChooseDesktopExecutablePath: () => void; onClearDesktopExecutablePath: () => void;
   onBackup: () => void; onRestore: () => void; onTemplate: () => void; onClear: () => void;
   onUpdatePi: () => void; onUninstallPi: () => void;
   canClearIntegration: boolean; onClearIntegration: () => void;
+  client: AgentClientId; configDirectory: string; onSaveConfigDirectory: (directory: string) => void; onChooseConfigDirectory: () => void;
 }) {
   const { t } = useI18n();
   const busy = busyAction !== null;
   return <div className="agent-management-sections">
+    <AgentEnvironmentDirectory client={client} directory={configDirectory} busy={busy}
+      onSave={onSaveConfigDirectory} onBrowse={onChooseConfigDirectory} />
+    <section className="agent-management-row">
+      <div><h3>{t(dualTargets ? 'agents.executablePath.cliTitle' : 'agents.executablePath.title')}</h3><p>{t('agents.executablePath.description')}</p>
+        {executablePath ? <small className="agent-path-value" title={executablePath}>{executablePath}</small> : null}</div>
+      <div className="agent-management-actions">
+        <button type="button" className="secondary-button" onClick={onChooseExecutablePath} disabled={busy}>
+          <FolderOpen size={16} />{t('agents.executablePath.choose')}
+        </button>
+        {executablePath ? <button type="button" className="secondary-button ghost" onClick={onClearExecutablePath} disabled={busy}>{t('agents.executablePath.clear')}</button> : null}
+      </div>
+    </section>
+    {dualTargets ? <section className="agent-management-row">
+      <div><h3>{t('agents.executablePath.desktopTitle')}</h3><p>{t('agents.executablePath.description')}</p>
+        {desktopExecutablePath ? <small className="agent-path-value" title={desktopExecutablePath}>{desktopExecutablePath}</small> : null}</div>
+      <div className="agent-management-actions">
+        <button type="button" className="secondary-button" onClick={onChooseDesktopExecutablePath} disabled={busy}>
+          <FolderOpen size={16} />{t('agents.executablePath.choose')}
+        </button>
+        {desktopExecutablePath ? <button type="button" className="secondary-button ghost" onClick={onClearDesktopExecutablePath} disabled={busy}>{t('agents.executablePath.clear')}</button> : null}
+      </div>
+    </section> : null}
     {!pi ? <section className="agent-management-row">
       <div><h3>{t('agents.management.backups')}</h3><p>{t('agents.management.backupsDescription')}</p></div>
       <div className="agent-management-actions">
@@ -101,6 +146,15 @@ export function AgentConfigManagementPanel({
       <div className="agent-management-actions">
         <button type="button" className="secondary-button" onClick={onTemplate} disabled={busy || !canTemplate}>{t('agents.modify.default')}</button>
       </div>
+    </section> : null}
+    {codex && codexApprovalModelControl ? <section className="agent-management-row agent-management-provider">
+      <div>{codexApprovalModelControl}</div>
+    </section> : null}
+    {codex && codexRemoteCompactionControl ? <section className="agent-management-row agent-management-provider">
+      <div>{codexRemoteCompactionControl}</div>
+    </section> : null}
+    {codex && codexProviderControl ? <section className="agent-management-row agent-management-provider">
+      <div>{codexProviderControl}</div>
     </section> : null}
     {codex ? <section className="agent-management-row agent-management-clear-integration">
       <div><h3>{t('agents.nativeOAuth.restoreTitle')}</h3><p>{t('agents.nativeOAuth.restoreHint')}</p></div>
@@ -121,7 +175,7 @@ export function AgentConfigManagementPanel({
     {pi ? <section className="agent-management-row">
       <div><h3>{t('agents.management.plugin')}</h3><p>{pluginInstalled
         ? t('agents.management.pluginVersion', { version: pluginVersion ?? t('agents.notFetched') })
-        : t('agents.management.pluginMissing')}</p>{updateLabel ? <small className="agent-inline-message">{updateLabel}</small> : null}</div>
+        : t('agents.management.pluginMissing')}</p>{updateLabel ? <Notice tone="info" variant="text" live={false}>{updateLabel}</Notice> : null}</div>
       {pluginInstalled ? <div className="agent-management-actions">
         <button type="button" className="secondary-button" onClick={onUpdatePi} disabled={busy || !canUpdatePi}>
           {busyAction === 'update-pi' ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}

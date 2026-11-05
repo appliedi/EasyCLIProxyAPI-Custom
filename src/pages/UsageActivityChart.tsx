@@ -75,7 +75,9 @@ export function UsageActivityChart({ timeline, range }: UsageActivityChartProps)
     const maximum = niceCeiling(points.reduce((value, point) => Math.max(value, point.requests, point.success + point.failure + point.canceled), 1));
     const peakIndex = points.reduce((best, point, index) => point.requests > (points[best]?.requests ?? -1) ? index : best, 0);
     const compactSameDay = start.toDateString() === end.toDateString();
-    const timeTicks = points.length ? trendTimeAxisTicks(start, end, plotWidth, compactSameDay ? 68 : 110) : [];
+    // Edge labels are anchored inward, so space ticks 1.5 label widths apart
+    // to keep the first and last labels clear of their centered neighbours.
+    const timeTicks = points.length ? trendTimeAxisTicks(start, end, plotWidth, (compactSameDay ? 68 : 110) * 1.5) : [];
     const showTime = timeTicks.length > 1 && timeTicks[1].getTime() - timeTicks[0].getTime() < 86400000;
     const bars = points.map((point) => {
       const x0 = left + trendTimePosition(point.start, start, end) * plotWidth;
@@ -136,7 +138,7 @@ export function UsageActivityChart({ timeline, range }: UsageActivityChartProps)
   };
 
   return (
-    <section className="usage-activity-card" aria-labelledby={titleId}>
+    <section className="surface-card usage-activity-card" aria-labelledby={titleId}>
       <div className="usage-activity-heading">
         <div className="usage-activity-title">
           <h3 id={titleId}>{t('usage.analysis.activityTitle')}</h3>
@@ -174,7 +176,7 @@ export function UsageActivityChart({ timeline, range }: UsageActivityChartProps)
           {chart.timeTicks.map((tick, index) => <text key={tick.getTime()} className="usage-activity-time" x={chart.left + trendTimePosition(tick, chart.start, chart.end) * chart.plotWidth} y="149" textAnchor={index === 0 ? 'start' : index === chart.timeTicks.length - 1 ? 'end' : 'middle'}>{formatTrendAxisLabel({ start: tick }, series.bucket, locale, { compactSameDay: chart.compactSameDay, showTime: chart.showTime })}</text>)}
         </svg>
         {series.totals.requests === 0 && <div className="usage-activity-empty">{t('usage.empty')}</div>}
-        {active && activeBar && <div className="usage-activity-tooltip" style={{ left: `${Math.max(0, Math.min(width - Math.min(224, width), activeBar.center - 112))}px` }} aria-hidden="true">
+        {active && activeBar && <div className="usage-activity-tooltip" data-theme-surface="overlay" style={{ left: `${Math.max(0, Math.min(width - Math.min(224, width), activeBar.center - 112))}px` }} aria-hidden="true">
           <strong>{formatTrendRangeLabel(active, locale, series.bucket)}</strong>
           <span className="usage-activity-tooltip-total">{t('usage.analysis.activityTotal', { count: formatNumber(active.requests) })}</span>
           {statusItems.map((item) => <div key={item.status}><span><i className={`usage-activity-dot usage-activity-${item.status}`} />{item.label}</span><b>{formatNumber(item.count)}</b></div>)}

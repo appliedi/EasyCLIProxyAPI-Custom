@@ -14,15 +14,20 @@ document.documentElement.dataset.theme = params.get('theme') || 'light';
 const startedAt = Date.now();
 const smallList = params.has('small');
 type Request = { path: string; method: string; body?: Record<string, unknown>; query?: Record<string, string> };
-const files: Record<string, unknown>[] = Array.from({ length: smallList ? 3 : 12 }, (_, index) => ({
-  name: `${String(index + 1).padStart(2, '0')}-account.json`,
-  email: index === 0 ? 'long-fictional-account-for-layout@example.test' : `account-${index + 1}@example.test`,
-  auth_index: `fixture-account-${index + 1}`, provider: smallList ? ['codex', 'devin', 'xai'][index] : index === 3 ? 'claude' : index === 4 ? 'xai' : 'codex',
+const displayCases = params.has('displayCases');
+const files: Record<string, unknown>[] = Array.from({ length: displayCases ? 6 : smallList ? 3 : 12 }, (_, index) => ({
+  name: displayCases
+    ? ['antigravity-very-long-account-name-for-layout.json', 'codex-team-subscription.json', 'codex-free-disabled.json', 'devin-user-layout-check.json', 'kimi-layout-check.json', 'xai-paid-account.json'][index]
+    : `${String(index + 1).padStart(2, '0')}-account.json`,
+  email: displayCases
+    ? ['sasaki245668-layout-check@example.test', '1154606263-layout-check@example.test', 'lzt404rum-codex-layout@example.test', 'lzt404rum-devin-layout@example.test', 'kimi-layout-check@example.test', 'lori-doyle-layout-check@example.test'][index]
+    : index === 0 ? 'long-fictional-account-for-layout@example.test' : `account-${index + 1}@example.test`,
+  auth_index: `fixture-account-${index + 1}`, provider: displayCases ? ['antigravity', 'codex', 'codex', 'devin', 'kimi', 'xai'][index] : smallList ? ['codex', 'devin', 'xai'][index] : index === 3 ? 'claude' : index === 4 ? 'xai' : 'codex',
   ...(params.has('longQuota') ? { provider: 'antigravity' } : {}),
   source: 'file', size: 1800 + index * 350, updated_at: '2026-10-01T00:00:00Z',
-  disabled: smallList ? index !== 1 : index === 2 || index === 6,
-  status: (smallList ? index !== 1 : index === 2 || index === 6) ? 'disabled' : 'active',
-  priority: smallList ? 0 : index % 3, plan_type: smallList ? index === 0 ? 'Team' : '' : index % 3 === 0 ? 'Pro 20x' : 'Team',
+  disabled: displayCases ? index < 5 : smallList ? index !== 1 : index === 2 || index === 6,
+  status: (displayCases ? index < 5 : smallList ? index !== 1 : index === 2 || index === 6) ? 'disabled' : 'active',
+  priority: displayCases || smallList ? 0 : index % 3, plan_type: displayCases ? ['', 'Team', 'Free', '', '', 'Paid'][index] : smallList ? index === 0 ? 'Team' : '' : index % 3 === 0 ? 'Pro 20x' : 'Team',
   note: index === 0 ? 'Fictional account note, visible after opening credential details.' : '',
   success: smallList ? 0 : 1200 + index * 2450, failed: smallList ? 0 : 3 + index * 97,
   recent_requests: Array.from({ length: smallList ? 0 : 20 }, (_, bucket) => ({
@@ -34,14 +39,22 @@ const files: Record<string, unknown>[] = Array.from({ length: smallList ? 3 : 12
     retry_at: new Date(startedAt + 180000).toISOString(), remaining_seconds: 180, http_status: 429, backoff_level: 0 }] : [],
 }));
 
+if (params.has('duplicateNames')) files[0].name = files[1].name;
+if (params.has('invalidTags')) files.push(
+  { auth_index: 'nameless', provider: 'codex' },
+  { name: 42, auth_index: 'nonstring', provider: 'codex', tags: { invalid: true } },
+  { auth_index: 'nameless-tagged', provider: 'codex', tags: ['shared', 'noneditable'] },
+  { name: 'runtime.json', auth_index: 'runtime', provider: 'codex', runtime_only: true, tags: ['shared', 'noneditable'] },
+);
+
 updateQuotaCache(Object.fromEntries(files.map((file, index) => {
-  if (smallList) return [quotaKey(file), { status: 'idle', rows: [] } satisfies QuotaState];
+  if (smallList || (displayCases && index < 5)) return [quotaKey(file), { status: 'idle', rows: [] } satisfies QuotaState];
   const quota: QuotaState = {
     status: 'success', plan: String(file.plan_type),
     subscriptionActiveUntil: index === 0 ? '2026-11-01T00:00:00Z' : undefined,
     resetCredits: index === 0 ? 2 : undefined,
     resetCreditsApplicable: index === 0 ? 0 : undefined,
-    rows: index === 4 ? [{ label: 'Paid API account', remainingPercent: null, detail: 'Upstream does not report remaining quota.' }]
+    rows: displayCases || index === 4 ? [{ label: '付费 API 账号', remainingPercent: null, detail: '付费 API 对话可用。xAI 暂不为此 OAuth 凭证提供额度总量数据。' }]
       : [
         { label: '5h', remainingPercent: index === 1 ? 0 : index === 2 ? 8 : 72 - index * 3, resetAtMs: startedAt + 3 * 3600000 },
         { label: 'Weekly', remainingPercent: 83 - index * 5, resetAtMs: startedAt + 5 * 86400000 },
@@ -62,7 +75,7 @@ updateQuotaCache(Object.fromEntries(files.map((file, index) => {
   return [quotaKey(file), quota];
 })));
 
-const state = { files, requests: [] as Request[], unhandled: [] as string[], reads: 0 };
+const state = { files, requests: [] as Request[], unhandled: [] as string[], reads: 0, failTagWrites: [] as string[] };
 (window as typeof window & { authFileListFixture: typeof state }).authFileListFixture = state;
 mockIPC(async (cmd, args) => {
   if (cmd === 'set_app_locale') return null;
@@ -74,8 +87,20 @@ mockIPC(async (cmd, args) => {
   state.requests.push(structuredClone(request));
   if (request.path === '/credentials' && request.method === 'GET') {
     state.reads += 1;
-    return { observed_at: new Date().toISOString(), files: structuredClone(state.files) };
+    return { observed_at: new Date().toISOString(), files: structuredClone(state.files).map(({ tags, ...file }) => params.has('invalidTags') ? { ...file, tags } : file) };
   }
+  if (request.path === '/credentials/download' && request.method === 'GET') {
+    return structuredClone(state.files.find(file => file.name === request.query?.name) ?? {});
+  }
+  if (request.path === '/credentials/models' && request.method === 'GET') return { models: [] };
+  if (request.path === '/credentials/fields' && request.method === 'PATCH') {
+    if (request.body?.tags && state.failTagWrites.includes(String(request.body.name))) throw new Error('Mock tag write failed');
+    const target = state.files.find(file => file.name === request.body?.name);
+    if (!target) throw new Error('Unknown credential');
+    Object.assign(target, request.body);
+    return { status: 'ok' };
+  }
+  if (request.path === '/credentials/refresh' && request.method === 'POST') return { ok: true, auth: { access_token: 'fixture-secret-not-for-display' } };
   if (request.path === '/credentials/status' && request.method === 'PATCH') {
     const target = state.files.find(file => file.name === request.body?.name);
     if (!target || typeof request.body?.disabled !== 'boolean') throw new Error('Fixture status update needs a known name and boolean');

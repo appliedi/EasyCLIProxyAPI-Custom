@@ -62,17 +62,23 @@ Var CPAExistingData
 
 !macro NSIS_HOOK_PREUNINSTALL
   !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
-  ; Autostart uses the compiled application name. Remove only our own entry.
-  ReadRegStr $R0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "EasyCLIProxyAPI"
-  ${If} $R0 == '$\"$INSTDIR\EasyCLIProxyAPI.exe$\"'
-  ${OrIf} $R0 == '$INSTDIR\EasyCLIProxyAPI.exe'
-    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "EasyCLIProxyAPI"
+  ; Updates retain autostart. Normal uninstall removes only this installation.
+  ${If} $UpdateMode <> 1
+    ReadRegStr $R0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "EasyCLIProxyAPI"
+    ${If} $R0 == '$\"$INSTDIR\EasyCLIProxyAPI.exe$\"'
+    ${OrIf} $R0 == '$INSTDIR\EasyCLIProxyAPI.exe'
+    ${OrIf} $R0 == '$INSTDIR\EasyCLIProxyAPI.exe --autostart'
+    ${OrIf} $R0 == '$\"$INSTDIR\EasyCLIProxyAPI.exe$\" --autostart'
+      DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "EasyCLIProxyAPI"
+    ${EndIf}
   ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
   ; Only the initial path hint belongs to Setup. Keep storage.json, profiles,
   ; credentials, databases, backups, and any non-packaged files in $INSTDIR.
-  Delete "$INSTDIR\initial-data-directory.txt"
+  ${If} $UpdateMode <> 1
+    Delete "$INSTDIR\initial-data-directory.txt"
+  ${EndIf}
   RMDir "$INSTDIR"
 !macroend

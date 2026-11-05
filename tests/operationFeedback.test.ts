@@ -56,8 +56,7 @@ describe('控件自身反馈', () => {
     visit(source);
     const attributes = button?.attributes.properties.filter(ts.isJsxAttribute);
     expect(attributes?.find((attribute) => attribute.name.getText(source) === 'className')?.initializer?.getText(source))
-      .toBe('"auth-list-switch"');
-    expect(attributes?.find((attribute) => attribute.name.getText(source) === 'aria-checked')?.initializer?.getText(source)).toBe('{!disabled}');
+      .toBe("{`${disabled ? 'primary-button' : 'secondary-button'} compact-button auth-card-toggle`}");
     expect(attributes?.find((attribute) => attribute.name.getText(source) === 'disabled')?.initializer?.getText(source))
       .toBe('{busy || resettingCooldown || !isOAuthCredentialFile(file)}');
     const styles = readFileSync(new URL('../src/styles.css', import.meta.url), 'utf8');

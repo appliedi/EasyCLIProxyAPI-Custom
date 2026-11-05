@@ -1,10 +1,11 @@
+@layer components {
 .credential-quota.credential-quota-compact {
   container: credential-quota / inline-size;
   min-width: 0;
   gap: 6px;
   padding: 0;
   border: 0;
-  border-radius: 0;
+  border-radius: var(--radius-none);
   background: transparent;
 }
 
@@ -39,11 +40,6 @@
 
 .credential-quota-compact .credential-quota-row small {
   line-height: 1.4;
-}
-
-.credential-quota-compact .credential-quota-heading .credential-quota-reset {
-  min-height: 22px;
-  padding: 2px 6px;
 }
 
 .credential-quota-compact .credential-quota-footnotes {
@@ -98,14 +94,13 @@
 
 .credential-quota-dense .credential-quota-label span {
   min-width: 0;
-  padding: 2px 5px;
   overflow: hidden;
   padding: 2px 7px;
   border: 0;
-  border-radius: 0;
+  border-radius: var(--radius-none);
   background: transparent;
-  font-size: 10px;
-  font-weight: 550;
+  font-size: 12px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -113,23 +108,23 @@
 /* Dense quota cells follow the compact overview treatment: quiet labels and a
    single visual weight for the remaining amount. */
 .credential-quota-dense .credential-quota-label span {
-  border-radius: 5px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--text-tertiary) 8%, var(--bg-card));
   color: var(--text-secondary);
   font-weight: 600;
 }
 .credential-quota-dense .credential-quota-track {
   height: 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: color-mix(in srgb, var(--text-tertiary) 10%, var(--bg-card));
 }
 .credential-quota-dense .credential-quota-track i {
   border-radius: inherit;
   background: var(--quota-color, var(--success-color));
 }
-.credential-quota-dense .credential-quota-row.high { --quota-color: #20bf62; }
-.credential-quota-dense .credential-quota-row.medium { --quota-color: #e6a523; }
-.credential-quota-dense .credential-quota-row.low { --quota-color: #e25555; }
+.credential-quota-dense .credential-quota-row.high { --quota-color: var(--color-success); }
+.credential-quota-dense .credential-quota-row.medium { --quota-color: var(--color-warning); }
+.credential-quota-dense .credential-quota-row.low { --quota-color: var(--color-danger); }
 .credential-quota-dense .credential-quota-row small {
   color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
@@ -137,21 +132,22 @@
 .credential-quota-dense .credential-quota-empty {
   margin: 0;
   color: var(--text-tertiary);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .credential-quota-dense .credential-quota-label strong {
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1;
+  font-weight: 750;
 }
 
 .credential-quota-dense .credential-quota-track {
-  height: 5px;
+  height: 7px;
 }
 
 .credential-quota-dense .credential-quota-row small {
   color: var(--text-tertiary);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.4;
 }
 
@@ -167,12 +163,7 @@
 }
 
 .credential-quota-dense .credential-quota-heading .credential-quota-reset {
-  min-height: 21px;
-  padding: 2px 6px;
   margin: 0;
-  border-radius: 4px;
-  font-size: 10px;
-  line-height: 1.3;
 }
 
 .credential-quota-dense .credential-quota-reset-credits,
@@ -216,4 +207,6 @@
   .credential-quota-dense .credential-quota-rows {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
 }

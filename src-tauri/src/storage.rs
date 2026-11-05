@@ -20,6 +20,14 @@ const DATA_ENTRIES: &[&str] = &[
     "cpa-gui.yaml",
     "oauth",
     "usage-records",
+    "agent-usage",
+    "usage-view-preferences.json",
+    "theme-selection.json",
+    "privacy-mode.json",
+    "skill-states.json",
+    "mcp-servers.json",
+    "theme-preference.json",
+    "themes",
     "cpa-core",
     "agents",
     "backups",
@@ -539,6 +547,17 @@ fn copy_file(source: &Path, destination: &Path) -> Result<()> {
     }
     Ok(())
 }
+fn managed_database(path: &Path) -> bool {
+    matches!(
+        (
+            path.parent()
+                .and_then(Path::file_name)
+                .and_then(|v| v.to_str()),
+            path.file_name().and_then(|v| v.to_str())
+        ),
+        (Some("usage-records"), Some("usage.db")) | (Some("agent-usage"), Some("agent_usage.db"))
+    )
+}
 fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
     no_link(source)?;
     if source.is_dir() {
@@ -546,19 +565,16 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
         for entry in fs::read_dir(source).map_err(error)? {
             let entry = entry.map_err(error)?;
             let name = entry.file_name();
-            if source.file_name().is_some_and(|n| n == "usage-records")
-                && (name == "usage.db-wal" || name == "usage.db-shm")
+            if name
+                .to_str()
+                .and_then(|n| n.strip_suffix("-wal").or_else(|| n.strip_suffix("-shm")))
+                .is_some_and(|n| managed_database(&source.join(n)))
             {
                 continue;
             }
             copy_tree(&entry.path(), &destination.join(name))?;
         }
-    } else if source.file_name().is_some_and(|n| n == "usage.db")
-        && source
-            .parent()
-            .and_then(Path::file_name)
-            .is_some_and(|n| n == "usage-records")
-    {
+    } else if managed_database(source) {
         let connection =
             Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(error)?;
         connection
@@ -855,16 +871,34 @@ pub(crate) fn restart_for_storage_operation(app: tauri::AppHandle) -> Result<()>
 }
 
 pub(crate) fn show_startup_error(message: &str) {
-    use tauri_plugin_dialog::DialogExt;
     eprintln!("{message}");
-    if let Ok(app) = tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .build(tauri::generate_context!())
+    #[cfg(windows)]
     {
-        app.dialog()
-            .message(message)
-            .title("EasyCLIProxyAPI — data folder unavailable")
-            .blocking_show();
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+        let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        let text = wide(message);
+        let title = wide("EasyCLIProxyAPI — data folder unavailable");
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                text.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONERROR,
+            )
+        };
+    }
+    #[cfg(not(windows))]
+    {
+        use tauri_plugin_dialog::DialogExt;
+        if let Ok(app) = tauri::Builder::default()
+            .plugin(tauri_plugin_dialog::init())
+            .build(tauri::generate_context!())
+        {
+            app.dialog()
+                .message(message)
+                .title("EasyCLIProxyAPI — data folder unavailable")
+                .blocking_show();
+        }
     }
 }
 

@@ -1,3 +1,7 @@
+import { Checkbox } from '../components/Checkbox';
+import { SegmentedControl } from '../components/SegmentedControl';
+import { getOAuthStatus, startOAuthLogin, openOAuthUrl } from '../services/oauth';
+import { ThemeSelector } from '../components/ThemeSelector';
 import {
   useCallback,
   useEffect,
@@ -6,7 +10,6 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import {
   ArrowLeft,
   ArrowRight,
@@ -16,10 +19,7 @@ import {
   ExternalLink,
   Languages,
   LoaderCircle,
-  Monitor,
-  Moon,
   RefreshCw,
-  Sun,
   X,
 } from "lucide-react";
 import appLogo from "../assets/logo.jpg";
@@ -33,6 +33,7 @@ import {
   responseList,
 } from "../services/managementApi";
 import { appendNativeProviderGroup } from '../services/providerGroups';
+import { providerRowsFromGroups, type ProviderSection } from './ApiAccessPage';
 import {
   DEEPSEEK_BASE_URL,
   fetchModels,
@@ -46,7 +47,6 @@ import { normalizeProviderProxyUrl } from "../services/providerProxy";
 import { normalizeOAuthProvider } from "../services/authFiles";
 import { type ThemePreference } from "../theme";
 import { AgentsPage } from "./AgentsPage";
-
 import codexIcon from "../assets/icons/codex.svg";
 import claudeIcon from "../assets/icons/claude.svg";
 import antigravityIcon from "../assets/icons/antigravity.svg";
@@ -103,14 +103,8 @@ const apiSectionOptions: ApiSectionOption[] = [
   { id: 'interactions', managementSection: 'interactions-api-key', nameKey: 'easyMode.api.platformName.gemini', name: 'Gemini Interactions', provider: 'interactions', defaultBaseUrl: 'https://generativelanguage.googleapis.com', icon: geminiIcon },
   { id: 'vertex', managementSection: 'vertex-api-key', nameKey: 'easyMode.api.platformName.gemini', name: 'Vertex AI', provider: 'vertex', defaultBaseUrl: 'https://aiplatform.googleapis.com', icon: vertexIcon },
   { id: 'xai', managementSection: 'xai-api-key', nameKey: 'easyMode.api.platformName.openai', name: 'xAI', provider: 'xai', defaultBaseUrl: 'https://api.x.ai/v1', icon: grokIcon },
-  { id: 'meta', managementSection: 'meta-api-key', nameKey: 'easyMode.api.platformName.openai', name: 'Meta', provider: 'meta', defaultBaseUrl: 'https://api.meta.ai/v1', icon: openaiIcon },
+  { id: 'meta', managementSection: 'meta-api-key', nameKey: 'easyMode.api.platformName.openai', name: 'Meta', provider: 'meta', defaultBaseUrl: 'https://api.meta.ai/v1', icon: metaIcon },
 ];
-
-const isDeepSeekRecord = (record: Record<string, unknown>) => {
-  const name = readString(record, "name").trim().toLowerCase();
-  const baseUrl = readString(record, "base-url", "baseUrl").trim().toLowerCase();
-  return name.includes("deepseek") || /^https?:\/\/api\.deepseek\.com(?:\/|$)/i.test(baseUrl);
-};
 
 export function EasyModePage({
   onExit,
@@ -183,6 +177,7 @@ export function EasyModePage({
   const guideTooltipRef = useRef<HTMLElement | null>(null);
   const [guideCardPosition, setGuideCardPosition] = useState<{ top: number; left: number } | null>(null);
   const [langMenuOpen, setLangMenuOpen] = useState(false);
+  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const langMenuRef = useRef<HTMLDivElement>(null);
   const langButtonRef = useRef<HTMLButtonElement>(null);
 
@@ -222,14 +217,16 @@ export function EasyModePage({
       const sections = [...new Set(apiSectionOptions.map((option) => option.managementSection))];
       const recordsBySection = Object.fromEntries(await Promise.all(sections.map(async (section) => [section, await providerGroupsApi.get(section)]))) as Record<ApiManagementSection, Record<string, unknown>[]>;
 
-      for (const section of apiSectionOptions) {
-        const sourceList = recordsBySection[section.managementSection];
-        const list = section.id === "deepseek"
-          ? sourceList.filter(isDeepSeekRecord)
-          : section.id === "codex"
-            ? sourceList.filter((record) => !isDeepSeekRecord(record))
-            : sourceList;
-        counts[section.id] = list.length;
+      for (const option of apiSectionOptions) {
+        const rows = providerRowsFromGroups(
+          option.managementSection as ProviderSection,
+          recordsBySection[option.managementSection],
+        );
+        counts[option.id] = new Set(rows.filter((row) => (
+          option.id === 'deepseek' ? row.category === 'deepseek'
+            : option.id === 'codex' ? row.category !== 'deepseek'
+              : true
+        )).map((row) => row.source?.groupIndex)).size;
       }
       setApiCounts(counts);
     } catch (e) {
@@ -283,15 +280,7 @@ export function EasyModePage({
     clearOAuthNotice();
 
     try {
-      const result = await invoke<{
-        url?: string;
-        state?: string;
-        userCode?: string | null;
-        flow?: string | null;
-        expiresIn?: number | null;
-        opened?: boolean;
-        openError?: string;
-      }>("start_oauth_login", {
+      const result = await startOAuthLogin({
         provider,
         browser: "default",
       });
@@ -331,10 +320,7 @@ export function EasyModePage({
           return;
         }
         try {
-          const pollRes = await invoke<{ status: string; error?: string }>(
-            "get_oauth_status",
-            { state: stateKey },
-          );
+          const pollRes = await getOAuthStatus({ state: stateKey });
           if (generation !== oauthGeneration.current) return;
           failures = 0;
           const status = (pollRes.status || "").toLowerCase();
@@ -398,7 +384,7 @@ export function EasyModePage({
 
   const openAuthorizationUrl = async (url: string) => {
     try {
-      await invoke("open_oauth_url", { url, browser: "default" });
+      await openOAuthUrl({ url, browser: "default" });
     } catch (error) {
       showOAuthNotice(String(error), "error");
     }
@@ -729,7 +715,7 @@ export function EasyModePage({
           </div>
           <button
             type="button"
-            className={`simple-mode-guide-toggle simple-mode-highlight-button${guideActive ? " active" : ""}`}
+            className="primary-button compact-button simple-mode-guide-toggle"
             title={guideActive ? t("easyMode.guide.toggleClose") : t("easyMode.guide.toggleOpen")}
             onClick={() => {
               handleGuideToggle();
@@ -741,38 +727,8 @@ export function EasyModePage({
 
         <div className="simple-mode-topbar-right">
           {setTheme ? (
-            <div className="simple-mode-theme-group" role="group" aria-label={t("app.theme.label")}>
-              <button
-                type="button"
-                className={theme === "light" ? "active" : ""}
-                title={t("easyMode.theme.light")}
-                aria-label={t("easyMode.theme.light")}
-                aria-pressed={theme === "light"}
-                onClick={() => setTheme("light")}
-              >
-                <Sun size={15} />
-              </button>
-              <button
-                type="button"
-                className={theme === "dark" ? "active" : ""}
-                title={t("easyMode.theme.dark")}
-                aria-label={t("easyMode.theme.dark")}
-                aria-pressed={theme === "dark"}
-                onClick={() => setTheme("dark")}
-              >
-                <Moon size={15} />
-              </button>
-              <button
-                type="button"
-                className={theme === "system" ? "active" : ""}
-                title={t("app.theme.switchToSystem")}
-                aria-label={t("app.theme.system")}
-                aria-pressed={theme === "system"}
-                onClick={() => setTheme("system")}
-              >
-                <Monitor size={15} />
-              </button>
-            </div>
+            <ThemeSelector value={theme ?? 'light'} onChange={setTheme} open={themeMenuOpen}
+              onOpenChange={(open) => { setThemeMenuOpen(open); if (open) setLangMenuOpen(false); }} />
           ) : null}
 
           <div ref={langMenuRef} className="simple-mode-lang-dropdown">
@@ -780,7 +736,7 @@ export function EasyModePage({
               ref={langButtonRef}
               type="button"
               className="simple-mode-lang-btn"
-              onClick={() => setLangMenuOpen(!langMenuOpen)}
+              onClick={() => { setThemeMenuOpen(false); setLangMenuOpen(!langMenuOpen); }}
               title={t("easyMode.language.switch")}
               aria-label={t("easyMode.language.switch")}
               aria-haspopup="listbox"
@@ -789,6 +745,7 @@ export function EasyModePage({
               onKeyDown={(event) => {
                 if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
                 event.preventDefault();
+                setThemeMenuOpen(false);
                 setLangMenuOpen(true);
                 window.requestAnimationFrame(() => {
                   const options = langMenuRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]');
@@ -801,7 +758,7 @@ export function EasyModePage({
               <ChevronDown size={13} />
             </button>
             {langMenuOpen ? (
-              <div id="simple-mode-language-list" className="simple-mode-lang-menu" role="listbox" aria-label={t("easyMode.language.switch")} onKeyDown={handleLanguageListKeyDown}>
+              <div id="simple-mode-language-list" className="simple-mode-lang-menu" data-theme-surface="overlay" role="listbox" aria-label={t("easyMode.language.switch")} onKeyDown={handleLanguageListKeyDown}>
                 {languageOptions.map((opt) => (
                   <button
                     key={opt.value}
@@ -826,7 +783,7 @@ export function EasyModePage({
 
           <button
             type="button"
-            className="secondary-button simple-mode-exit-btn"
+            className="secondary-button compact-button simple-mode-exit-btn"
             title={t("easyMode.exitTitle")}
             onClick={() => onExit?.()}
           >
@@ -900,7 +857,7 @@ export function EasyModePage({
                   <strong>{t("easyMode.oauth.title")}</strong>
                   {totalLoggedInOAuth > 0 ? (
                     <span className="state-pill success">
-                      {t("easyMode.oauth.accountsLoggedIn", { count: totalLoggedInOAuth })}
+                      {t(totalLoggedInOAuth === 1 ? "easyMode.oauth.accountsLoggedInOne" : "easyMode.oauth.accountsLoggedIn", { count: totalLoggedInOAuth })}
                     </span>
                   ) : (
                     <span className="state-pill neutral">{t("easyMode.oauth.recommended")}</span>
@@ -923,7 +880,7 @@ export function EasyModePage({
                   <strong>{t("easyMode.api.title")}</strong>
                   {totalApiProviders > 0 ? (
                     <span className="state-pill success">
-                      {t("easyMode.api.platformsConnected", { count: totalApiProviders })}
+                      {t(totalApiProviders === 1 ? "easyMode.api.platformsConnectedOne" : "easyMode.api.platformsConnected", { count: totalApiProviders })}
                     </span>
                   ) : null}
                 </div>
@@ -962,7 +919,7 @@ export function EasyModePage({
                       {oauthAuthorization?.provider === provider.id ? (
                         <div className="simple-mode-oauth-authorization">
                           {provider.id === "meta" ? <p className="oauth-hint">{t("oauth.metaHint")}</p> : null}
-                          <div className="oauth-auth-url-box">
+                          <div className="oauth-auth-url-box surface-sunken">
                             <div className="oauth-auth-url-label">{t("oauth.authorizationLink")}</div>
                             <div className="oauth-auth-url-value" title={oauthAuthorization.url}>{oauthAuthorization.url}</div>
                             <div className="oauth-auth-url-actions">
@@ -1003,7 +960,7 @@ export function EasyModePage({
 
                         <button
                           type="button"
-                          className={loggedIn ? "secondary-button" : "primary-button"}
+                          className={`${loggedIn ? "secondary-button" : "primary-button"} small-button`}
                           disabled={isLogging}
                           onClick={() => void handleStartOAuth(provider.id)}
                         >
@@ -1037,19 +994,20 @@ export function EasyModePage({
               ) : null}
 
               <div className="simple-mode-api-form">
-                <div className="simple-mode-api-platforms">
-                  {apiSectionOptions.map((opt) => (
-                    <button
-                      type="button"
-                      key={opt.id}
-                      className={`secondary-button simple-mode-api-platform${selectedApiSection === opt.id ? " active" : ""}`}
-                      onClick={() => handleApiSectionChange(opt.id)}
-                    >
+                <SegmentedControl
+                  className="simple-mode-api-platforms"
+                  aria-label={t("easyMode.api.platform")}
+                  value={selectedApiSection}
+                  onChange={handleApiSectionChange}
+                  buttonClassName="secondary-button simple-mode-api-platform"
+                  items={apiSectionOptions.map((opt) => ({
+                    value: opt.id,
+                    label: <>
                       <img className="simple-mode-api-platform-icon" src={opt.icon} alt="" />
                       {opt.name ?? t(opt.nameKey)}
-                    </button>
-                  ))}
-                </div>
+                    </>,
+                  }))}
+                />
 
                 <div className="simple-mode-field">
                   <label>{t("easyMode.api.name")}</label>
@@ -1111,7 +1069,7 @@ export function EasyModePage({
                     <div className="simple-mode-api-model-fetch">
                       <button
                         type="button"
-                        className="secondary-button simple-mode-api-fetch-button"
+                        className="secondary-button compact-button simple-mode-api-fetch-button"
                         disabled={apiTesting || !apiBaseUrl.trim() || !apiKey.trim()}
                         onClick={() => void handleTestApi()}
                       >
@@ -1159,12 +1117,7 @@ export function EasyModePage({
                                 className={`simple-mode-api-model-option${selected ? " selected" : ""}`}
                                 key={model.name}
                               >
-                                <input
-                                  type="checkbox"
-                                  checked={selected}
-                                  disabled={apiTesting}
-                                  onChange={() => handleToggleApiModel(model)}
-                                />
+                                <Checkbox checked={selected} disabled={apiTesting} onChange={() => handleToggleApiModel(model)} />
                                 <span title={model.name}>{model.name}</span>
                               </label>
                             );
@@ -1255,6 +1208,7 @@ export function EasyModePage({
         <aside
           ref={guideTooltipRef}
           className="guide-interactive-card"
+          data-theme-surface="overlay"
           style={{
             top: guideCardPosition ? `${guideCardPosition.top}px` : "0px",
             left: guideCardPosition ? `${guideCardPosition.left}px` : "0px",
@@ -1273,7 +1227,7 @@ export function EasyModePage({
 
             <button
               type="button"
-              className="guide-tooltip-close"
+              className="icon-button quiet ghost tiny-button"
               title={t("easyMode.guide.close")}
               onClick={() => setGuideActive(false)}
             >
@@ -1330,7 +1284,7 @@ export function EasyModePage({
                   ) : apiSelectedModels.length === 0 ? (
                     t("easyMode.guide.cardStep2ApiSelectTip")
                   ) : (
-                    <span>{t("easyMode.guide.cardStep2ApiSelectedTip", { count: apiSelectedModels.length })}</span>
+                    <span>{t(apiSelectedModels.length === 1 ? "easyMode.guide.cardStep2ApiSelectedTipOne" : "easyMode.guide.cardStep2ApiSelectedTip", { count: apiSelectedModels.length })}</span>
                   )}
                 </div>
               </>
@@ -1378,7 +1332,7 @@ export function EasyModePage({
               {guideStep > 1 ? (
                 <button
                   type="button"
-                  className="secondary-button guide-btn-sm"
+                  className="secondary-button small-button guide-btn-sm"
                   onClick={handlePrevGuideStep}
                 >
                   {t("easyMode.navigation.back")}
@@ -1387,7 +1341,7 @@ export function EasyModePage({
 
               <button
                 type="button"
-                className="primary-button guide-btn-sm"
+                className="primary-button small-button guide-btn-sm"
                 onClick={handleNextGuideStep}
                 disabled={!guideCanAdvance}
               >

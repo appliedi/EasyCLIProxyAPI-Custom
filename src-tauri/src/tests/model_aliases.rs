@@ -213,6 +213,43 @@ fn alias_sources_exclude_blocked_providers_even_when_another_provider_serves_the
 }
 
 #[test]
+fn alias_sources_do_not_offer_entries_that_are_already_aliases() {
+    let input = r#"
+codex-api-key:
+  - name: active
+    models:
+      - name: gpt-test
+        thinking:
+          levels: [low, high]
+      - name: gpt-test
+        alias: gpt-test-high
+        thinking:
+          levels: [low, high]
+      - name: GPT-Test
+        alias: gpt-test-fast
+"#;
+    let available = test_agent_models(&["gpt-test", "gpt-test-high", "gpt-test-fast"]);
+    for capability in [
+        AliasSourceCapability::Base,
+        AliasSourceCapability::Reasoning,
+        AliasSourceCapability::Fast,
+    ] {
+        let sources = resolved_oauth_alias_sources(input, &[], &available, capability).unwrap();
+        assert_eq!(sources.len(), 1, "{capability:?}");
+        assert_eq!(sources[0].source.model, "gpt-test");
+        assert!(matches!(
+            sources[0].location,
+            ThinkingAliasSourceLocation::ConfigModel { model_index: 0, .. }
+        ));
+    }
+    let plain = resolved_oauth_alias_sources(input, &[], &available, AliasSourceCapability::Base).unwrap();
+    let created = add_model_alias_to_yaml(input, &plain[0], "gpt-test-again", "high", false).unwrap();
+    assert!(created.contains("alias: gpt-test-again"), "{created}");
+    let context = model_alias_edit_context(input, "gpt-test-high", &[]).unwrap();
+    assert_eq!(context.source.model, "gpt-test");
+}
+
+#[test]
 fn v8_alias_creation_uses_the_enabled_source_and_keeps_disabled_aliases_editable() {
     let input = r#"
 config-version: 8
@@ -447,6 +484,7 @@ fn thinking_alias_adds_fork_and_matching_payload_rule() {
     assert_eq!(
         aliases,
         vec![ThinkingAliasEntry {
+            position: ModelAliasPosition { section: "oauth-model-alias".into(), provider_index: None, model_index: 0 },
             source_model: "gpt-5.5".to_string(),
             alias: "gpt-5.5-xhigh".to_string(),
             effort: Some("xhigh".to_string()),
@@ -467,6 +505,7 @@ fn model_alias_can_be_created_without_overrides() {
     assert_eq!(
         thinking_aliases_from_yaml(&rendered).unwrap(),
         vec![ThinkingAliasEntry {
+            position: ModelAliasPosition { section: "oauth-model-alias".into(), provider_index: None, model_index: 0 },
             source_model: "gpt-5.5".to_string(),
             alias: "gpt-5.5-alias".to_string(),
             effort: None,
@@ -567,6 +606,7 @@ fn speed_alias_adds_fast_service_tier_and_removes_only_its_rule() {
     assert_eq!(
         speed_aliases_from_yaml(&rendered).unwrap(),
         vec![SpeedAliasEntry {
+            position: ModelAliasPosition { section: "oauth-model-alias".into(), provider_index: None, model_index: 0 },
             source_model: "gpt-5.6-sol".to_string(),
             alias: "gpt-5.6-sol-fast".to_string(),
             service_tier: "priority".to_string(),
@@ -687,14 +727,11 @@ fn thinking_alias_removal_keeps_other_models_in_grouped_rule() {
 }
 
 #[test]
-fn thinking_alias_rejects_duplicate_client_visible_name() {
+fn thinking_alias_allows_duplicate_client_visible_name() {
     let input = "oauth-model-alias:\n  codex:\n    - name: gpt-5.5\n      alias: gpt-5.5-high\n      fork: true\n";
     let source = test_codex_oauth_thinking_source("gpt-5.4");
-    assert!(
-        add_model_alias_to_yaml(input, &source, "GPT-5.5-HIGH", "high", false)
-            .unwrap_err()
-            .contains("already exists")
-    );
+    let updated = add_model_alias_to_yaml(input, &source, "GPT-5.5-HIGH", "high", false).unwrap();
+    assert_eq!(thinking_aliases_from_yaml(&updated).unwrap().len(), 2);
 }
 
 #[test]
@@ -831,4 +868,36 @@ fn devin_aliases_use_the_devin_channel_without_unsupported_overrides() {
     for capability in [AliasSourceCapability::Reasoning, AliasSourceCapability::Fast] {
         assert!(resolved_oauth_alias_sources("{}\n", &definitions, &available_models, capability).unwrap().is_empty());
     }
+}
+
+#[test]
+fn ultrafast_alias_round_trip_preserves_effort_and_can_switch_tiers() {
+    let source = test_codex_oauth_thinking_source("gpt-6.1-sol");
+    let created = add_model_alias_with_tier_to_yaml("debug: true\n", &source, "sol-ultrafast", "high", Some("ultrafast")).unwrap();
+    assert_eq!(speed_aliases_from_yaml(&created).unwrap()[0].service_tier, "ultrafast");
+    let context = model_alias_edit_context(&created, "sol-ultrafast", &[]).unwrap();
+    assert_eq!(context.service_tier.as_deref(), Some("ultrafast"));
+    assert_eq!(context.effort.as_deref(), Some("high"));
+    let resolved = resolve_model_alias_edit_source_for_mapping(&created, "sol-ultrafast", &[], None).unwrap();
+    let unchanged = edit_model_alias_with_tier_in_yaml_for_mapping(&created, "sol-ultrafast", &resolved, "sol-ultrafast", "high", Some("ultrafast"), None).unwrap();
+    assert_eq!(created, unchanged);
+    let fast = edit_model_alias_with_tier_in_yaml_for_mapping(&created, "sol-ultrafast", &resolved, "sol-fast", "high", Some("priority"), None).unwrap();
+    assert_eq!(speed_aliases_from_yaml(&fast).unwrap()[0].service_tier, "priority");
+    let disabled = edit_model_alias_with_tier_in_yaml_for_mapping(&created, "sol-ultrafast", &resolved, "sol-high", "high", None, None).unwrap();
+    assert!(speed_aliases_from_yaml(&disabled).unwrap().is_empty());
+    assert_eq!(thinking_aliases_from_yaml(&disabled).unwrap()[0].effort.as_deref(), Some("high"));
+    assert!(add_model_alias_with_tier_to_yaml("{}", &source, "invalid", "", Some("invalid")).is_err());
+    let removed = remove_thinking_alias_from_yaml(&created, "sol-ultrafast").unwrap();
+    assert!(!removed.contains("ultrafast"));
+    assert!(removed.contains("debug: true"));
+}
+
+#[test]
+fn ultrafast_alias_edits_raw_tier_without_changing_unrelated_params() {
+    let input = "oauth-model-alias:\n  codex: [{name: gpt-6.1-sol, alias: sol, fork: true}]\npayload:\n  override-raw:\n    - models: [{name: sol, protocol: codex}]\n      params: {service_tier: '\"priority\"', temperature: '0.2'}\n";
+    let source = resolve_model_alias_edit_source_for_mapping(input, "sol", &[], None).unwrap();
+    let updated = edit_model_alias_with_tier_in_yaml_for_mapping(input, "sol", &source, "sol", "", Some("ultrafast"), None).unwrap();
+    let value: serde_json::Value = serde_norway::from_str(&updated).unwrap();
+    assert_eq!(value["payload"]["override-raw"][0]["params"]["service_tier"], "\"ultrafast\"");
+    assert_eq!(value["payload"]["override-raw"][0]["params"]["temperature"], "0.2");
 }

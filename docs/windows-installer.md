@@ -1,6 +1,6 @@
 # Windows Setup.exe
 
-Custom builds starting with 0.4.2 can be distributed in two formats:
+Public Custom releases starting with 0.4.3 can be distributed in two formats:
 
 - `EasyCLIProxyAPI-v<version>-Windows-<arch>-setup.exe`: the standard installer.
 - `EasyCLIProxyAPI-v<version>-Windows-<arch>.zip`: the existing portable package and in-app update payload.
@@ -41,6 +41,6 @@ The release workflow builds x64 and ARM64 Setup.exe assets alongside their porta
 
 Fresh silent installation uses `/S`. To select existing portable data before its first registered startup, supply `/PORTABLEDATA="C:\path\to\portable"`. `/D=C:\desired\install\folder` is optional and must be the final parameter, following NSIS conventions. A running app makes installation/uninstallation fail rather than terminating the app. The application is not launched by a silent install unless `/R` is explicitly supplied.
 
-`tests/windows-installer-smoke.ps1` exercises installation, reinstallation, import-path encoding, shortcuts, uninstall registration, and preservation of files inside and outside the install directory. Run it only in an isolated environment or with a separately named test bundle: it refuses to replace an already registered product or operate against a running app. Fixtures are retained under `.codex` for inspection.
+`tests/windows-installer-smoke.ps1` exercises installation, reinstallation, import-path encoding, shortcuts, uninstall registration, and preservation of files inside and outside the install directory. Run the shipping installer only on a disposable Windows runner. For a local test use `./tests/build-isolated-installer-smoke.ps1` (or `-SkipBuild` after building the current binary). That builder changes the product, executable, data-locator and Run-registry namespaces together, creates a matching identity/SHA-256 manifest, and invokes the smoke test. Arbitrary overrides without that paired manifest are rejected before fixtures or registry writes. The harness refuses to replace an already registered product or operate against a running app. Fixtures are retained under `.codex` for inspection.
 
 For data migration and backup scope, see [Storage and upgrade persistence](data-storage.md).

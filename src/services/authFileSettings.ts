@@ -1,12 +1,13 @@
 import { getCurrentLocale, translate } from '../i18n';
 import { isRecord, managementApi } from './managementApi';
-import { normalizeAuthFilePriorityInput } from './authFiles';
+import { normalizeAuthFilePriorityInput, normalizeAuthFileTags } from './authFiles';
 import { authFileExcludedRulesFromPayload } from './oauthModelSettings';
 import { normalizeOAuthExcludedRules } from './oauthModels';
 import { credentialAdvancedShape } from './credentialAdvancedSettings';
 import { validateStructuredValueText } from './structuredConfig';
 import { templateText } from '../i18n/templateConfig';
 import { sameTemplateValue } from './templateConfig';
+import { resolveCredentialTags, setCredentialTags } from './credentialTags';
 
 export type BooleanOverride = '' | 'true' | 'false';
 export type AuthFileSettingsDraft = {
@@ -19,6 +20,7 @@ export type AuthFileSettingsDraft = {
   excluded_models: string;
   headers: string;
   note: string;
+  tags: string;
   advanced: Record<string, unknown>;
   normalizeCloakMetadata?: string[];
 };
@@ -57,6 +59,10 @@ const headersFromText = (text: string): Record<string, string> => {
 // cloak block in API-key configuration. Keep typed values only in the form.
 const advancedDraftValue = (key: string, value: unknown): unknown => {
   if (value == null) return value;
+  if (key === 'request_retry' && (typeof value === 'number' || typeof value === 'string')) {
+    const parsed = Number(value);
+    if (Number.isSafeInteger(parsed)) return parsed < 0 ? undefined : parsed;
+  }
   if (key === 'cloak_strict_mode' || key === 'cloak_cache_user_id') {
     if (typeof value === 'string') return value.trim().toLowerCase() === 'true';
   }
@@ -102,6 +108,7 @@ export const authFileSettingsFromPayload = (payload: unknown): AuthFileSettingsD
     excluded_models: authFileExcludedRulesFromPayload(metadata).join('\n'),
     headers: JSON.stringify(headers, null, 2),
     note: text(metadata.note),
+    tags: normalizeAuthFileTags(metadata.tags).join(', '),
     advanced: Object.fromEntries(Object.keys(credentialAdvancedShape.fields ?? {}).flatMap(key => {
       const value = read(key, key.replace(/_/g, '-'));
       return value === undefined ? [] : [[key, advancedDraftValue(key, value)]];
@@ -114,6 +121,10 @@ export const buildAuthFileSettingsPatch = (
   draft: AuthFileSettingsDraft,
 ): Record<string, unknown> => {
   const patch: Record<string, unknown> = {};
+  const tags = normalizeAuthFileTags(draft.tags.split(','));
+  if (JSON.stringify([...tags].sort()) !== JSON.stringify(normalizeAuthFileTags(original.tags.split(',')).sort())) {
+    patch.tags = tags;
+  }
   for (const key of ['prefix', 'proxy_url', 'note'] as const) {
     if (draft[key].trim() !== original[key].trim()) patch[key] = draft[key].trim();
   }
@@ -162,8 +173,10 @@ type SettingsApi = {
   patch: (path: string, body: Record<string, unknown>) => Promise<unknown>;
 };
 
-export const loadAuthFileSettings = async (name: string, api: SettingsApi = managementApi) =>
-  authFileSettingsFromPayload(await api.get('/credentials/download', { name }));
+export const loadAuthFileSettings = async (name: string, api: SettingsApi = managementApi) => {
+  const draft = authFileSettingsFromPayload(await api.get('/credentials/download', { name }));
+  return { ...draft, tags: resolveCredentialTags(name, draft.tags.split(',')).join(', ') };
+};
 
 export const saveAuthFileSettings = async (
   name: string, original: AuthFileSettingsDraft, draft: AuthFileSettingsDraft,
@@ -172,5 +185,6 @@ export const saveAuthFileSettings = async (
   const patch = buildAuthFileSettingsPatch(original, draft);
   if (!Object.keys(patch).length) return false;
   await api.patch('/credentials/fields', { name, ...patch });
+  if ('tags' in patch) setCredentialTags(name, patch.tags);
   return true;
 };

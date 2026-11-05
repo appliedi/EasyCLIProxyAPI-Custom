@@ -56,9 +56,30 @@ export function desktopAliasNotice(
   if (alias === modelKey(entry.model)) return 'sameModel' as const;
   const appliedAlias = appliedEntries.some((applied) => modelKey(applied.alias) === alias
     && applied.model.trim() && modelKey(applied.model) !== alias);
+  const pointsToSameModel = models.some((model) => modelKey(model.name) === alias
+    && model.isAlias && model.alias && modelKey(model.alias) === modelKey(entry.model));
+  if (pointsToSameModel) return null;
   if (models.some((model) => modelKey(model.name) === alias && (!model.isAlias || !appliedAlias))
     || entries.some((other) => modelKey(other.model) === alias)) return 'aliasExists' as const;
   return null;
+}
+
+export function suffixCollidingDesktopAliases(
+  entries: ClaudeDesktopModelMapping[],
+  models: ModelOption[],
+  appliedEntries: ClaudeDesktopModelMapping[] = [],
+) {
+  return entries.map((entry, index) => {
+    const alias = entry.alias.trim();
+    if (!alias || desktopAliasNotice(entry, entries, models, appliedEntries) !== 'aliasExists') return entry;
+    const suffixed = `${alias}-cc`;
+    if (!validClaudeDesktopAlias(suffixed)) return entry;
+    const candidate = { ...entry, alias: suffixed };
+    const nextEntries = entries.map((item, itemIndex) => itemIndex === index ? candidate : item);
+    if (desktopAliasNotice(candidate, nextEntries, models, appliedEntries) === 'aliasExists') return entry;
+    if (entries.some((other, otherIndex) => otherIndex !== index && modelKey(desktopModelId(other)) === modelKey(suffixed))) return entry;
+    return candidate;
+  });
 }
 
 export function desktopModelEntries(mappings: AgentModelMappings): ClaudeDesktopModelMapping[] {

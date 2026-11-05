@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { claudeDesktopAliasSuggestions, createDefaultDesktopModels, desktopAliasNotice, desktopModelEntries, desktopModelValidation, isClaudeDesktopModel, selectedDesktopModelEntries, validClaudeDesktopAlias } from '../src/services/claudeDesktopModels';
+import { claudeDesktopAliasSuggestions, createDefaultDesktopModels, desktopAliasNotice, desktopModelEntries, desktopModelValidation, isClaudeDesktopModel, selectedDesktopModelEntries, suffixCollidingDesktopAliases, validClaudeDesktopAlias } from '../src/services/claudeDesktopModels';
 import { sameAgentModelMappings } from '../src/services/agentConfigurationDraft';
 
 const legacy = { opus: 'gpt-one', sonnet: 'gpt-two', haiku: 'claude-haiku-4-5', opus1m: true };
@@ -91,6 +91,16 @@ describe('Claude Desktop custom models', () => {
     expect(desktopAliasNotice(renamed, [renamed], [{ name: 'claude-opus-5', isAlias: true }])).toBe('aliasExists');
   });
 
+  test('adds -cc when an alias is already taken and leaves a free or owned alias unchanged', () => {
+    const occupied = { ...entry, alias: 'claude-opus-5' };
+    const modelsWithOpus = [...models, { name: 'claude-opus-5' }];
+    expect(suffixCollidingDesktopAliases([occupied], modelsWithOpus)).toEqual([{ ...occupied, alias: 'claude-opus-5-cc' }]);
+    expect(desktopModelValidation(suffixCollidingDesktopAliases([occupied], modelsWithOpus), modelsWithOpus)).toBeNull();
+    expect(suffixCollidingDesktopAliases([occupied], [{ name: 'claude-opus-5', isAlias: true }], [occupied])).toEqual([occupied]);
+    expect(suffixCollidingDesktopAliases([occupied], [...modelsWithOpus, { name: 'claude-opus-5-cc' }])).toEqual([occupied]);
+    expect(suffixCollidingDesktopAliases([entry], models)).toEqual([entry]);
+  });
+
   test('allows existing Desktop aliases but still warns about unrelated aliases or real models', () => {
     const configured = { ...entry, alias: 'claude-opus-5' };
     const available = [...models, { name: 'claude-opus-5', isAlias: true }];
@@ -98,6 +108,19 @@ describe('Claude Desktop custom models', () => {
     expect(desktopModelValidation([configured], available, [configured])).toBeNull();
     expect(desktopModelValidation([configured], available, [])).toBe('aliasExists');
     expect(desktopModelValidation([configured], [{ name: 'claude-opus-5', isAlias: false }], [configured])).toBe('aliasExists');
+  });
+
+  test('does not flag aliasExists when alias already points to entry model', () => {
+    const configured = { model: 'custom-upstream-model', alias: 'claude-sonnet-5', context1m: false };
+    const available = [{ name: 'claude-sonnet-5', isAlias: true, alias: 'custom-upstream-model' }];
+    expect(desktopAliasNotice(configured, [configured], available, [])).toBeNull();
+    expect(desktopModelValidation([configured], available, [])).toBeNull();
+  });
+
+  test('preserves custom model alias without spuriously appending -cc when mapped to the same model', () => {
+    const configured = { model: 'custom-upstream-model', alias: 'claude-sonnet-5', context1m: false };
+    const available = [{ name: 'claude-sonnet-5', isAlias: true, alias: 'custom-upstream-model' }];
+    expect(suffixCollidingDesktopAliases([configured], available, [])).toEqual([configured]);
   });
 
   test('tracks alias edits, row removal and context changes independently of legacy fields', () => {

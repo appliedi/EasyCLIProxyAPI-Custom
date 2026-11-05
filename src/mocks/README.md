@@ -15,6 +15,12 @@ Use the bottom toolbar or query parameters:
 | `?mock=error` | Main backend reads fail so error and retry UI can be inspected |
 | `?mock=off` | Disable mock IPC |
 | `?mock=running&mockDelay=500` | Delay each IPC call by 500 ms (maximum 5000 ms) |
+| `?mock=running&mockPluginPages=12` | Add 12 extra plugin pages (maximum 30) so the sidebar plugin submenu auto-collapses at normal window sizes |
+
+Plugin pages are native child webviews in the desktop app, which the browser cannot
+render. The mock keeps the show, bounds, hide and close state (with the owner token contract) and draws a dashed `[data-mock-plugin-webview]` placeholder over the reported
+bounds (hidden while the webview is hidden or closed). It never loads the page; its
+`data-mock-url`, `data-mock-reloads` and `data-mock-labels` attributes expose the simulated state for tests.
 
 The selected scenario is remembered locally; an explicit `mock` query overrides it.
 
@@ -22,17 +28,27 @@ The selected scenario is remembered locally; an explicit `mock` query overrides 
 
 The running dataset includes more than ten OAuth files, plus a runtime credential
 which the authentication-file list excludes. It covers Codex, Claude, Antigravity,
-Kimi, xAI and Devin. Examples include long account names and quota labels, multiple
+Kimi (including kimi.ai international credentials), xAI and Devin. Kimi previews
+resolve the quota host from the downloaded credential and load the plan from `/me`.
+Examples include long account names and quota labels, multiple
 quota windows, a disabled account, an exhausted account with model cooldown,
 an expired OAuth token, an empty upstream quota response, unknown remaining quota,
 a paid API account and an account with no recent requests.
 
-Quota replies pass through the normal application parsers. Codex and Claude reset
+Quota replies pass through the normal application parsers. Reset-credit
+balances are independent of Claude's fictional $100 cloud-session pool ($23.50
+used, $76.50 remaining), displayed alongside a scoped Fable window without duplication.
+Cloud-session balances do not prove paid request routing; see `docs/claude-credits.md`.
+Codex and Claude reset
 credits are tracked per account: consuming one decreases its balance and refreshes
 its usage windows. Credential edits, enable/disable, cooldown reset, deletion,
 JSON import/replacement and OAuth cancellation update the same in-memory state.
 Malformed imports and missing credentials fail explicitly. Usage event filters
 (time, model, provider, source, API key, failure/cancellation) run before pagination.
+
+The quota preview uses the shared card footer: reset on the left and refresh on
+the right, with matching compact button sizes. The quota layout fixture covers
+both resettable Codex/Claude cards and cards with only a refresh action.
 
 Unknown IPC commands, management routes and upstream URLs fail explicitly instead
 of returning fake success. Add new contracts to `browserMockRuntime.ts`,

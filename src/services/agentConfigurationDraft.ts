@@ -9,6 +9,7 @@ export type AgentConfigurationClientId =
   | 'zcode'
   | 'kimi-code'
   | 'grok-build'
+  | 'omp'
   | 'pi';
 
 export type AgentConfigurationModificationState = 'unconfigured' | 'applied' | 'invalid';
@@ -18,16 +19,23 @@ export type AgentConfigurationAction = 'apply' | 'update' | 'close';
 export type ClaudeModelMappingClientId = 'claude-code' | 'claude-desktop';
 
 export type AgentModelMappings = {
+  responseLanguage?: string | null;
   desktopModels?: import('./claudeDesktopModels').ClaudeDesktopModelMapping[];
   opus: string;
   sonnet: string;
   haiku: string;
+  fable?: string;
+  fable1m?: boolean;
   opus1m?: boolean;
   sonnet1m?: boolean;
   haiku1m?: boolean;
   maxContextTokens?: number;
   autoCompactPct?: number;
   disableAutoCompact?: boolean;
+  manageDefaultModel?: boolean;
+  manageSubagentModel?: boolean;
+  startupModel?: string;
+  subagentModel?: string;
 };
 
 type ResolveAgentConfigurationActionOptions = {
@@ -64,10 +72,17 @@ export const sameAgentModelMappings = (
   && sameAgentModel(left.haiku, right.haiku)
   && Boolean(left.opus1m) === Boolean(right.opus1m)
   && Boolean(left.sonnet1m) === Boolean(right.sonnet1m)
+  && sameAgentModel(left.fable ?? left.sonnet, right.fable ?? right.sonnet)
+  && Boolean(left.fable1m) === Boolean(right.fable1m)
   && Boolean(left.haiku1m) === Boolean(right.haiku1m)
   && (left.maxContextTokens ?? 200_000) === (right.maxContextTokens ?? 200_000)
   && (left.autoCompactPct ?? 90) === (right.autoCompactPct ?? 90)
-  && Boolean(left.disableAutoCompact) === Boolean(right.disableAutoCompact);
+  && Boolean(left.disableAutoCompact) === Boolean(right.disableAutoCompact)
+  && (left.manageDefaultModel ?? true) === (right.manageDefaultModel ?? true)
+  && (left.manageSubagentModel ?? true) === (right.manageSubagentModel ?? true)
+  && (left.startupModel ?? '') === (right.startupModel ?? '')
+  && (left.subagentModel ?? '') === (right.subagentModel ?? '')
+  && (left.responseLanguage ?? null) === (right.responseLanguage ?? null);
 
 export const resolveAgentModelMappingsDraftSource = <T>(
   current: T,

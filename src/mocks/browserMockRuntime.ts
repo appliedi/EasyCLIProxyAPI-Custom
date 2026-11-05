@@ -1,9 +1,16 @@
+import type { McpServer } from '../services/mcpSkills';
+import type { ZCodeCatalogEditorSnapshot } from '../services/zcodeModelCatalog';
+import type { ZCodeSubagentConfigSnapshot } from '../services/zcodeSubagent';
+import { isThemeSelection, type ThemeSelection } from '../themes/types';
 import { applyTemplateChanges, readTemplatePath, sameTemplateValue, type TemplateConfigChange } from '../services/templateConfig';
-import { createPluginMock } from './pluginMock';
+import { requestBucketRangeLabel } from '../services/authFileRequests';
+import { createPluginMock, type PluginWebviewMockState } from './pluginMock';
 import { createQuotaMock, createQuotaMockFiles } from './quotaMock';
 import { createSubscriptionValueMock } from './subscriptionValueMock';
 import type { AccountSeed, FeeChange } from '../services/subscriptionValue';
 import type { DataStorageSettings, StorageOperation } from '../services/dataStorage';
+import { normalizeAuthFileTags } from '../services/authFiles';
+import { hasDeepSeekArgumentConflict, parseAgentLaunchArguments } from '../services/agentLaunchArguments';
 
 export type BrowserMockScenario = 'running' | 'stopped' | 'empty' | 'error';
 export type BrowserMockMode = BrowserMockScenario | 'off';
@@ -23,6 +30,20 @@ export type BrowserMockRuntime = {
 
 const SCENARIOS = new Set<BrowserMockScenario>(['running', 'stopped', 'empty', 'error']);
 const BUNDLED_CORE = { version: '7.3.15', assetName: 'CLIProxyAPI_7.3.15_windows_amd64.zip' };
+const MOCK_CUSTOM_THEME = {
+  schemaVersion: 1,
+  id: 'harbor-dark',
+  name: { en: 'Harbor', 'zh-CN': '港湾', ja: 'ハーバー' },
+  description: { en: 'Deep teal surfaces with a sea-glass accent', 'zh-CN': '深青底色与海玻璃色点缀', ja: '深い青緑とシーグラスのアクセント' },
+  appearance: 'dark',
+  windowBackground: '#0E1A1F',
+  tokens: {
+    workspaceBackground: '#0E1A1F', surface: '#14242B', softSurface: '#1A2E36', hoverBackground: '#213842',
+    textPrimary: '#E6F1F2', textSecondary: '#B7CACD', textTertiary: '#8FA7AB', textMuted: '#7D959A',
+    border: '#2A434C', borderSubtle: '#1F353D', accent: '#6FD3C1', accentStrong: '#8FE0D1',
+    accentSoft: '#1D3B3A', accentContrast: '#0E1A1F', sidebarBackground: '#0B151A', popoverBackground: '#14242B',
+  },
+};
 const PROVIDER_SECTIONS = [
   'gemini-api-key',
   'interactions-api-key',
@@ -158,6 +179,7 @@ function createTimeline() {
 
 function createUsageEvents() {
   const models = ['gpt-5.2-codex', 'claude-sonnet-4-6', 'gemini-3-pro'];
+  const longError = 'Mock upstream rate limit exceeded: this preview account reached its per-minute request allowance while several parallel jobs were active. The proxy retried the request three times, but every attempt received HTTP 429. Retry after 45 seconds or reduce the number of concurrent requests. If this keeps happening, check the provider quota and the client retry policy. Diagnostic context: route=/v1/responses, attempt=3/3, window=60s, trace=preview_long_error_0123456789abcdefghijklmnopqrstuvwxyz_0123456789abcdefghijklmnopqrstuvwxyz.';
   return Array.from({ length: 18 }, (_, index) => {
     const failed = index === 5 || index === 13;
     const input = 1_200 + index * 137;
@@ -175,11 +197,13 @@ function createUsageEvents() {
       failed,
       canceled: index === 9,
       failure_status: failed ? 429 : 0,
-      failure_body: failed ? 'Mock rate limit exceeded' : '',
+      failure_body: index === 5 ? longError : failed ? 'Mock rate limit exceeded' : '',
       provider: index % 2 === 0 ? 'openai-oauth' : 'claude-oauth',
       model: models[index % models.length],
       alias: '',
-      reasoning_effort: index % 2 === 0 ? 'high' : 'medium',
+      reasoning_effort: index < 3 ? 'medium' : index % 2 === 0 ? 'high' : 'medium',
+      service_tier: index === 0 ? 'priority' : index === 1 ? 'fast' : index === 2 ? 'default' : 'auto',
+      response_service_tier: index === 0 ? 'priority' : index === 1 ? 'fast' : 'default',
       endpoint: '/v1/responses',
       api_key_hash: 'mock-key-hash',
       api_key_display: 'sk-mock••••••••2026',
@@ -208,20 +232,29 @@ function createAgentStatuses() {
     ['zcode', 'ZCode'],
     ['workbuddy', 'WorkBuddy'],
     ['antigravity-cli', 'Antigravity CLI'],
+    ['copilot-cli', 'Copilot CLI'],
+    ['vscode-copilot', 'VSCode Copilot'],
     ['kimi-code', 'Kimi Code'],
     ['grok-build', 'Grok Build'],
+    ['omp', 'Oh My Pi'],
     ['pi', 'Pi'],
   ] as const;
   const claudeMappings = {
     opus: 'claude-opus-4-6',
     sonnet: 'claude-sonnet-4-6',
     haiku: 'claude-haiku-4-5',
+    fable: 'claude-opus-4-6',
+    fable1m: false,
     opus1m: false,
     sonnet1m: false,
     haiku1m: false,
     maxContextTokens: 200_000,
     autoCompactPct: 90,
     disableAutoCompact: false,
+    manageDefaultModel: false,
+    manageSubagentModel: false,
+    startupModel: 'opus',
+    subagentModel: '',
   };
   return ids.map(([id, name], index) => ({
     id,
@@ -234,7 +267,7 @@ function createAgentStatuses() {
           { id: 'app', label: 'Desktop App', detail: 'Browser Mock desktop entry point' },
           { id: 'cli', label: 'CLI', detail: 'Browser Mock command-line entry point' },
         ]
-      : [{ id: id === 'claude-desktop' ? 'app' : 'cli', label: 'Launch', detail: 'Browser Mock launch target' }],
+      : [{ id: id === 'claude-desktop' || id === 'vscode-copilot' ? 'app' : 'cli', label: 'Launch', detail: 'Browser Mock launch target' }],
     version: `1.${index + 4}.0`,
     cliVersion: id === 'claude-desktop' ? null : `1.${index + 4}.0`,
     appVersion: id === 'claude-desktop' ? '0.12.8' : null,
@@ -245,8 +278,11 @@ function createAgentStatuses() {
     connectionState: id === 'openclaw' ? 'not-configured' : 'configured',
     configurationSynchronized: true,
     currentModel: id.startsWith('claude') ? 'claude-sonnet-4-6' : 'gpt-5.2-codex',
+    currentApiKey: 'mock-key-1',
     oauthConfiguration: id === 'codex',
     codexNativeOauth: false,
+    codexOpenaiProvider: false,
+    codexRemoteCompaction: false,
     modificationEnabled: id !== 'openclaw',
     modificationState: id === 'openclaw' ? 'unconfigured' : 'applied',
     backupAvailable: true,
@@ -273,6 +309,7 @@ function createState(scenario: BrowserMockScenario) {
   const authFiles: JsonObject[] = [
     {
       name: 'codex-personal.json',
+      tags: ['personal'],
       provider: 'codex',
       type: 'codex',
       source: 'file',
@@ -286,7 +323,7 @@ function createState(scenario: BrowserMockScenario) {
       failed: 4,
       modtime: Date.now() - 20 * 60_000,
       recent_requests: Array.from({ length: 20 }, (_, index) => ({
-        time: isoHoursAgo((19 - index) / 3),
+        time: requestBucketRangeLabel(new Date(Date.now() - (19 - index) * 600_000)),
         success: 3 + index % 4,
         failed: index % 8 === 0 ? 1 : 0,
       })),
@@ -294,6 +331,7 @@ function createState(scenario: BrowserMockScenario) {
     },
     {
       name: 'claude-team.json',
+      tags: ['team', 'production'],
       provider: 'claude',
       type: 'anthropic',
       source: 'file',
@@ -478,6 +516,7 @@ function createState(scenario: BrowserMockScenario) {
       autoUpdateSupported: true,
       downloadSizeBytes: 48 * 1024 * 1024,
       unsupportedReason: null,
+      updateChannel: 'stable',
     },
     appUpdateTask: {
       running: false,
@@ -490,6 +529,11 @@ function createState(scenario: BrowserMockScenario) {
       message: null,
     },
     coreLatest: { version: '7.3.16', assetName: 'CLIProxyAPI_7.3.16_windows_amd64.zip' },
+    coreVersions: [
+      { version: '7.3.16', assetName: 'CLIProxyAPI_7.3.16_windows_amd64.zip', prerelease: false },
+      { version: '7.3.15', assetName: 'CLIProxyAPI_7.3.15_windows_amd64.zip', prerelease: false },
+      { version: '7.3.14', assetName: 'CLIProxyAPI_7.3.14_windows_amd64.zip', prerelease: false },
+    ],
     coreInstallTask: {
       running: false,
       cancellable: false,
@@ -554,6 +598,7 @@ function createState(scenario: BrowserMockScenario) {
     },
     thinkingAliases: [
       {
+        position: { section: 'oauth-model-alias', providerIndex: null, modelIndex: 0 },
         sourceModel: 'gpt-5.2-codex',
         alias: 'codex-high',
         effort: 'high' as string | null,
@@ -564,6 +609,7 @@ function createState(scenario: BrowserMockScenario) {
     ],
     speedAliases: [
       {
+        position: { section: 'oauth-model-alias', providerIndex: null, modelIndex: 0 },
         sourceModel: 'gpt-5.2-codex',
         alias: 'codex-fast',
         serviceTier: 'priority',
@@ -576,11 +622,14 @@ function createState(scenario: BrowserMockScenario) {
       { id: 'codex:gpt-5.2-codex', model: 'gpt-5.2-codex', displayName: 'GPT-5.2 Codex', provider: 'Codex OAuth', kind: 'codex-oauth', protocol: 'openai', reasoningLevels: ['low', 'medium', 'high', 'xhigh'] },
       { id: 'claude:claude-sonnet-4-6', model: 'claude-sonnet-4-6', displayName: 'Claude Sonnet 4.6', provider: 'Claude OAuth', kind: 'claude-oauth', protocol: 'anthropic', reasoningLevels: ['low', 'medium', 'high'] },
     ],
+    codexSubagents: { enabled: true, maxConcurrentThreadsPerSession: 4, defaultSubagentModel: null, defaultSubagentReasoningEffort: 'medium', interruptMessage: true },
     codexCatalog: {
+      defaultAutoReviewModel: null as string | null,
       revision: 'mock-catalog-r1',
-      models: ['gpt-5.2-codex', 'gpt-5.1-codex'].map((slug) => {
+      defaultOrder: ['gpt-5.2-codex', 'gpt-5.1-codex'],
+      models: ['gpt-5.2-codex', 'gpt-5.1-codex', 'gpt-5.1-codex-mini'].map((slug) => {
         const configuration = {
-          display_name: slug === 'gpt-5.2-codex' ? 'GPT-5.2 Codex' : 'GPT-5.1 Codex',
+          display_name: slug === 'gpt-5.2-codex' ? 'GPT-5.2 Codex' : slug === 'gpt-5.1-codex' ? 'GPT-5.1 Codex' : slug,
           description: 'Browser Mock model catalog',
           context_window: 272_000,
           max_context_window: 400_000,
@@ -591,6 +640,7 @@ function createState(scenario: BrowserMockScenario) {
           input_modalities: ['text', 'image'],
           visibility: 'list',
           supports_parallel_tool_calls: true,
+          supports_search_tool: true,
           base_instructions: 'You are Codex, a coding assistant.',
         };
         return {
@@ -614,12 +664,149 @@ function createState(scenario: BrowserMockScenario) {
       defaultModel: 'deepseek-chat',
       configured: true,
     },
+    codexSessionContexts: {} as Record<string, MockCodexSessionContext>,
     codexSessions: [
       { id: 'mock-session-1', title: 'Implement Browser Mock', cwd: 'E:\\projects\\mock-demo', modelProvider: 'cpa-gui', archived: false, updatedAtMs: Date.now() - 20 * 60_000, databasePath: 'C:\\Users\\Mock\\.codex\\state.sqlite' },
       { id: 'mock-session-2', title: 'Learn TypeScript types', cwd: 'E:\\projects\\typescript-study', modelProvider: 'openai', archived: false, updatedAtMs: Date.now() - 3 * 60 * 60_000, databasePath: 'C:\\Users\\Mock\\.codex\\state.sqlite' },
       { id: 'mock-session-3', title: 'Review legacy UI', cwd: 'E:\\projects\\legacy-ui', modelProvider: 'cpa-gui', archived: true, updatedAtMs: Date.now() - 3 * 24 * 60 * 60_000, databasePath: 'C:\\Users\\Mock\\.codex\\state.sqlite' },
     ],
   };
+}
+
+type MockCodexSessionMessage = {
+  id: string;
+  lineNumber: number;
+  role: string;
+  timestamp: string;
+  content: string;
+  rawType: string;
+  model: string;
+  callId: string | null;
+};
+
+type MockCodexSessionContext = {
+  id: string;
+  title: string;
+  cwd: string;
+  modelProvider: string;
+  model: string;
+  archived: boolean;
+  updatedAtMs: number;
+  rolloutPath: string;
+  databasePath: string;
+  messages: MockCodexSessionMessage[];
+  stats: {
+    totalLines: number;
+    messageCount: number;
+    userMessageCount: number;
+    assistantMessageCount: number;
+    toolCount: number;
+    fileSizeBytes: number;
+  };
+  rawJsonlAvailable: boolean;
+  rolloutSha256: string;
+  rawJsonl: string;
+};
+
+function mockSessionRawJsonl(context: MockCodexSessionContext): string {
+  const lines = [
+    JSON.stringify({ type: 'session_meta', payload: { id: context.id, title: context.title, cwd: context.cwd, model_provider: context.modelProvider } }),
+    JSON.stringify({ type: 'turn_context', payload: { model: context.model, cwd: context.cwd } }),
+  ];
+  for (const message of context.messages) {
+    if (message.role === 'tool') {
+      lines.push(JSON.stringify({
+        type: 'response_item',
+        payload: { type: 'function_call', name: 'exec_command', arguments: message.content, call_id: message.callId },
+      }));
+      continue;
+    }
+    lines.push(JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: message.role,
+        content: [{ type: message.role === 'assistant' ? 'output_text' : 'input_text', text: message.content }],
+      },
+    }));
+  }
+  return lines.join('\n') + '\n';
+}
+
+function mockSessionStats(context: MockCodexSessionContext) {
+  const lines = context.rawJsonl.split('\n').filter((line) => line.trim().length > 0);
+  return {
+    totalLines: lines.length,
+    messageCount: context.messages.filter((message) => message.role !== 'tool').length,
+    userMessageCount: context.messages.filter((message) => message.role === 'user').length,
+    assistantMessageCount: context.messages.filter((message) => message.role === 'assistant').length,
+    toolCount: context.messages.filter((message) => message.role === 'tool').length,
+    fileSizeBytes: new TextEncoder().encode(context.rawJsonl).length,
+  };
+}
+
+function mockSessionContext(state: BrowserMockState, sessionId: string): MockCodexSessionContext {
+  const cached = state.codexSessionContexts[sessionId];
+  if (cached) return cached;
+  const session = state.codexSessions.find((item) => item.id === sessionId);
+  const context: MockCodexSessionContext = {
+    id: sessionId,
+    title: session?.title ?? 'Mock Session Title',
+    cwd: session?.cwd ?? 'C:\\Workspace\\project',
+    modelProvider: session?.modelProvider ?? 'cpa-gui',
+    model: 'deepseek-v4.1',
+    archived: session?.archived ?? false,
+    updatedAtMs: session?.updatedAtMs ?? Date.now(),
+    rolloutPath: `C:\\Users\\Mock\\.codex\\sessions\\rollout-${sessionId}.jsonl`,
+    databasePath: session?.databasePath ?? 'C:\\Users\\Mock\\.codex\\state.sqlite',
+    messages: [
+      {
+        id: 'msg-2',
+        lineNumber: 2,
+        role: 'user',
+        timestamp: new Date(Date.now() - 3_600_000).toISOString(),
+        content: 'Hello Codex, can you help me refactor the database module?',
+        rawType: 'response_item',
+        model: 'deepseek-v4.1',
+        callId: null,
+      },
+      {
+        id: 'msg-3',
+        lineNumber: 3,
+        role: 'assistant',
+        timestamp: new Date(Date.now() - 3_500_000).toISOString(),
+        content: 'Sure, I will inspect the current database schema and transactions first.',
+        rawType: 'response_item',
+        model: 'deepseek-v4.1',
+        callId: null,
+      },
+      {
+        id: 'tool-4',
+        lineNumber: 4,
+        role: 'tool',
+        timestamp: new Date(Date.now() - 3_400_000).toISOString(),
+        content: 'exec_command(cmd="Get-ChildItem -Directory")',
+        rawType: 'response_item',
+        model: 'deepseek-v4.1',
+        callId: 'mock-call-1',
+      },
+    ],
+    stats: {
+      totalLines: 0,
+      messageCount: 0,
+      userMessageCount: 0,
+      assistantMessageCount: 0,
+      toolCount: 0,
+      fileSizeBytes: 0,
+    },
+    rawJsonlAvailable: true,
+    rolloutSha256: '0'.repeat(64),
+    rawJsonl: '',
+  };
+  context.rawJsonl = mockSessionRawJsonl(context);
+  context.stats = mockSessionStats(context);
+  state.codexSessionContexts[sessionId] = context;
+  return context;
 }
 
 function findAuthFile(state: BrowserMockState, name: string) {
@@ -707,7 +894,7 @@ function managementResponse(state: BrowserMockState, payload: JsonObject) {
     }
   }
   if (method === 'GET' && path === '/credentials') {
-    return { files: clone(state.authFiles), observed_at: new Date().toISOString() };
+    return { files: clone(state.authFiles).map(({ tags, ...file }) => file), observed_at: new Date().toISOString() };
   }
   if (method === 'GET' && path === '/credentials/download') {
     const file = findAuthFile(state, readString(query.name));
@@ -728,6 +915,7 @@ function managementResponse(state: BrowserMockState, payload: JsonObject) {
     const file = findAuthFile(state, readString(patch.name));
     if (!file) throw new Error(`Browser Mock credential not found: ${readString(patch.name)}`);
     Object.assign(file, clone(patch));
+    if (Object.prototype.hasOwnProperty.call(patch, 'tags')) file.tags = normalizeAuthFileTags(patch.tags);
     return { status: 'ok' };
   }
   if (method === 'POST' && path === '/routing/cooldown/reset') {
@@ -801,12 +989,266 @@ const ERROR_SCENARIO_COMMANDS = new Set([
   'get_agent_config_statuses',
 ]);
 
+
+const MOCK_AGENT_SOURCES = ['claude', 'codex', 'mcode', 'opencode', 'omp', 'pi', 'copilot', 'gemini', 'antigravity', 'kimi', 'zcode'];
+
+type MockAgentCounter = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  costUSD: number;
+  samples: number;
+};
+
+const emptyMockCounter = (): MockAgentCounter => ({
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheCreationTokens: 0,
+  reasoningTokens: 0,
+  totalTokens: 0,
+  costUSD: 0,
+  samples: 0,
+});
+
+const addMockCounter = (target: MockAgentCounter, value: MockAgentCounter) => {
+  target.inputTokens += value.inputTokens;
+  target.outputTokens += value.outputTokens;
+  target.cacheReadTokens += value.cacheReadTokens;
+  target.cacheCreationTokens += value.cacheCreationTokens;
+  target.reasoningTokens += value.reasoningTokens;
+  target.totalTokens += value.totalTokens;
+  target.costUSD += value.costUSD;
+  target.samples += value.samples;
+};
+
+function mockAgentUsageReport(range: string, selected: string[], groupBy: string, granularity: string, cleared: boolean, customStart = '', customEnd = '') {
+  const generatedAt = new Date().toISOString();
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, '0');
+  const dayKey = (date: Date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const historyDays = 120;
+  const dayOffset = (value: string) => Math.round((today.getTime() - new Date(`${value}T00:00:00`).getTime()) / 86_400_000);
+  const customEndOffset = /^\d{4}-\d{2}-\d{2}$/.test(customEnd) ? Math.max(0, dayOffset(customEnd)) : 0;
+  const customSpan = /^\d{4}-\d{2}-\d{2}$/.test(customStart) ? Math.max(1, dayOffset(customStart) - customEndOffset + 1) : 1;
+  const endOffset = range === 'custom' ? customEndOffset : 0;
+  const span = range === 'today' ? 1 : range === '7d' ? 7 : range === '30d' ? 30 : range === 'custom' ? customSpan : historyDays;
+  const hourAllowed = range !== 'all' && endOffset + span <= 30;
+  const hourly = range === 'today' || (range === 'custom' && span === 1 && hourAllowed);
+  const kind = granularity === 'hour' && hourAllowed ? 'hour'
+    : granularity === 'hour' || granularity === 'day' ? 'day'
+      : granularity === 'week' || granularity === 'month' ? granularity
+        : hourly ? 'hour' : span > 92 ? 'week' : 'day';
+  const end = new Date(today);
+  end.setDate(end.getDate() - endOffset);
+  const start = new Date(end);
+  start.setDate(start.getDate() - (span - 1));
+  const bucketOf = (date: Date, hour: number) => {
+    if (kind === 'hour') return `${dayKey(date)}T${pad(hour)}`;
+    if (kind === 'month') return dayKey(date).slice(0, 7);
+    if (kind === 'week') {
+      const monday = new Date(date);
+      monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
+      return dayKey(monday);
+    }
+    return dayKey(date);
+  };
+  const inWindow = (date: Date, hour: number) => {
+    if (range === 'today') return dayKey(date) === dayKey(today) && hour <= now.getHours();
+    return true;
+  };
+  const report = {
+    schemaVersion: 2,
+    generatedAt,
+    lastSyncAt: cleared ? '' : generatedAt,
+    syncing: false,
+    bucket: kind,
+    rangeStart: dayKey(start),
+    rangeEnd: dayKey(end),
+    totals: { ...emptyMockCounter(), days: 0 },
+    previous: range === 'all' || cleared ? null : { totalTokens: 0, costUSD: 0 },
+    sources: [] as Record<string, unknown>[],
+    timeline: [] as Record<string, unknown>[],
+    calendar: [] as { date: string; totalTokens: number; costUSD: number }[],
+    hourly: [] as { weekday: number; hour: number; totalTokens: number; samples: number }[],
+  };
+  const timeline = new Map<string, MockAgentCounter>();
+  for (let offset = 0; offset < span; offset += 1) {
+    const date = new Date(start);
+    date.setDate(date.getDate() + offset);
+    for (let hour = 0; hour < 24; hour += 1) {
+      if (inWindow(date, hour) && (kind === 'hour' ? true : hour === 0)) timeline.set(bucketOf(date, hour), emptyMockCounter());
+      if (kind === 'hour' && dayKey(date) === dayKey(today) && hour >= now.getHours()) break;
+    }
+  }
+  const finish = () => {
+    report.timeline = [...timeline.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([bucket, counter]) => ({ bucket, ...counter }));
+    return report;
+  };
+  if (cleared) {
+    report.sources = MOCK_AGENT_SOURCES.map((source) => ({ source, status: 'empty', archivedAt: '', error: '', totals: { ...emptyMockCounter(), days: 0 }, models: [], series: [] }));
+    return finish();
+  }
+
+  const profiles = [
+    { source: 'claude', models: ['claude-opus-4-1', 'claude-sonnet-4-5'], base: 260_000, rate: 0.0000062, status: 'ok', idle: [2, 9] },
+    { source: 'codex', models: ['gpt-5.2-codex', 'gpt-5'], base: 150_000, rate: 0.0000042, status: 'ok', idle: [3, 4, 11] },
+    { source: 'pi', models: ['deepseek-v4.1-flash'], base: 52_000, rate: 0, status: 'archived', idle: [0, 1, 5] },
+  ];
+  const included = (source: string) => selected.length === 0 || selected.includes(source);
+  const calendar = new Map<string, MockAgentCounter>();
+  const activeDays = new Set<string>();
+  const hourWeights = Array.from({ length: 24 }, (_, hour) => Math.max(0, Math.sin(((hour - 7) / 16) * Math.PI)));
+  const weightSum = hourWeights.reduce((sum, value) => sum + value, 0);
+  const sample = (profile: typeof profiles[number], offsetFromToday: number) => {
+    const counter = emptyMockCounter();
+    if (profile.idle.includes(offsetFromToday % 13)) return counter;
+    const wave = 0.55 + 0.45 * Math.sin((offsetFromToday + profile.base % 7) / 2.4);
+    counter.inputTokens = Math.round(profile.base * wave);
+    counter.outputTokens = Math.round(counter.inputTokens * 0.22);
+    counter.cacheReadTokens = Math.round(counter.inputTokens * 1.8);
+    counter.cacheCreationTokens = Math.round(counter.inputTokens * 0.16);
+    counter.reasoningTokens = Math.round(counter.outputTokens * 0.3);
+    counter.totalTokens = counter.inputTokens + counter.outputTokens + counter.cacheReadTokens + counter.cacheCreationTokens;
+    counter.costUSD = Number((counter.totalTokens * profile.rate).toFixed(4));
+    counter.samples = Math.round(6 + wave * 18);
+    return counter;
+  };
+  const scale = (counter: MockAgentCounter, factor: number): MockAgentCounter => ({
+    inputTokens: Math.round(counter.inputTokens * factor),
+    outputTokens: Math.round(counter.outputTokens * factor),
+    cacheReadTokens: Math.round(counter.cacheReadTokens * factor),
+    cacheCreationTokens: Math.round(counter.cacheCreationTokens * factor),
+    reasoningTokens: Math.round(counter.reasoningTokens * factor),
+    totalTokens: Math.round(counter.totalTokens * factor),
+    costUSD: counter.costUSD * factor,
+    samples: Math.round(counter.samples * factor),
+  });
+  const cells = new Map<string, { totalTokens: number; samples: number }>();
+
+  profiles.forEach((profile) => {
+    const totals = emptyMockCounter();
+    const days = new Set<string>();
+    const sourceBuckets = new Map<string, MockAgentCounter>();
+    for (let offset = 0; offset < span; offset += 1) {
+      const date = new Date(start);
+      date.setDate(date.getDate() + offset);
+      const fromToday = endOffset + span - 1 - offset;
+      const daily = sample(profile, fromToday);
+      if (!daily.totalTokens) continue;
+      for (let hour = 0; hour < 24; hour += 1) {
+        if (!hourWeights[hour] || !inWindow(date, hour)) continue;
+        if (dayKey(date) === dayKey(today) && hour > now.getHours()) continue;
+        const counter = scale(daily, hourWeights[hour] / weightSum);
+        addMockCounter(totals, counter);
+        days.add(dayKey(date));
+        if (!included(profile.source)) continue;
+        const bucket = bucketOf(date, hour);
+        const sourceCounter = sourceBuckets.get(bucket) ?? emptyMockCounter();
+        addMockCounter(sourceCounter, counter);
+        sourceBuckets.set(bucket, sourceCounter);
+        addMockCounter(timeline.get(bucket) ?? (timeline.set(bucket, emptyMockCounter()).get(bucket) as MockAgentCounter), counter);
+        addMockCounter(report.totals, counter);
+        activeDays.add(dayKey(date));
+      }
+    }
+    for (let fromToday = 0; included(profile.source) && fromToday < historyDays; fromToday += 1) {
+      const date = new Date(today);
+      date.setDate(date.getDate() - fromToday);
+      const daily = sample(profile, fromToday);
+      if (!daily.totalTokens) continue;
+      const dayCounter = calendar.get(dayKey(date)) ?? emptyMockCounter();
+      addMockCounter(dayCounter, daily);
+      calendar.set(dayKey(date), dayCounter);
+      for (let hour = 0; fromToday < 30 && hour < 24; hour += 1) {
+        if (!hourWeights[hour]) continue;
+        const counter = scale(daily, hourWeights[hour] / weightSum);
+        const key = `${(date.getDay() + 6) % 7}-${hour}`;
+        const cell = cells.get(key) ?? { totalTokens: 0, samples: 0 };
+        cell.totalTokens += counter.totalTokens;
+        cell.samples += counter.samples;
+        cells.set(key, cell);
+      }
+    }
+    if (report.previous && included(profile.source)) {
+      for (let offset = 0; offset < (range === 'today' ? 1 : span); offset += 1) {
+        const previous = sample(profile, endOffset + span + offset);
+        report.previous.totalTokens += range === 'today' ? Math.round(previous.totalTokens * 0.6) : previous.totalTokens;
+        report.previous.costUSD += range === 'today' ? previous.costUSD * 0.6 : previous.costUSD;
+      }
+    }
+    const shares = profile.models.map((_, index) => profile.models.length === 1 ? 1 : index === 0 ? 0.72 : 0.28);
+    report.sources.push({
+      source: profile.source,
+      status: profile.status,
+      archivedAt: profile.status === 'archived' ? new Date(today.getTime() - 86_400_000 * 21).toISOString() : '',
+      error: '',
+      totals: { ...totals, days: days.size },
+      models: included(profile.source) && totals.totalTokens > 0 ? profile.models.map((model, index) => ({
+        model,
+        inputTokens: Math.round(totals.inputTokens * shares[index]),
+        outputTokens: Math.round(totals.outputTokens * shares[index]),
+        cacheCreationTokens: Math.round(totals.cacheCreationTokens * shares[index]),
+        cacheReadTokens: Math.round(totals.cacheReadTokens * shares[index]),
+        reasoningOutputTokens: Math.round(totals.reasoningTokens * shares[index]),
+        totalTokens: Math.round(totals.totalTokens * shares[index]),
+        costUSD: Number((totals.costUSD * shares[index]).toFixed(4)),
+        priced: profile.rate > 0,
+        prompt: profile.rate > 0 ? 3 : null,
+        completion: profile.rate > 0 ? 15 : null,
+        cacheRead: profile.rate > 0 ? 0.3 : null,
+        cacheCreation: profile.rate > 0 ? 3.75 : null,
+        days: days.size,
+      })) : [],
+      series: [...sourceBuckets.entries()].sort(([left], [right]) => left.localeCompare(right)).flatMap(([bucket, counter]) => (
+        groupBy === 'model'
+          ? profile.models.map((model, index) => ({ bucket: `${bucket}|${model}`, ...scale(counter, shares[index]) }))
+          : [{ bucket, ...counter }]
+      )),
+    });
+  });
+
+  MOCK_AGENT_SOURCES.forEach((source) => {
+    if (report.sources.some((entry) => entry.source === source)) return;
+    report.sources.push({
+      source,
+      status: source === 'opencode' ? 'ok' : 'empty',
+      archivedAt: '',
+      error: '',
+      totals: { ...emptyMockCounter(), days: 0 },
+      models: [],
+      series: [],
+    });
+  });
+
+  report.calendar = [...calendar.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([date, counter]) => ({
+    date,
+    totalTokens: counter.totalTokens,
+    costUSD: counter.costUSD,
+  }));
+  report.hourly = [...cells.entries()].map(([key, cell]) => {
+    const [weekday, hour] = key.split('-').map(Number);
+    return { weekday, hour, totalTokens: cell.totalTokens, samples: cell.samples };
+  });
+  report.totals.days = activeDays.size;
+  return finish();
+}
+
 export function createBrowserMockRuntime(
   scenario: BrowserMockScenario,
   emitEvent: EmitMockEvent = () => {},
   delayMs = 0,
+  pluginPages = 0,
+  onPluginWebview?: (state: PluginWebviewMockState) => void,
 ): BrowserMockRuntime {
   const state = createState(scenario);
+  let mcpServers: McpServer[] = [];
+  let zcodeCatalog: ZCodeCatalogEditorSnapshot = { models: [], modelOrder: [], configured: false };
+  let zcodeSubagents: ZCodeSubagentConfigSnapshot = { defaultSubagentModel: null, defaultThoughtLevel: null, subagents: [] };
   const subscriptionValue = createSubscriptionValueMock(scenario === 'empty');
   const dataStorage: DataStorageSettings = {
     mode: 'portable', directory: 'C:\\Apps\\EasyCLIProxyAPI',
@@ -815,6 +1257,10 @@ export function createBrowserMockRuntime(
     locator: 'C:\\Users\\demo\\AppData\\Local\\EasyCLIProxyAPI-Custom\\storage.json',
     pending: null, lastResult: null, lastError: null,
   };
+  let usageViewPreferences: Record<string, string> = {};
+  let agentUsageCleared = false;
+  let privacyMode: boolean | null = null;
+  let themeSelection: ThemeSelection | null = null;
   if (scenario === 'empty') {
     state.usageEvents = [];
     state.usagePrices = [];
@@ -826,7 +1272,7 @@ export function createBrowserMockRuntime(
     state.usageStorage.totalRecords = 0;
     state.coreConfig.apiKeys = [];
   }
-  const pluginMock = createPluginMock(state);
+  const pluginMock = createPluginMock(state, pluginPages, onPluginWebview);
   const emit = (event: string, payload: unknown) => emitEvent(event, clone(payload));
 
   const invoke = async (command: string, rawPayload?: unknown): Promise<unknown> => {
@@ -851,24 +1297,44 @@ export function createBrowserMockRuntime(
           : 'C:\\Users\\Mock\\Certificates\\mock.pem';
       }
       case 'plugin:dialog|save': return 'C:\\Users\\Mock\\Downloads\\mock-output.json';
+      case 'save_usage_events_export': return null;
       case 'detect_core_platform': return { os: 'windows', arch: 'x86_64', assetOs: 'windows', assetArch: 'amd64', archiveKind: 'zip' };
       case 'get_linux_system_theme': return 'light';
+      case 'detect_window_material': return null;
+      case 'list_custom_themes': return { files: [
+        { folder: 'harbor-dark', content: JSON.stringify(MOCK_CUSTOM_THEME) },
+        { folder: 'harbor-image-dark', content: JSON.stringify({
+          ...MOCK_CUSTOM_THEME, id: 'harbor-image-dark',
+          name: { en: 'Harbor Image', 'zh-CN': '港湾·图片', 'zh-TW': '港灣·圖片', ja: 'ハーバー・画像' },
+          assets: { backdropImage: 'assets/harbor.png' },
+        }), backdropImage: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=' },
+      ], omitted: 0 };
       case 'set_app_locale':
       case 'open_external_url':
       case 'open_oauth_url':
       case 'resolve_windows_close_request':
       case 'open_auth_files_directory':
       case 'open_core_logs_directory':
+      case 'open_custom_themes_directory':
+      case 'set_window_material':
       case 'restart_agent_app':
       case 'restart_codex_app':
       case 'restart_opencode_app':
+      case 'restart_codex_cli_daemon':
       case 'check_codex_oauth_login':
       case 'restore_codex_official_config':
       case 'create_agent_config_backup':
       case 'restore_agent_config_backup':
-      case 'launch_agent': return null;
+      case 'launch_agent': {
+        const arguments_ = parseAgentLaunchArguments(String(payload.customArguments ?? ''));
+        if (!arguments_) throw new Error('Invalid startup arguments');
+        if (payload.target === 'app' && arguments_.length) throw new Error('Custom arguments require a CLI target');
+        if (payload.client === 'deepseek-harness' && hasDeepSeekArgumentConflict(arguments_)) throw new Error('Use structured DeepSeek controls for these options');
+        return null;
+      }
 
       case 'get_core_status': return clone(state.coreStatus);
+      case 'main_window_active': return !document.hidden;
       case 'start_core_process': {
         if (!state.coreStatus.installed) throw new Error('Browser Mock: install the core first');
         Object.assign(state.coreStatus, { running: true, ready: true, managed: true, starting: false, processId: 42817, message: 'Browser Mock core is running' });
@@ -887,6 +1353,61 @@ export function createBrowserMockRuntime(
         Object.assign(state.coreStatus, { running: true, ready: true, managed: true, starting: false, processId: 42818, message: 'Browser Mock core restarted' });
         emit('core-status-changed', state.coreStatus);
         return clone(state.coreStatus);
+      }
+      case 'get_usage_view_preferences': return clone(usageViewPreferences);
+      case 'get_agent_usage': {
+        const query = asObject(payload.query);
+        const range = typeof query.range === 'string' ? query.range : '7d';
+        const sources = Array.isArray(query.sources) ? query.sources.filter((entry): entry is string => typeof entry === 'string') : [];
+        const groupBy = query.groupBy === 'model' ? 'model' : 'source';
+        const granularity = typeof query.granularity === 'string' ? query.granularity : '';
+        const customStart = typeof query.start === 'string' ? query.start : '';
+        const customEnd = typeof query.end === 'string' ? query.end : '';
+        return mockAgentUsageReport(range, sources, groupBy, granularity, agentUsageCleared || !state.coreStatus.installed || scenario === 'empty', customStart, customEnd);
+      }
+      case 'sync_agent_usage': {
+        if (scenario === 'error') throw new Error('Browser Mock: Agent usage sync failed');
+        return {
+          skipped: false,
+          changedFiles: 3,
+          scannedFiles: 835,
+          durationMs: 118,
+          lastSyncAt: new Date().toISOString(),
+        };
+      }
+      case 'get_agent_usage_storage': {
+        return {
+          databaseSizeBytes: agentUsageCleared ? 0 : 4_718_592,
+          dailyRows: agentUsageCleared ? 0 : 1_540,
+          hourlyRows: agentUsageCleared ? 0 : 8_640,
+          fileRows: agentUsageCleared ? 0 : 835,
+          lastSyncAt: agentUsageCleared ? '' : new Date().toISOString(),
+        };
+      }
+      case 'clear_agent_usage_history': {
+        agentUsageCleared = true;
+        return null;
+      }
+      case 'save_usage_view_preferences': {
+        const values = asObject(payload.values);
+        if (!payload.values || typeof payload.values !== 'object' || Array.isArray(payload.values) || Object.keys(values).length > 100
+          || Object.entries(values).some(([key, value]) => typeof value !== 'string' || new TextEncoder().encode(key).length > 128 || new TextEncoder().encode(value as string).length > 16_384
+            || (!key.startsWith('cpa-gui.usage-') && key !== 'cpa-gui.pricing-sync-source.v1'))) throw new Error('Invalid usage preferences');
+        usageViewPreferences = clone(values) as Record<string, string>;
+        return null;
+      }
+      case 'get_privacy_mode': return privacyMode;
+      case 'save_privacy_mode': {
+        if (typeof payload.enabled !== 'boolean') throw new Error('Invalid privacy mode');
+        privacyMode = payload.enabled;
+        return null;
+      }
+      case 'get_theme_selection': return clone(themeSelection);
+      case 'save_theme_selection': {
+        if (!isThemeSelection(payload.selection)
+          || Object.keys(payload.selection).some(key => !['version', 'selectedId', 'lastLightId', 'lastDarkId'].includes(key))) throw new Error('Invalid theme selection');
+        themeSelection = clone(payload.selection);
+        return null;
       }
       case 'get_gui_settings': return clone(state.guiSettings);
       case 'get_core_config_settings': return clone(state.coreConfig);
@@ -907,7 +1428,7 @@ export function createBrowserMockRuntime(
           else if (key === 'requestLog' || key === 'pluginsEnabled') syncValues[key] = false;
         }
         Object.assign(state.coreConfig, syncValues);
-        const restartRequired = changes.some((change) => !sameTemplateValue(readTemplatePath(before, change.path), readTemplatePath(state.extendedConfig, change.path)) && ['server.host', 'server.port', 'server.tls', 'management', 'oauth.auth-dir'].some((prefix) => change.path.join('.') === prefix || change.path.join('.').startsWith(`${prefix}.`)));
+        const restartRequired = changes.some((change) => !sameTemplateValue(readTemplatePath(before, change.path), readTemplatePath(state.extendedConfig, change.path)) && ['server.host', 'server.port', 'server.tls', 'server.trusted-proxies', 'server.discovery', 'management', 'oauth.auth-dir'].some((prefix) => change.path.join('.') === prefix || change.path.join('.').startsWith(`${prefix}.`)));
         emit('config-files-changed', { paths: ['cpa-core/config.yaml'], errors: [] });
         return { config: clone(state.extendedConfig), restartRequired };
       }
@@ -975,6 +1496,12 @@ export function createBrowserMockRuntime(
 
       case 'check_app_update': return clone(state.appUpdateInfo);
       case 'get_app_update_task': return clone(state.appUpdateTask);
+      case 'get_update_channel': return state.appUpdateInfo.updateChannel ?? 'stable';
+      case 'set_update_channel': {
+        const channel = String(payload.channel ?? 'stable');
+        state.appUpdateInfo.updateChannel = channel;
+        return channel;
+      }
       case 'start_app_update': {
         Object.assign(state.appUpdateTask, {
           running: true,
@@ -995,6 +1522,7 @@ export function createBrowserMockRuntime(
         return null;
       }
       case 'check_latest_core': return clone(state.coreLatest);
+      case 'list_core_versions': return clone(state.coreVersions);
       case 'get_core_install_task': return clone(state.coreInstallTask);
       case 'install_core_version':
       case 'install_bundled_core': {
@@ -1032,6 +1560,24 @@ export function createBrowserMockRuntime(
       case 'set_prefer_gitcode_downloads': return clone(state.versionSource);
 
       case 'management_request': return clone(managementResponse(state, payload));
+      case 'import_vertex_credential': {
+        const parsed: unknown = JSON.parse(new TextDecoder().decode(Uint8Array.from(asArray(payload.data) as number[])));
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('invalid json');
+        const serviceAccount = asObject(parsed);
+        const projectId = readString(serviceAccount.project_id).trim();
+        const email = readString(serviceAccount.client_email).trim();
+        if (!projectId || !readString(serviceAccount.private_key).trim()) {
+          throw new Error('invalid service account');
+        }
+        const location = readString(payload.location).trim() || 'us-central1';
+        const name = `vertex-${projectId.replace(/[\\/:]/g, '_').replace(/ /g, '-')}.json`;
+        const existing = findAuthFile(state, name);
+        const file = { name, provider: 'vertex', type: 'vertex', project_id: projectId, email, location,
+          service_account: clone(serviceAccount), source: 'file',
+          auth_index: existing?.auth_index ?? `mock-vertex-${crypto.randomUUID()}`, modtime: Date.now() };
+        if (existing) state.authFiles[state.authFiles.indexOf(existing)] = file; else state.authFiles.push(file);
+        return { status: 'ok', project_id: projectId, email, location, 'auth-file': name };
+      }
       case 'upload_auth_file': {
         const name = readString(payload.name) || 'uploaded-mock.json';
         const parsed: unknown = JSON.parse(new TextDecoder().decode(Uint8Array.from(asArray(payload.data) as number[])));
@@ -1196,6 +1742,7 @@ export function createBrowserMockRuntime(
       };
       case 'apply_usage_model_prices': return { imported: asArray(payload.prices).length };
 
+      case 'get_agent_environment_options': return { supported: false, defaultDirectory: '/home/user/.config', distributions: [] };
       case 'get_agent_config_statuses':
       case 'refresh_agent_config_statuses': return clone(state.agentStatuses);
       case 'get_core_models': {
@@ -1257,11 +1804,12 @@ export function createBrowserMockRuntime(
         const alias = readString(payload.alias);
         const entry = state.thinkingAliases.find((item) => item.alias === alias);
         const source = state.aliasSources.find((item) => item.model === entry?.sourceModel) ?? state.aliasSources[0];
-        return { source: clone(source), revision: 'mock-alias-r1', effort: entry?.effort ?? null, fast: state.speedAliases.some((item) => item.alias === alias) };
+        return { source: clone(source), effort: entry?.effort ?? null, fast: state.speedAliases.some((item) => item.alias === alias && item.serviceTier === 'priority'), serviceTier: state.speedAliases.find((item) => item.alias === alias)?.serviceTier ?? null };
       }
       case 'create_thinking_alias': {
         const request = asObject(payload.request ?? payload);
         const entry = {
+          position: { section: 'oauth-model-alias', providerIndex: null, modelIndex: state.thinkingAliases.length },
           sourceModel: readString(request.sourceModel ?? request.model),
           alias: readString(request.alias),
           effort: readString(request.effort) || null,
@@ -1269,7 +1817,13 @@ export function createBrowserMockRuntime(
           kind: readString(request.kind) || 'codex-oauth',
           oauthChannel: readString(request.oauthChannel) || null,
         };
-        state.thinkingAliases = [...state.thinkingAliases.filter((item) => item.alias !== entry.alias), entry];
+        const originalAlias = readString(request.originalAlias) || entry.alias;
+        const source = state.aliasSources.find((item) => item.id === request.sourceId);
+        if (source) { entry.sourceModel = source.model; entry.provider = source.provider; entry.kind = source.kind; }
+        state.speedAliases = state.speedAliases.filter((item) => item.alias !== originalAlias && item.alias !== entry.alias);
+        const tier = readString(request.serviceTier) || (request.fast ? 'priority' : '');
+        if (tier) state.speedAliases.push({ ...entry, serviceTier: tier });
+        state.thinkingAliases = [...state.thinkingAliases.filter((item) => item.alias !== originalAlias && item.alias !== entry.alias), entry];
         return clone(state.thinkingAliases);
       }
       case 'delete_thinking_alias': {
@@ -1279,6 +1833,7 @@ export function createBrowserMockRuntime(
       case 'create_speed_alias': {
         const request = asObject(payload.request ?? payload);
         const entry = {
+          position: { section: 'oauth-model-alias', providerIndex: null, modelIndex: state.speedAliases.length },
           sourceModel: readString(request.sourceModel ?? request.model),
           alias: readString(request.alias),
           serviceTier: readString(request.serviceTier) || 'priority',
@@ -1294,14 +1849,82 @@ export function createBrowserMockRuntime(
         return clone(state.speedAliases);
       }
 
+      case 'list_update_channels': return ['stable', 'preview'];
+      case 'list_mcp_servers': return clone(mcpServers);
+      case 'save_mcp_server': {
+        const server = clone(asObject(payload.server)) as McpServer;
+        if (!server.name?.trim()) throw new Error('MCP server name is required');
+        if (!server.id) server.id = `mock-mcp-${Date.now()}-${mcpServers.length}`;
+        mcpServers = [...mcpServers.filter(item => item.id !== server.id), server];
+        return null;
+      }
+      case 'delete_mcp_server':
+        mcpServers = mcpServers.filter(item => item.id !== payload.id);
+        return null;
+      case 'set_mcp_server_enabled': {
+        const server = mcpServers.find(item => item.id === payload.id);
+        if (!server) throw new Error('MCP server not found');
+        server.enabled = Boolean(payload.enabled);
+        return null;
+      }
+      case 'export_mcp_servers_json': return JSON.stringify({ mcpServers: Object.fromEntries(mcpServers.map(server => [server.name, clone(server)])) }, null, 2);
+      case 'import_mcp_servers_json': {
+        const parsed = JSON.parse(readString(payload.raw));
+        const input = asObject(parsed);
+        const entries = Array.isArray(parsed) ? parsed.map((value, index) => [String(index), value] as const) : Object.entries(asObject(input.mcpServers ?? input));
+        const result = { added: 0, updated: 0, skipped: 0, errors: [] as string[] };
+        for (const [name, value] of entries) {
+          const raw = asObject(value);
+          const transport = readString(raw.transport) || (raw.url ? 'http' : 'stdio');
+          if (!['stdio', 'http', 'sse'].includes(transport) || !(transport === 'stdio' ? raw.command : raw.url)) {
+            result.skipped++; result.errors.push(`Invalid MCP server: ${name}`); continue;
+          }
+          const existing = mcpServers.find(server => server.name === (raw.name ?? name));
+          const server: McpServer = { id: existing?.id ?? `mock-mcp-${Date.now()}-${mcpServers.length}`, name: readString(raw.name) || name,
+            transport: transport as McpServer['transport'], command: readString(raw.command) || null, args: asArray(raw.args).map(String),
+            env: clone(asObject(raw.env)) as Record<string, string>, url: readString(raw.url) || null,
+            headers: clone(asObject(raw.headers)) as Record<string, string>, enabled: raw.enabled !== false, description: readString(raw.description) || null };
+          mcpServers = [...mcpServers.filter(item => item.id !== server.id), server];
+          if (existing) result.updated++; else result.added++;
+        }
+        return result;
+      }
+      // Browser previews have no host skill files or filesystem side effects.
+      case 'list_skills': return [];
+      case 'get_skill_detail': throw new Error('Skill file not found in browser preview');
+      case 'set_skill_enabled': throw new Error('Skill file not found in browser preview');
+      case 'open_mcp_skills_directory': return null;
+      case 'get_zcode_model_catalog_editor': return clone(zcodeCatalog);
+      case 'save_zcode_model_catalog_editor': {
+        const request = asObject(payload.request);
+        zcodeCatalog = { models: clone(asArray(request.models)) as ZCodeCatalogEditorSnapshot['models'], modelOrder: asArray(request.modelOrder).map(String), configured: true };
+        return clone(zcodeCatalog);
+      }
+      case 'get_zcode_subagent_config': return clone(zcodeSubagents);
+      case 'save_zcode_subagent_config': {
+        const request = asObject(payload.request);
+        zcodeSubagents = { defaultSubagentModel: readString(request.defaultSubagentModel) || null, defaultThoughtLevel: readString(request.defaultThoughtLevel) || null, subagents: clone(asArray(request.subagents)) as ZCodeSubagentConfigSnapshot['subagents'] };
+        return clone(zcodeSubagents);
+      }
       case 'get_codex_model_catalog_editor': return clone(state.codexCatalog);
+      case 'get_codex_subagent_config': return clone(state.codexSubagents);
+      case 'save_codex_subagent_config': {
+        state.codexSubagents = { ...state.codexSubagents, ...asObject(payload.config) } as typeof state.codexSubagents;
+        return { outcome: 'updated', enabled: true, model: null, changedFiles: ['~/.codex/config.toml'], conflictFiles: [] };
+      }
       case 'save_codex_model_catalog_editor': {
         const request = asObject(payload.request);
+        if (request.review_model !== undefined) state.codexCatalog.defaultAutoReviewModel = readString(asObject(request.review_model).model) || null;
         const models = asArray(request.models).map(asObject);
         state.codexCatalog.models = state.codexCatalog.models.map((model) => {
           const update = models.find((item) => item.slug === model.slug);
           return update ? { ...model, configuration: clone(asObject(update.configuration)) as typeof model.configuration, customized: true } : model;
         });
+        const requestOrder = models.map((item) => String(item.slug));
+        state.codexCatalog.models = requestOrder
+          .map((slug) => state.codexCatalog.models.find((model) => model.slug === slug))
+          .filter((model): model is NonNullable<typeof model> => Boolean(model))
+          .concat(state.codexCatalog.models.filter((model) => !requestOrder.includes(model.slug)));
         state.codexCatalog.revision = `mock-catalog-${Date.now()}`;
         return { snapshot: clone(state.codexCatalog), synchronizationError: null };
       }
@@ -1327,20 +1950,102 @@ export function createBrowserMockRuntime(
           warnings: [],
         };
       }
+      case 'get_codex_session_context': {
+        const request = asObject(payload.request);
+        const sessionId = String(request.sessionId || 'mock-session-id');
+        return clone(mockSessionContext(state, sessionId));
+      }
+      case 'open_codex_session_rollout': {
+        const sessionId = String(asObject(payload.request).sessionId || '');
+        if (!mockSessionContext(state, sessionId).rolloutPath) throw new Error('This session has no rollout file to open');
+        return null;
+      }
+      case 'save_codex_session_context': {
+        const request = asObject(payload.request);
+        const sessionId = String(request.sessionId || '');
+        const context = clone(mockSessionContext(state, sessionId));
+        if (typeof request.title === 'string') context.title = request.title;
+        if (typeof request.cwd === 'string') context.cwd = request.cwd;
+        if (typeof request.model === 'string') context.model = request.model;
+        if (typeof request.modelProvider === 'string') context.modelProvider = request.modelProvider;
+        if (typeof request.archived === 'boolean') context.archived = request.archived;
+        context.updatedAtMs = Date.now();
+
+          for (const entry of asArray(request.messageUpdates)) {
+            const update = asObject(entry);
+            const index = context.messages.findIndex((message) => message.lineNumber === Number(update.lineNumber));
+            if (index < 0) continue;
+            if (update.deleted) {
+              context.messages.splice(index, 1);
+              continue;
+            }
+            if (typeof update.content === 'string') context.messages[index].content = update.content;
+            if (typeof update.role === 'string') context.messages[index].role = update.role;
+          }
+          let nextLine = context.messages.reduce((max, message) => Math.max(max, message.lineNumber), 0) + 1;
+          for (const entry of asArray(request.newMessages)) {
+            const message = asObject(entry);
+            context.messages.push({
+              id: `mock-message-${nextLine}`,
+              lineNumber: nextLine,
+              role: String(message.role || 'user'),
+              timestamp: new Date().toISOString(),
+              content: String(message.content || ''),
+              rawType: 'response_item',
+              model: context.model,
+              callId: null,
+            });
+            nextLine += 1;
+          }
+          context.messages.forEach((message, index) => {
+            message.lineNumber = index + 2;
+            message.id = `msg-${message.lineNumber}`;
+          });
+          context.rawJsonl = mockSessionRawJsonl(context);
+
+        context.stats = mockSessionStats(context);
+        state.codexSessionContexts[sessionId] = context;
+
+        const target = state.codexSessions.find((item) => item.id === sessionId);
+        if (target) {
+          target.title = context.title;
+          target.cwd = context.cwd;
+          target.modelProvider = context.modelProvider;
+          target.archived = context.archived;
+          target.updatedAtMs = context.updatedAtMs;
+        }
+
+        return {
+          success: true,
+          sessionId,
+          backupPath: `C:\\Users\\Mock\\.codex\\backups\\session-context-edits\\session-${sessionId}`,
+          message: 'Session context updated in Mock',
+        };
+      }
       case 'delete_codex_sessions': {
         const request = asObject(payload.request);
         const ids = asArray(request.sessionIds).map(String);
         state.codexSessions = state.codexSessions.filter((session) => !ids.includes(session.id));
         return {
-          results: ids.map((id) => ({ sessionId: id, status: 'deleted', message: 'Deleted by Browser Mock', backupPath: 'C:\\Users\\Mock\\.codex\\backups\\mock.zip' })),
+          results: ids.map((id) => ({ sessionId: id, status: 'deleted', message: 'Deleted by Browser Mock', backupPath: request.skipBackup ? null : 'C:\\Users\\Mock\\.codex\\backups\\mock.zip' })),
           deletedCount: ids.length,
           failedCount: 0,
         };
       }
+      case 'set_codex_remote_compaction': {
+        const codex = state.agentStatuses.find((status) => status.id === 'codex');
+        if (codex) codex.codexRemoteCompaction = Boolean(payload.enabled);
+        return {};
+      }
+      case 'set_codex_openai_provider': {
+        const codex = state.agentStatuses.find((status) => status.id === 'codex');
+        if (codex) codex.codexOpenaiProvider = Boolean(payload.enabled);
+        return createActionResult(payload);
+      }
       case 'repair_codex_session_metadata': {
         emit('codex-session-repair-progress', { phase: 'complete', percent: 100, processed: state.codexSessions.length, total: state.codexSessions.length });
         return {
-          targetProvider: 'cpa-gui', changedRolloutFiles: 2, sqliteRowsUpdated: 2,
+          targetProvider: state.agentStatuses.find((status) => status.id === 'codex')?.codexOpenaiProvider ? 'openai' : 'cpa-gui', changedRolloutFiles: 2, sqliteRowsUpdated: 2,
           skippedLockedFiles: [], backupPath: 'C:\\Users\\Mock\\.codex\\backups\\repair.zip',
           encryptedContentWarning: null, warnings: [],
         };
@@ -1351,6 +2056,7 @@ export function createBrowserMockRuntime(
       };
       case 'apply_codex_session_index_cleanup': return { prunedEntries: asArray(asObject(payload.request).threadIds).length, backupPath: 'C:\\Users\\Mock\\.codex\\backups\\index.json' };
 
+      case 'get_codex_cli_daemon_running': return true;
       case 'get_lan_ipv4': return ['192.168.100.100'];
       default:
         if (command.startsWith('plugin:window|') || command.startsWith('plugin:webview|')) return null;
