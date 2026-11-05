@@ -8,7 +8,7 @@ Version **0.4.1** incorporates upstream desktop **0.3.22** and bundles CLIProxyA
 
 Download Windows builds from [our releases](https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/latest). The first migration from the old custom 0.3.6 build must be manual because that build still checks the upstream desktop update feed. Close the old app and stop its core, back up the portable folder, then extract the new package over it, preserving `config.toml`, `oauth/`, and `cpa-core/config.yaml`.
 
-The upcoming **0.4.2** build also adds a standard Windows **Setup.exe** alongside the portable ZIP. It installs for your Windows account, offers reuse of an existing portable data folder, and keeps usage, fees, settings, and credentials when uninstalled. Build it with `.\build-installer.ps1`; see the [Windows installer guide](docs/windows-installer.md) and [storage guide](docs/data-storage.md). These additions remain under Unreleased until the next release is published.
+The upcoming **0.4.2** build integrates upstream desktop **0.3.76** and pins CLIProxyAPI **8.0.52** (see the [integration validation report](docs/upstream-0.3.76-validation.md)). It also adds a standard Windows **Setup.exe** alongside the portable ZIP. It installs for your Windows account, offers reuse of an existing portable data folder, and keeps usage, fees, settings, and credentials when uninstalled. Build it with `.\build-installer.ps1`; see the [Windows installer guide](docs/windows-installer.md) and [storage guide](docs/data-storage.md). These additions remain under Unreleased until the next release is published.
 
 To publish a tested update, bump the app version using `node scripts/set-version.mjs`, add localized release notes under `docs/release-notes/v<VERSION>/`, and push the matching `v<VERSION>` tag. GitHub Actions builds both Windows architectures and publishes the update manifest with SHA-256 checksums. Linux and macOS source support is inherited, but this fork currently publishes Windows binaries only.
 
@@ -40,14 +40,6 @@ quota inspection, usage records, model aliases, and agent client configuration i
 
 The application is built with Tauri, React, and Rust. It can carry a matching CLIProxyAPI core
 archive, making first-time setup and offline installation easier.
-
-## Sponsor
-
-[![https://go.apimart.ai/gh-easycliproxyapi](./assets/apimart-en.png)](https://go.apimart.ai/gh-easycliproxyapi)
-
-Thanks to APIMart for sponsoring this project!
-
-APIMart is a low-cost API platform for AI image & video generation — GPT-Image-2 from $0.006/image, 160+ images per dollar. One async API covers both image and video: submit a task, get an ID, fetch results via polling or callback. Batch tens of thousands of images without timeouts, switch models without changing code. Pay-as-you-go with no monthly fee — [sign up here](https://go.apimart.ai/gh-easycliproxyapi) to get started.
 
 ## Feature Tour
 
@@ -108,9 +100,12 @@ supported OpenAI, Claude, Gemini, and compatible formats.
 
 The **Plugins** page manages installed core plugins, their enabled state and typed configuration.
 Browse the plugin store to install, update or select a release version, configure additional stores
-and environment-based authentication, open pages and sign in to accounts provided by enabled plugins. Third-party
+and environment-based authentication, open pages and sign in to accounts provided by enabled plugins. Pages provided by enabled plugins appear as a submenu under Plugins in the sidebar (below Versions), expanded when space allows and collapsible otherwise. A plugin page opens in a native webview that fills the content area, with small Back, Reload and Open in browser buttons in its bottom-right corner (drag the grip to move them; double-click it to reset); new-window links open in the system browser. Third-party
 installations require source review and a typed confirmation. The page detects unsupported core
 builds and shows a restart action when an installation or removal requires it.
+Refreshing **Local plugins** checks installed plugins for updates and shows an update action on their cards.
+Public GitHub releases are checked directly using the configured GitHub token or the app's `GITHUB_TOKEN` environment variable; auth-required entries keep the core's authentication flow.
+Refreshing the **Plugin store** only reloads the plugin list. Installation queries the latest release unless a version is selected.
 
 ### Usage history and token analytics
 
@@ -144,12 +139,25 @@ proxy. Supported clients include:
 - Antigravity CLI
 - Kimi Code
 - Grok Build
+- Oh My Pi
 
 For supported clients, the application can synchronize the available model catalog, select a
 default model, back up the original configuration before applying managed settings, and restore the
 previous configuration.
 
+In **Agents → Management → Configuration directory**, enter or browse to the directory containing
+the client's configuration files, such as `.claude` or `.codex` (not the home directory).
+Windows also accepts WSL UNC paths such as `\\wsl$\Ubuntu\home\user\.claude` and
+`\\wsl.localhost\Ubuntu\home\user\.codex`. Each client remembers its own directory; clearing it
+restores the default. This setting changes configuration access, not how executables are launched.
+
 Antigravity CLI connects through CPA's Gemini-compatible API. Launch the CLI from CPA to supply its endpoint and API key for that process. Running `agy` directly requires setting those environment variables yourself.
+
+Codex **Session Management → Edit Context (Experimental)** reads messages only after a session is selected.
+Listing and pagination query SQLite, the session index and directory metadata without opening or prefetching rollouts.
+Unindexed sessions are discovered by their standard rollout filenames; missing workspace and provider details load when the editor opens.
+Metadata is collapsed by default, with message-role filters retained. Close the target session before saving; saves modify real local history and create backups.
+Manually renamed files without a session ID in their filename or a database path are not discovered by scanning their contents.
 
 ## Additional Capabilities
 
@@ -199,6 +207,10 @@ and failover without contacting real providers.
 5. Return to **Home**, start the core, then copy the required local endpoint or configure an OAuth/API provider.
 
 ## Upgrading
+
+Behind an enterprise proxy, administrators should install the corporate root CA
+in the OS trust store, not disable TLS validation. See
+[enterprise proxy certificates and regression testing](docs/enterprise-proxy.md).
 
 Every Windows release publishes both the complete ZIP and the legacy `update` ZIP. This keeps in-app updates available to older clients that have not migrated yet, while newer clients use the complete package so the bundled core can be updated too.
 

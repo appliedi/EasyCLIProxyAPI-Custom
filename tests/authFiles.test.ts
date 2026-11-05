@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'bun:test';
 import {
   authFileCooldownResetIndex,
+  countAuthFileTags,
   changedOAuthAuthFileNames,
   dedupeAuthFiles,
+  groupOAuthAccountsByProvider,
   isOAuthCredentialFile,
   normalizeAuthFilePriorityInput,
   normalizeOAuthProvider,
@@ -14,6 +16,15 @@ import {
 } from '../src/services/authFiles';
 
 describe('认证文件列表规范化', () => {
+  it('preserves cleared credential tags instead of restoring stale runtime tags', () => {
+    const disk = { name: 'same.json', source: 'file', tags: [] };
+    const runtime = { name: 'same.json', runtime_only: true, tags: ['old'] };
+    for (const entries of [[disk, runtime], [runtime, disk]]) {
+      expect(dedupeAuthFiles(entries)[0].tags).toEqual([]);
+    }
+    expect(dedupeAuthFiles([{ name: 'same.json', source: 'file' }, runtime])[0].tags).toEqual(['old']);
+  });
+
   it('合并同名的磁盘和运行时记录并优先保留磁盘状态', () => {
     const files = dedupeAuthFiles([
       {
@@ -218,5 +229,43 @@ describe('authentication file priority', () => {
       { name: 'muse-new.json', provider: 'meta', modtime: 2 },
       { name: 'muse-priority.json', provider: 'muse', modtime: 2, priority: 4 },
     ], 'muse')).toEqual(['muse-existing.json', 'muse-new.json']);
+  });
+});
+
+describe('OAuth login account summary', () => {
+  it('groups saved OAuth files by normalized provider and skips runtime or API key entries', () => {
+    const grouped = groupOAuthAccountsByProvider([
+      { name: 'codex-a.json', provider: 'codex', email: 'a@example.com' },
+      { name: 'codex-b.json', provider: 'openai', email: 'b@example.com', disabled: true },
+      { name: 'claude-a.json', type: 'anthropic', label: 'Work' },
+      { name: 'kimi.json', provider: 'kimi' },
+      { name: 'codex-runtime.json', provider: 'codex', runtime_only: true },
+      { name: 'codex-key.json', provider: 'codex', account_type: 'api_key' },
+      { name: 'codex-a.json', provider: 'codex', email: 'a@example.com', runtime_only: true },
+    ]);
+
+    expect(grouped.get('codex')).toEqual([
+      { name: 'codex-a.json', label: 'a@example.com', disabled: false, identities: ['a@example.com'] },
+      { name: 'codex-b.json', label: 'b@example.com', disabled: true, identities: ['b@example.com'] },
+    ]);
+    expect(grouped.get('claude')).toEqual([{ name: 'claude-a.json', label: 'Work', disabled: false, identities: [] }]);
+    expect(grouped.get('kimi')).toEqual([{ name: 'kimi.json', label: 'kimi.json', disabled: false, identities: [] }]);
+  });
+});
+
+describe("credential tag counting", () => {
+  it("counts tags across auth files and ignores empty or malformed tags", () => {
+    const files = [
+      { name: "a.json", tags: ["team", "production"] },
+      { name: "b.json", tags: ["team", "staging", ""] },
+      { name: "c.json", tags: null },
+      { name: "d.json", tags: ["team"] },
+      { name: "e.json" },
+    ];
+    const counts = countAuthFileTags(files);
+    expect(counts.get("team")).toBe(3);
+    expect(counts.get("production")).toBe(1);
+    expect(counts.get("staging")).toBe(1);
+    expect(counts.get("nonexistent")).toBeUndefined();
   });
 });

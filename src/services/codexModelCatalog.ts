@@ -1,3 +1,4 @@
+import { invokeAgentCommand as invoke } from './agents';
 import type { MessageKey } from '../i18n/resources';
 
 export const codexReasoningEfforts = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
@@ -21,6 +22,7 @@ export type CodexModelConfiguration = {
   input_modalities: Array<'text' | 'image'>;
   visibility: 'list' | 'hide' | 'none';
   supports_parallel_tool_calls: boolean;
+  supports_search_tool: boolean;
 };
 
 export type CodexCatalogEditorModel = {
@@ -33,9 +35,30 @@ export type CodexCatalogEditorModel = {
 };
 
 export type CodexCatalogEditorSnapshot = {
+  defaultAutoReviewModel?: string | null;
+  defaultOrder?: string[];
   revision: string;
   models: CodexCatalogEditorModel[];
 };
+
+export function moveCodexModel<T>(models: T[], from: number, to: number): T[] {
+  if (from === to || from < 0 || to < 0 || from >= models.length || to >= models.length) return models;
+  const next = [...models];
+  const [moved] = next.splice(from, 1);
+  next.splice(to, 0, moved);
+  return next;
+}
+
+export function hasCodexModelOrderChanged(models: Array<{ slug: string }>, baseline: Array<{ slug: string }>): boolean {
+  return models.length !== baseline.length || models.some((model, index) => model.slug !== baseline[index]?.slug);
+}
+
+export function orderCodexModelsBySlugs<T extends { slug: string }>(models: T[], order: string[]): T[] {
+  if (!order.length) return models;
+  const rank = new Map(order.map((slug, index) => [slug, index]));
+  return [...models].sort((left, right) =>
+    (rank.get(left.slug) ?? Number.MAX_SAFE_INTEGER) - (rank.get(right.slug) ?? Number.MAX_SAFE_INTEGER));
+}
 
 export function codexContextSourceHint(model: CodexCatalogEditorModel): MessageKey {
   if (model.configuration.context_window !== model.defaults.context_window
@@ -69,6 +92,7 @@ export function sameCodexModelConfiguration(left: CodexModelConfiguration, right
     && left.default_reasoning_level === right.default_reasoning_level
     && left.visibility === right.visibility
     && left.supports_parallel_tool_calls === right.supports_parallel_tool_calls
+    && left.supports_search_tool === right.supports_search_tool
     && left.input_modalities.join(',') === right.input_modalities.join(',')
     && left.supported_reasoning_levels.length === right.supported_reasoning_levels.length
     && left.supported_reasoning_levels.every((level, index) => level.effort === right.supported_reasoning_levels[index].effort
@@ -118,3 +142,9 @@ export function validateCodexModelConfiguration(configuration: CodexModelConfigu
   if (!configuration.input_modalities.length) return 'agents.catalog.invalidModalities';
   return null;
 }
+
+export const getCodexModelCatalogEditor = (): Promise<CodexCatalogEditorSnapshot> =>
+  invoke<CodexCatalogEditorSnapshot>('get_codex_model_catalog_editor');
+
+export const saveCodexModelCatalogEditor = (args: { request: { revision: string; review_model?: { model: string | null }; models: { slug: string; configuration: CodexModelConfiguration; }[]; }; }): Promise<CodexCatalogEditorSaveResult> =>
+  invoke<CodexCatalogEditorSaveResult>('save_codex_model_catalog_editor', args);

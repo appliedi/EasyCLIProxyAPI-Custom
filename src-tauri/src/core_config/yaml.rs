@@ -36,6 +36,127 @@ pub(crate) fn merge_core_config_for_start(
     Ok(config_path)
 }
 
+/// Codex, Claude, Gemini and the other native key types have no disabled field.
+/// OpenAI-compatible providers do. Drop the illegal field and keep the key
+/// disabled through excluded-models: ["*"], which is how the enable switch works.
+pub(crate) fn sanitize_unsupported_provider_disabled_yaml(content: &str) -> Result<String, String> {
+    let original = serde_norway::from_str::<serde_norway::Value>(content)
+        .map_err(|error| format!("Failed to parse kernel configuration: {error}"))?;
+    let mut updated = original.clone();
+    if !sanitize_unsupported_provider_disabled(&mut updated) {
+        return Ok(content.to_string());
+    }
+    let file = content
+        .parse::<yaml_edit::YamlFile>()
+        .map_err(|error| format!("Failed to parse editable kernel configuration: {error}"))?;
+    let root = file
+        .document()
+        .and_then(|document| document.as_mapping())
+        .ok_or_else(|| "Kernel configuration root must be a YAML mapping".to_string())?;
+    let mut removed = Vec::new();
+    collect_removed_yaml_paths(&original, &updated, &mut Vec::new(), &mut removed);
+    for path in removed {
+        remove_yaml_edit_path(&root, &path);
+    }
+    let prepared = file.to_string();
+    let before = serde_norway::from_str::<serde_norway::Value>(&prepared)
+        .map_err(|error| format!("Failed to parse repaired kernel configuration: {error}"))?;
+    render_yaml_value_changes(&prepared, &before, &updated)
+}
+
+fn sanitize_unsupported_provider_disabled(document: &mut serde_norway::Value) -> bool {
+    let Some(keys) = document
+        .as_mapping_mut()
+        .and_then(|root| root.get_mut(yaml_key("api-keys")))
+        .and_then(serde_norway::Value::as_mapping_mut)
+    else {
+        return false;
+    };
+    let mut changed = false;
+    for (name, groups) in keys.iter_mut() {
+        if name.as_str() == Some("openai-compatibility") {
+            continue;
+        }
+        let Some(groups) = groups.as_sequence_mut() else {
+            continue;
+        };
+        for group in groups {
+            changed |= strip_disabled_field(group);
+            let Some(entries) = group
+                .as_mapping_mut()
+                .and_then(|group| group.get_mut(yaml_key("keys")))
+                .and_then(serde_norway::Value::as_sequence_mut)
+            else {
+                continue;
+            };
+            for entry in entries {
+                changed |= strip_disabled_field(entry);
+            }
+        }
+    }
+    changed
+}
+
+fn strip_disabled_field(value: &mut serde_norway::Value) -> bool {
+    let Some(mapping) = value.as_mapping_mut() else {
+        return false;
+    };
+    let Some(disabled) = mapping.remove(yaml_key("disabled")) else {
+        return false;
+    };
+    if disabled.as_bool() == Some(true) {
+        let excluded = mapping
+            .entry(yaml_key("excluded-models"))
+            .or_insert_with(|| serde_norway::Value::Sequence(Vec::new()));
+        match excluded {
+            serde_norway::Value::Sequence(models) => {
+                let present = models.iter().any(|model| model.as_str().is_some_and(|model| model.trim() == "*"));
+                if !present {
+                    models.push(serde_norway::Value::String("*".to_string()));
+                }
+            }
+            _ => {
+                *excluded = serde_norway::Value::Sequence(vec![serde_norway::Value::String("*".to_string())]);
+            }
+        }
+    }
+    true
+}
+
+fn collect_removed_yaml_paths(
+    before: &serde_norway::Value,
+    after: &serde_norway::Value,
+    path: &mut Vec<String>,
+    removed: &mut Vec<Vec<String>>,
+) {
+    let (Some(before), Some(after)) = (before.as_mapping(), after.as_mapping()) else {
+        return;
+    };
+    for (key, value) in before {
+        let Some(key) = key.as_str() else { continue };
+        path.push(key.to_string());
+        if let Some(next) = after.get(yaml_key(key)) {
+            collect_removed_yaml_paths(value, next, path, removed);
+        } else {
+            removed.push(path.clone());
+        }
+        path.pop();
+    }
+}
+
+fn remove_yaml_edit_path(mapping: &yaml_edit::Mapping, path: &[String]) {
+    let Some((key, rest)) = path.split_first() else {
+        return;
+    };
+    if rest.is_empty() {
+        mapping.remove(key.as_str());
+    } else if let Some(node) = mapping.get(key.as_str()) {
+        if let Some(child) = node.as_mapping() {
+            remove_yaml_edit_path(&child, rest);
+        }
+    }
+}
+
 pub(crate) fn patch_core_network_settings(config: &GuiConfigFile) -> Result<(), String> {
     let _config_guard = lock_core_config_file()?;
     let install_dir = core_install_dir()?;
@@ -1648,6 +1769,7 @@ pub(crate) fn core_config_settings_from_value(
         })
         .transpose()?
         .unwrap_or(8317);
+    let auth_dir_configured = v8_or_legacy(&["oauth", "auth-dir"], &["auth-dir"]).is_some();
     let auth_dir = v8_or_legacy(&["oauth", "auth-dir"], &["auth-dir"])
         .map(|value| {
             value
@@ -1730,10 +1852,15 @@ pub(crate) fn core_config_settings_from_value(
         })
         .transpose()?
         .unwrap_or(false);
-    let api_keys = extract_core_api_keys(root)?
-        .into_iter()
+    let declared_api_keys = extract_core_api_keys(root)?;
+    let api_keys: Vec<String> = declared_api_keys
+        .iter()
         .filter(|api_key| !is_example_core_api_key(api_key))
+        .cloned()
         .collect();
+    // A list that holds only the example placeholders counts as not configured.
+    let api_keys_configured = !api_keys.is_empty()
+        || (declared_api_keys.is_empty() && core_api_keys_declared(root));
     let management_secret_key = extract_core_management_secret_key(root)?;
     let plugins_enabled = nested_yaml_value(root, &["plugins", "enabled"])
         .map(|value| {
@@ -1742,7 +1869,7 @@ pub(crate) fn core_config_settings_from_value(
                 .ok_or_else(|| "plugins.enabled must be a boolean".to_string())
         })
         .transpose()?
-        .unwrap_or(false);
+        .unwrap_or(true);
     let routing_strategy = nested_yaml_value(root, &["routing", "strategy"])
         .map(|value| {
             value
@@ -1830,6 +1957,8 @@ pub(crate) fn core_config_settings_from_value(
         port,
         auth_dir,
         api_keys,
+        auth_dir_configured,
+        api_keys_configured,
         management_secret_configured: management_secret_key
             .as_deref()
             .is_some_and(|value| !value.is_empty()),
@@ -1853,6 +1982,21 @@ pub(crate) fn core_config_settings_from_value(
         streaming_bootstrap_retries,
         management_secret_key,
     })
+}
+
+fn core_api_keys_declared(root: &serde_norway::Mapping) -> bool {
+    if nested_yaml_value(root, &["access", "api-keys"]).is_some() {
+        return true;
+    }
+    if let Some(value) = yaml_mapping_value(root, "api-keys") {
+        return !value.is_mapping();
+    }
+    nested_yaml_value(root, &["auth", "providers", "config-api-key"])
+        .and_then(serde_norway::Value::as_mapping)
+        .is_some_and(|legacy| {
+            yaml_mapping_value(legacy, "api-key-entries").is_some()
+                || yaml_mapping_value(legacy, "api-keys").is_some()
+        })
 }
 
 pub(crate) fn extract_core_api_keys(root: &serde_norway::Mapping) -> Result<Vec<String>, String> {

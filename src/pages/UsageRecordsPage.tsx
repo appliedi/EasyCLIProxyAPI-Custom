@@ -1,13 +1,44 @@
+import { pollWhileActive, windowActivity } from '../services/windowActivity';
+import { Notice } from '../components/Notice';
+import { EmptyState } from '../components/EmptyState';
+import { Checkbox } from '../components/Checkbox';
+import { onUsageRecordsUpdated } from '../services/events';
+import {
+  getUsageEvents,
+  getUsageCollectorStatus,
+  getUsageAnalysis,
+  getUsageOverview,
+  getUsagePricing,
+  getUsageStorageSettings,
+  saveUsageStorageSettings,
+  shrinkUsageDatabase,
+  repairUsageCacheRecords,
+  saveUsageModelPrice,
+  deleteUsageModelPrice,
+  previewUsageModelPrices,
+  applyUsageModelPrices,
+} from '../services/usage';
+import type {
+  CollectorStatus,
+  UsageQuery,
+  UsageOverview,
+  TimelinePoint,
+  UsagePricing,
+  ModelPrice,
+  UsageStorageSettings,
+  UsageRepairResult,
+  ModelPriceSyncPreview,
+} from '../services/usage';
+import { usagePreferences } from '../services/usagePreferences';
 import { useConfirmation } from '../components/ConfirmationDialog';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
 import {
   Activity,
   Database,
   Gauge,
   Pencil,
   RefreshCw,
+  Search,
   Trash2,
   TriangleAlert,
   Wallet,
@@ -15,10 +46,11 @@ import {
   X,
 } from 'lucide-react';
 import { getCurrentLocale, useI18n } from '../i18n';
+import { usePrivacyMask } from '../privacy';
 import { MessageNotice, FloatingNotice, useAppNotice } from '../appNotice';
 import { calculateTokenComposition } from '../services/usageMetrics';
 import { formatDuration, formatUsageNumber } from '../services/usageNumber';
-import { handleHorizontalTabKey } from '../components/tabKeyboardNavigation';
+import { Tabs } from '../components/Tabs';
 import {
   OTHER_TREND_MODEL_KEY,
   buildUsageTrendSeries,
@@ -32,109 +64,48 @@ import {
   trendTimeAxisTicks,
   trendTimePosition,
   stackModelTokens,
-  type UsageTimelinePoint,
 } from '../services/usageTrend';
 import { createRefreshScheduler } from '../services/refreshScheduler';
 import { usageViewScopeKey } from '../services/usageViewScope';
 import { EventsView, type UsageEventPage } from './UsageEventsView';
+import { SelectMenu } from '../components/SelectMenu';
+import { Dialog } from '../components/Dialog';
 import { UsageAnalysisView, type UsageAnalysis, type UsageCategory } from './UsageAnalysisView';
+import { Select } from '../components/Select';
+import { AgentUsageView } from './AgentUsageView';
+import {
+  clearAgentUsageHistory,
+  getAgentUsageStorage,
+  syncAgentUsage,
+  type AgentUsageStorage,
+} from '../services/agentUsage';
+import {
+  AGENT_USAGE_REFRESH_INTERVALS,
+  loadAgentUsageRefreshInterval,
+  saveAgentUsageRefreshInterval,
+  type AgentUsageRefreshInterval,
+} from '../services/agentUsagePreferences';
 
-type UsageTab = 'overview' | 'analysis' | 'events' | 'pricing' | 'data-management';
+const AGENT_INTERVAL_LABELS = {
+  0: 'usage.agentUsage.refreshFrequency.off',
+  300000: 'usage.agentUsage.refreshFrequency.5m',
+  900000: 'usage.agentUsage.refreshFrequency.15m',
+  1800000: 'usage.agentUsage.refreshFrequency.30m',
+  3600000: 'usage.agentUsage.refreshFrequency.1h',
+} as const;
+
+type UsageTab = 'overview' | 'live-routing' | 'analysis' | 'events' | 'pricing' | 'agent-usage' | 'data-management';
 type UsageRange = '4h' | '24h' | 'today' | '7d' | '30d' | 'all' | 'custom';
 
-const USAGE_TABS: readonly UsageTab[] = ['overview', 'analysis', 'events', 'pricing', 'data-management'];
-
-type CollectorStatus = {
-  state: 'waiting-core' | 'collecting' | 'error';
-  message: string;
-  lastCollectedAt: string | null;
-  totalRecords: number;
-};
-
-type TimelinePoint = UsageTimelinePoint;
-
-type UsageOverview = {
-  totalRequests: number;
-  successCount: number;
-  failureCount: number;
-  canceledCount: number;
-  successRate: number;
-  inputTokens: number;
-  outputTokens: number;
-  reasoningTokens: number;
-  cacheReadTokens: number;
-  cacheCreationTokens: number;
-  totalTokens: number;
-  rpm: number;
-  tpm: number;
-  tps: number;
-  tpsSampleCount: number;
-  averageLatencyMs: number;
-  cacheHitRate: number;
-  estimatedCost: number;
-  pricedRequests: number;
-  timeline: TimelinePoint[];
-};
-
-type ModelPrice = {
-  model: string;
-  prompt: number;
-  completion: number;
-  cacheRead: number;
-  cacheCreation: number;
-  promptConfigured: boolean;
-  completionConfigured: boolean;
-  cacheReadConfigured: boolean;
-  cacheCreationConfigured: boolean;
-  source: string;
-  sourceModelId: string;
-  updatedAtMs: number;
-};
-
-type UsagePriceRow = {
-  model: string;
-  requests: number;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheCreationTokens: number;
-  totalTokens: number;
-  estimatedCost: number;
-  price: ModelPrice | null;
-};
-
-type UsagePricing = {
-  rows: UsagePriceRow[];
-  totalCost: number;
-  totalRequests: number;
-  pricedRequests: number;
-  savedPrices: number;
-};
-
-type UsageRepairResult = {
-  scanned: number;
-  repaired: number;
-  deleted: number;
-  backupPath: string | null;
-};
-
-type UsageStorageSettings = {
-  maxDatabaseSizeMb: number;
-  databaseSizeBytes: number;
-  totalRecords: number;
-  deletedRecords: number;
-};
-
-type ModelPriceSyncResult = {
-  imported: number;
-};
-
-type ModelPriceSyncPreview = {
-  source: string;
-  sourceUrl: string;
-  matches: ModelPrice[];
-  unmatched: string[];
-};
+const USAGE_TABS = [
+  { value: 'overview', labelKey: 'usage.tab.overview' },
+  { value: 'live-routing', labelKey: 'routing.live' },
+  { value: 'analysis', labelKey: 'usage.tab.analysis' },
+  { value: 'events', labelKey: 'usage.tab.events' },
+  { value: 'pricing', labelKey: 'usage.tab.pricing' },
+  { value: 'agent-usage', labelKey: 'usage.tab.agentUsage' },
+  { value: 'data-management', labelKey: 'usage.tab.dataManagement' },
+] as const;
 
 type SyncPriceDraft = {
   selected: boolean;
@@ -145,19 +116,6 @@ type SyncPriceDraft = {
   cacheCreation: string;
 };
 
-type UsageQuery = {
-  start?: string;
-  end?: string;
-  model?: string;
-  provider?: string;
-  source?: string;
-  api_key_hash?: string;
-  failed?: boolean;
-  canceled?: boolean;
-  page?: number;
-  page_size?: number;
-};
-
 const TAB_KEY = 'cpa-gui.usage-records-tab.v1';
 const RANGE_KEY = 'cpa-gui.usage-records-range.v1';
 const PAGE_SIZE_KEY = 'cpa-gui.usage-events-page-size.v1';
@@ -165,18 +123,40 @@ const EVENT_PAGE_SIZES = [20, 50, 100, 200] as const;
 
 const loadPageSize = (): number => {
   try {
-    const saved = Number(localStorage.getItem(PAGE_SIZE_KEY));
+    const saved = Number(usagePreferences.getItem(PAGE_SIZE_KEY));
     return EVENT_PAGE_SIZES.includes(saved as (typeof EVENT_PAGE_SIZES)[number]) ? saved : 50;
   } catch {
     return 50;
   }
 };
 const emptyAnalysis: UsageAnalysis = { models: [], providers: [], sources: [], apiKeys: [] };
+const emptyOverview: UsageOverview = {
+  totalRequests: 0,
+  successCount: 0,
+  failureCount: 0,
+  canceledCount: 0,
+  successRate: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  reasoningTokens: 0,
+  cacheReadTokens: 0,
+  cacheCreationTokens: 0,
+  totalTokens: 0,
+  rpm: 0,
+  tpm: 0,
+  tps: 0,
+  tpsSampleCount: 0,
+  averageLatencyMs: 0,
+  cacheHitRate: 0,
+  estimatedCost: 0,
+  pricedRequests: 0,
+  timeline: [],
+};
 
 const loadTab = (): UsageTab => {
   try {
-    const saved = localStorage.getItem(TAB_KEY);
-    return saved === 'analysis' || saved === 'events' || saved === 'pricing' || saved === 'data-management'
+    const saved = usagePreferences.getItem(TAB_KEY);
+    return saved === 'live-routing' || saved === 'analysis' || saved === 'events' || saved === 'pricing' || saved === 'agent-usage' || saved === 'data-management'
       ? saved
       : 'overview';
   } catch {
@@ -186,7 +166,7 @@ const loadTab = (): UsageTab => {
 
 const loadRange = (): UsageRange => {
   try {
-    const saved = localStorage.getItem(RANGE_KEY) as UsageRange | null;
+    const saved = usagePreferences.getItem(RANGE_KEY) as UsageRange | null;
     return ['4h', '24h', 'today', '7d', '30d', 'all', 'custom'].includes(saved ?? '')
       ? (saved as UsageRange)
       : '24h';
@@ -249,12 +229,13 @@ const filterOptions = (items: UsageCategory[]) => items.filter((item) => item.ke
 
 export function UsageRecordsPage() {
   const { t } = useI18n();
+  const privacy = usePrivacyMask();
   const [activeTab, setActiveTab] = useState<UsageTab>(loadTab);
   const [range, setRange] = useState<UsageRange>(loadRange);
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
   const [model, setModel] = useState('');
-  const [provider, setProvider] = useState('');
+
   const [source, setSource] = useState('');
   const [apiKeyHash, setApiKeyHash] = useState('');
   const [result, setResult] = useState('all');
@@ -267,30 +248,33 @@ export function UsageRecordsPage() {
   const [optionsAnalysis, setOptionsAnalysis] = useState<UsageAnalysis>(emptyAnalysis);
   const [events, setEvents] = useState<UsageEventPage | null>(null);
   const [pricing, setPricing] = useState<UsagePricing | null>(null);
+  const [agentUsageRefreshKey, setAgentUsageRefreshKey] = useState(0);
+  const [agentUsageLoading, setAgentUsageLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [loadedScopeKey, setLoadedScopeKey] = useState('');
+  const loadedFilterScopeKeyRef = useRef('');
+  const optionsLoadedAtRef = useRef(0);
   const requestIdRef = useRef(0);
   const schedulerRef = useRef<ReturnType<typeof createRefreshScheduler> | null>(null);
-  if (!schedulerRef.current) schedulerRef.current = createRefreshScheduler(250);
+  if (!schedulerRef.current) schedulerRef.current = createRefreshScheduler(1_000);
 
   useEffect(() => {
     try {
-      localStorage.setItem(TAB_KEY, activeTab);
+      usagePreferences.setItem(TAB_KEY, activeTab);
     } catch {
     }
   }, [activeTab]);
 
   useEffect(() => {
     try {
-      localStorage.setItem(RANGE_KEY, range);
+      usagePreferences.setItem(RANGE_KEY, range);
     } catch {
     }
   }, [range]);
 
   useEffect(() => {
     try {
-      localStorage.setItem(PAGE_SIZE_KEY, String(pageSize));
+      usagePreferences.setItem(PAGE_SIZE_KEY, String(pageSize));
     } catch {
     }
   }, [pageSize]);
@@ -302,72 +286,74 @@ export function UsageRecordsPage() {
       query: {
         ...nextTimeQuery,
         model: model || undefined,
-        provider: provider || undefined,
-        source: source || undefined,
+        upstream: source || undefined,
         api_key_hash: apiKeyHash || undefined,
         failed: result === 'failed' ? true : result === 'success' ? false : undefined,
         canceled: result === 'canceled' ? true : result === 'failed' ? false : undefined,
       } satisfies UsageQuery,
     };
-  }, [apiKeyHash, customEnd, customStart, model, provider, range, result, source]);
+  }, [apiKeyHash, customEnd, customStart, model, range, result, source]);
 
-  const scopeKey = useMemo(() => usageViewScopeKey({
-    tab: activeTab,
+  const filterScopeKey = useMemo(() => usageViewScopeKey({
+    tab: 'overview',
     range,
     customStart,
     customEnd,
-    model,
-    provider,
-    source,
-    apiKeyHash,
-    result,
-    page,
-    pageSize,
-  }), [
-    activeTab,
-    apiKeyHash,
-    customEnd,
-    customStart,
-    model,
-    page,
-    pageSize,
-    provider,
-    range,
-    result,
-    source,
-  ]);
+    model: '',
+    provider: '',
+    source: '',
+    apiKeyHash: '',
+    result: 'all',
+    page: 1,
+    pageSize: 1,
+  }), [customEnd, customStart, range]);
 
   const executeLoadData = useCallback(
     async (quiet = false) => {
       const requestId = ++requestIdRef.current;
       const { timeQuery, query } = buildQueries();
       if (!quiet) setLoading(true);
+      if (activeTab === 'agent-usage') {
+        setLoading(false);
+        try {
+          const nextStatus = await getUsageCollectorStatus();
+          if (requestId === requestIdRef.current) setStatus(nextStatus);
+        } catch {
+        }
+        return;
+      }
       try {
-        const statusRequest = invoke<CollectorStatus>('get_usage_collector_status');
-        const optionsRequest = invoke<UsageAnalysis>('get_usage_analysis', { query: timeQuery });
-        if (activeTab === 'overview') {
+        const statusRequest = getUsageCollectorStatus();
+        const filtersChanged = loadedFilterScopeKeyRef.current !== filterScopeKey;
+        // Refresh explicitly and periodically: a fixed time range can still gain
+        // new keys, and configured remarks can change without new usage records.
+        const refreshOptions = filtersChanged || !quiet || Date.now() - optionsLoadedAtRef.current >= 30_000;
+        const optionsRequest = refreshOptions
+          ? getUsageAnalysis({ query: timeQuery })
+          : Promise.resolve(null);
+        if (activeTab === 'overview' || activeTab === 'live-routing') {
           const [nextStatus, nextOptions, nextOverview] = await Promise.all([
             statusRequest,
             optionsRequest,
-            invoke<UsageOverview>('get_usage_overview', { query }),
+            getUsageOverview({ query }),
           ]);
           if (requestId !== requestIdRef.current) return;
           setStatus(nextStatus);
-          setOptionsAnalysis(nextOptions);
+          if (nextOptions) setOptionsAnalysis(nextOptions);
           setOverview(nextOverview);
           setOverviewRange(timeQuery);
         } else if (activeTab === 'analysis') {
           const [nextStatus, nextOptions, nextOverview, nextAnalysis] = await Promise.all([
             statusRequest,
             optionsRequest,
-            invoke<UsageOverview>('get_usage_overview', { query }),
-            model || provider || source || apiKeyHash || result !== 'all'
-              ? invoke<UsageAnalysis>('get_usage_analysis', { query })
-              : optionsRequest,
+            getUsageOverview({ query }),
+            model || source || apiKeyHash || result !== 'all' || !refreshOptions
+              ? getUsageAnalysis({ query })
+              : optionsRequest.then((analysis) => analysis ?? emptyAnalysis),
           ]);
           if (requestId !== requestIdRef.current) return;
           setStatus(nextStatus);
-          setOptionsAnalysis(nextOptions);
+          if (nextOptions) setOptionsAnalysis(nextOptions);
           setOverview(nextOverview);
           setOverviewRange(timeQuery);
           setAnalysis(nextAnalysis);
@@ -375,31 +361,32 @@ export function UsageRecordsPage() {
           const [nextStatus, nextOptions, nextEvents] = await Promise.all([
             statusRequest,
             optionsRequest,
-            invoke<UsageEventPage>('get_usage_events', {
+            getUsageEvents({
               query: { ...query, page, page_size: pageSize },
             }),
           ]);
           if (requestId !== requestIdRef.current) return;
           setStatus(nextStatus);
-          setOptionsAnalysis(nextOptions);
+          if (nextOptions) setOptionsAnalysis(nextOptions);
           setEvents(nextEvents);
         } else if (activeTab === 'pricing') {
           const [nextStatus, nextOptions, nextPricing] = await Promise.all([
             statusRequest,
             optionsRequest,
-            invoke<UsagePricing>('get_usage_pricing', { query }),
+            getUsagePricing({ query }),
           ]);
           if (requestId !== requestIdRef.current) return;
           setStatus(nextStatus);
-          setOptionsAnalysis(nextOptions);
+          if (nextOptions) setOptionsAnalysis(nextOptions);
           setPricing(nextPricing);
         } else {
           const [nextStatus, nextOptions] = await Promise.all([statusRequest, optionsRequest]);
           if (requestId !== requestIdRef.current) return;
           setStatus(nextStatus);
-          setOptionsAnalysis(nextOptions);
+          if (nextOptions) setOptionsAnalysis(nextOptions);
         }
-        setLoadedScopeKey(scopeKey);
+        if (filtersChanged) loadedFilterScopeKeyRef.current = filterScopeKey;
+        if (refreshOptions) optionsLoadedAtRef.current = Date.now();
         setError('');
       } catch (requestError) {
         if (requestId === requestIdRef.current) setError(String(requestError));
@@ -407,7 +394,7 @@ export function UsageRecordsPage() {
         if (requestId === requestIdRef.current) setLoading(false);
       }
     },
-    [activeTab, buildQueries, page, pageSize, model, provider, source, apiKeyHash, result, scopeKey]
+    [activeTab, buildQueries, filterScopeKey, page, pageSize, model, source, apiKeyHash, result]
   );
 
   const loadData = useCallback(
@@ -420,7 +407,6 @@ export function UsageRecordsPage() {
   );
 
   useEffect(() => {
-    void loadData();
     return () => {
       ++requestIdRef.current;
       schedulerRef.current?.cancelPending();
@@ -429,31 +415,26 @@ export function UsageRecordsPage() {
 
   useEffect(() => {
     let disposed = false;
+    let initial = true;
     let unlisten: (() => void) | null = null;
     const refresh = () => {
-      // WebView2 may classify an unfocused or occluded window on another monitor
-      // as hidden. Keep usage refreshes independent of Page Visibility so both
-      // record events and the fallback poll continue to update the current view.
-      if (!disposed) void loadData(true, true);
+      // #493: coalesce record events only while the native window is visible.
+      if (!disposed && windowActivity.active()) {
+        void loadData(!initial, false);
+        initial = false;
+      }
     };
-    listen('usage-records-updated', refresh)
+    onUsageRecordsUpdated(refresh)
       .then((stop) => {
         if (disposed) stop();
         else unlisten = stop;
       })
       .catch(() => {});
-    const timer = window.setInterval(refresh, 1_000);
-    const refreshWhenVisible = () => {
-      if (!document.hidden) refresh();
-    };
-    window.addEventListener('focus', refresh);
-    document.addEventListener('visibilitychange', refreshWhenVisible);
+    const stopPolling = pollWhileActive(refresh, 10_000, () => schedulerRef.current?.cancelPending());
     return () => {
       disposed = true;
       unlisten?.();
-      window.clearInterval(timer);
-      window.removeEventListener('focus', refresh);
-      document.removeEventListener('visibilitychange', refreshWhenVisible);
+      stopPolling();
     };
   }, [loadData]);
 
@@ -463,120 +444,79 @@ export function UsageRecordsPage() {
   };
 
   const collectorTone = status?.state === 'error' ? 'error' : status?.state === 'collecting' ? 'success' : '';
-  const hasCurrentSnapshot = loadedScopeKey === scopeKey;
   const showInitialLoading =
     activeTab !== 'data-management' &&
+    activeTab !== 'agent-usage' &&
     !error &&
-    (!hasCurrentSnapshot ||
-      (loading &&
-        ((activeTab === 'overview' && !overview) ||
-          (activeTab === 'analysis' && !overview) ||
-          (activeTab === 'events' && !events) ||
-          (activeTab === 'pricing' && !pricing))));
+    loading &&
+    ((activeTab === 'overview' && !overview) ||
+      (activeTab === 'analysis' && !overview && !analysis) ||
+      (activeTab === 'events' && !events) ||
+      (activeTab === 'pricing' && !pricing));
 
-  const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, tab: UsageTab) => {
-    handleHorizontalTabKey(
-      event,
-      USAGE_TABS,
-      tab,
-      setActiveTab,
-      (next) => document.getElementById(`usage-tab-${next}`),
-    );
-  };
-
+  const modelOptions = filterOptions(optionsAnalysis.models);
+  const sourceOptions = [...(optionsAnalysis.upstreams ?? [])].sort((a, b) => a.label.localeCompare(b.label));
+  const keyOptions = filterOptions(optionsAnalysis.apiKeys);
   const filterPanel = (
-    <section className="panel usage-filter-panel">
+    <section className="panel surface-bare usage-filter-panel">
       <div className="usage-filter-row">
         <div className="usage-filter-group">
-          <label className="usage-filter-item">
-            <span className="sr-only">{t('usage.filter.timeRange')}</span>
-            <select
+          <div className="usage-filter-item">
+            <SelectMenu
               value={range}
-              onChange={(event) => {
-                setRange(event.currentTarget.value as UsageRange);
+              ariaLabel={t('usage.filter.timeRange')}
+              onChange={(value) => {
+                setRange(value as UsageRange);
                 setPage(1);
               }}
-              aria-label={t('usage.filter.timeRange')}
-            >
-              <option value="4h">{t('usage.range.4h')}</option>
-              <option value="24h">{t('usage.range.24h')}</option>
-              <option value="today">{t('usage.range.today')}</option>
-              <option value="7d">{t('usage.range.7d')}</option>
-              <option value="30d">{t('usage.range.30d')}</option>
-              <option value="all">{t('usage.range.all')}</option>
-              <option value="custom">{t('usage.range.custom')}</option>
-            </select>
-          </label>
-
-          <label className="usage-filter-item">
-            <span className="sr-only">{t('usage.filter.model')}</span>
-            <select
+              options={[
+                { value: '4h', label: t('usage.range.4h') },
+                { value: '24h', label: t('usage.range.24h') },
+                { value: 'today', label: t('usage.range.today') },
+                { value: '7d', label: t('usage.range.7d') },
+                { value: '30d', label: t('usage.range.30d') },
+                { value: 'all', label: t('usage.range.all') },
+                { value: 'custom', label: t('usage.range.custom') },
+              ]}
+            />
+          </div>
+          <div className="usage-filter-item">
+            <SelectMenu
               value={model}
-              onChange={(event) => changeFilter(setModel, event.currentTarget.value)}
-              aria-label={t('usage.filter.model')}
-            >
-              <option value="">{t('usage.filter.allModels')}</option>
-              {filterOptions(optionsAnalysis.models).map((item) => (
-                <option value={item.key} key={item.key}>{item.label}</option>
-              ))}
-            </select>
-          </label>
-
-          <label className="usage-filter-item">
-            <span className="sr-only">{t('usage.column.provider')}</span>
-            <select
-              value={provider}
-              onChange={(event) => changeFilter(setProvider, event.currentTarget.value)}
-              aria-label={t('usage.column.provider')}
-            >
-              <option value="">{t('usage.filter.allProviders')}</option>
-              {filterOptions(optionsAnalysis.providers).map((item) => (
-                <option value={item.key} key={item.key}>{item.label}</option>
-              ))}
-            </select>
-          </label>
-
-          <label className="usage-filter-item">
-            <span className="sr-only">{t('usage.filter.source')}</span>
-            <select
+              ariaLabel={t('usage.filter.model')}
+              onChange={(value) => changeFilter(setModel, value)}
+              options={[{ value: '', label: t('usage.filter.allModels') }, ...modelOptions.map((item) => ({ value: item.key, label: item.label }))]}
+            />
+          </div>
+          <div className="usage-filter-item">
+            <SelectMenu
               value={source}
-              onChange={(event) => changeFilter(setSource, event.currentTarget.value)}
-              aria-label={t('usage.filter.source')}
-            >
-              <option value="">{t('usage.filter.allSources')}</option>
-              {filterOptions(optionsAnalysis.sources).map((item) => (
-                <option value={item.key} key={item.key}>{item.label}</option>
-              ))}
-            </select>
-          </label>
-
-          <label className="usage-filter-item">
-            <span className="sr-only">{t('apiAccess.field.key')}</span>
-            <select
+              ariaLabel={t('usage.filter.source')}
+              onChange={(value) => changeFilter(setSource, value)}
+              options={[{ value: '', label: t('usage.filter.allSources') }, ...sourceOptions.map((item) => ({ value: item.key, label: privacy.text(item.label) }))]}
+            />
+          </div>
+          <div className="usage-filter-item">
+            <SelectMenu
               value={apiKeyHash}
-              onChange={(event) => changeFilter(setApiKeyHash, event.currentTarget.value)}
-              aria-label={t('apiAccess.field.key')}
-            >
-              <option value="">{t('usage.filter.allKeys')}</option>
-              {filterOptions(optionsAnalysis.apiKeys).map((item) => (
-                <option value={item.key} key={item.key}>{item.label}</option>
-              ))}
-            </select>
-          </label>
-
-          <label className="usage-filter-item">
-            <span className="sr-only">{t('usage.filter.result')}</span>
-            <select
+              ariaLabel={t('usage.column.key')}
+              onChange={(value) => changeFilter(setApiKeyHash, value)}
+              options={[{ value: '', label: t('usage.filter.allKeys') }, ...keyOptions.map((item) => ({ value: item.key, label: item.label }))]}
+            />
+          </div>
+          <div className="usage-filter-item">
+            <SelectMenu
               value={result}
-              onChange={(event) => changeFilter(setResult, event.currentTarget.value)}
-              aria-label={t('usage.filter.result')}
-            >
-              <option value="all">{t('usage.filter.allResults')}</option>
-              <option value="success">{t('usage.result.success')}</option>
-              <option value="failed">{t('usage.result.failed')}</option>
-              <option value="canceled">{t('usage.result.canceled')}</option>
-            </select>
-          </label>
+              ariaLabel={t('usage.filter.result')}
+              onChange={(value) => changeFilter(setResult, value)}
+              options={[
+                { value: 'all', label: t('usage.filter.allResults') },
+                { value: 'success', label: t('usage.result.success') },
+                { value: 'failed', label: t('usage.result.failed') },
+                { value: 'canceled', label: t('usage.result.canceled') },
+              ]}
+            />
+          </div>
         </div>
       </div>
 
@@ -607,73 +547,8 @@ export function UsageRecordsPage() {
       <div className="usage-topbar">
         <div className="usage-page-navigation">
           <h1 className="sr-only">{t('usage.title')}</h1>
-          <div className="usage-tabs" role="tablist" aria-label={t('usage.pageLabel')}>
-          <button
-            type="button"
-            id="usage-tab-overview"
-            role="tab"
-            className={activeTab === 'overview' ? 'active' : ''}
-            aria-selected={activeTab === 'overview'}
-            aria-controls="usage-tab-panel"
-            tabIndex={activeTab === 'overview' ? 0 : -1}
-            onClick={() => setActiveTab('overview')}
-            onKeyDown={(event) => handleTabKeyDown(event, 'overview')}
-          >
-            <span>{t('usage.tab.overview')}</span>
-          </button>
-          <button
-            type="button"
-            id="usage-tab-analysis"
-            role="tab"
-            className={activeTab === 'analysis' ? 'active' : ''}
-            aria-selected={activeTab === 'analysis'}
-            aria-controls="usage-tab-panel"
-            tabIndex={activeTab === 'analysis' ? 0 : -1}
-            onClick={() => setActiveTab('analysis')}
-            onKeyDown={(event) => handleTabKeyDown(event, 'analysis')}
-          >
-            <span>{t('usage.tab.analysis')}</span>
-          </button>
-          <button
-            type="button"
-            id="usage-tab-events"
-            role="tab"
-            className={activeTab === 'events' ? 'active' : ''}
-            aria-selected={activeTab === 'events'}
-            aria-controls="usage-tab-panel"
-            tabIndex={activeTab === 'events' ? 0 : -1}
-            onClick={() => setActiveTab('events')}
-            onKeyDown={(event) => handleTabKeyDown(event, 'events')}
-          >
-            <span>{t('usage.tab.events')}</span>
-          </button>
-          <button
-            type="button"
-            id="usage-tab-pricing"
-            role="tab"
-            className={activeTab === 'pricing' ? 'active' : ''}
-            aria-selected={activeTab === 'pricing'}
-            aria-controls="usage-tab-panel"
-            tabIndex={activeTab === 'pricing' ? 0 : -1}
-            onClick={() => setActiveTab('pricing')}
-            onKeyDown={(event) => handleTabKeyDown(event, 'pricing')}
-          >
-            <span>{t('usage.tab.pricing')}</span>
-          </button>
-          <button
-            type="button"
-            id="usage-tab-data-management"
-            role="tab"
-            className={activeTab === 'data-management' ? 'active' : ''}
-            aria-selected={activeTab === 'data-management'}
-            aria-controls="usage-tab-panel"
-            tabIndex={activeTab === 'data-management' ? 0 : -1}
-            onClick={() => setActiveTab('data-management')}
-            onKeyDown={(event) => handleTabKeyDown(event, 'data-management')}
-          >
-            <span>{t('usage.tab.dataManagement')}</span>
-          </button>
-          </div>
+          <Tabs className="usage-tabs secondary-page-tabs" aria-label={t('usage.pageLabel')} value={activeTab} onChange={setActiveTab}
+            items={USAGE_TABS.map(({ value, labelKey }) => ({ value, id: `usage-tab-${value}`, panelId: 'usage-tab-panel', label: <span>{t(labelKey)}</span> }))} />
         </div>
 
         <div className="usage-topbar-actions">
@@ -690,9 +565,11 @@ export function UsageRecordsPage() {
           </div>
           <button
             type="button"
-            className="icon-button usage-refresh-btn"
-            onClick={() => void loadData(false)}
-            disabled={loading}
+            className="icon-button quiet usage-refresh-btn"
+            onClick={() => activeTab === 'agent-usage'
+              ? setAgentUsageRefreshKey((current) => current + 1)
+              : void loadData(false)}
+            disabled={loading || agentUsageLoading}
             title={t('usage.refresh')}
             aria-label={t('usage.refresh')}
           >
@@ -707,21 +584,24 @@ export function UsageRecordsPage() {
         role="tabpanel"
         aria-labelledby={`usage-tab-${activeTab}`}
       >
-      {activeTab !== 'data-management' ? filterPanel : null}
+      {activeTab !== 'data-management' && activeTab !== 'agent-usage' && activeTab !== 'live-routing' ? filterPanel : null}
 
       {showInitialLoading && activeTab !== 'events' ? (
-        <div className="usage-initial-loading">
-          <Database size={22} />
-          <span>{t('usage.loading')}</span>
-        </div>
+        <EmptyState className="usage-initial-loading" icon={<Database size={22} />}>{t('usage.loading')}</EmptyState>
       ) : null}
 
-      {hasCurrentSnapshot && activeTab === 'overview' && overview ? <OverviewView overview={overview} range={overviewRange} /> : null}
-      {hasCurrentSnapshot && activeTab === 'analysis' ? <UsageAnalysisView analysis={analysis} overview={overview} range={overviewRange} /> : null}
+      {activeTab === 'live-routing' ? (
+        <div className="usage-live-routing-layout">
+          <UsageStatGrid overview={overview ?? emptyOverview} />
+          <RoutingPanel />
+        </div>
+      ) : null}
+      {activeTab === 'overview' && overview ? <OverviewView overview={overview} range={overviewRange} /> : null}
+      {activeTab === 'analysis' && (analysis || overview) ? <UsageAnalysisView analysis={analysis} overview={overview} range={overviewRange} /> : null}
       {activeTab === 'events' ? (
         <EventsView
-          events={hasCurrentSnapshot && events ? events : { items: [], total: 0, page, pageSize, totalPages: 1 }}
-          loading={showInitialLoading}
+          events={events ?? { items: [], total: 0, page, pageSize, totalPages: 1 }}
+          loading={!events}
           pageSize={pageSize}
           query={buildQueries().query}
           onPage={setPage}
@@ -731,9 +611,10 @@ export function UsageRecordsPage() {
           }}
         />
       ) : null}
-      {hasCurrentSnapshot && activeTab === 'pricing' && pricing ? (
+      {activeTab === 'pricing' && pricing ? (
         <PricingView pricing={pricing} query={buildQueries().query} onChanged={() => loadData(true)} />
       ) : null}
+      {activeTab === 'agent-usage' ? <AgentUsageView refreshKey={agentUsageRefreshKey} onLoadingChange={setAgentUsageLoading} /> : null}
       {activeTab === 'data-management' ? <UsageDataManagementView /> : null}
       </div>
     </section>
@@ -753,10 +634,21 @@ function UsageDataManagementView() {
   const [shrinkDraft, setShrinkDraft] = useState('');
   const [shrinking, setShrinking] = useState(false);
   const [storageNotice, setStorageNotice] = useState('');
+  const [agentStorage, setAgentStorage] = useState<AgentUsageStorage | null>(null);
+  const [agentSyncing, setAgentSyncing] = useState(false);
+  const [agentNotice, setAgentNotice] = useState('');
+  const [agentInterval, setAgentInterval] = useState<AgentUsageRefreshInterval>(loadAgentUsageRefreshInterval);
+
+  const changeAgentInterval = (value: string) => {
+    const next = Number(value) as AgentUsageRefreshInterval;
+    if (!AGENT_USAGE_REFRESH_INTERVALS.includes(next)) return;
+    setAgentInterval(next);
+    saveAgentUsageRefreshInterval(next);
+  };
 
   useEffect(() => {
     let disposed = false;
-    invoke<UsageStorageSettings>('get_usage_storage_settings')
+    getUsageStorageSettings()
       .then((next) => {
         if (disposed) return;
         setStorage(next);
@@ -773,6 +665,52 @@ function UsageDataManagementView() {
     };
   }, []);
 
+  useEffect(() => {
+    let disposed = false;
+    getAgentUsageStorage()
+      .then((next) => {
+        if (!disposed) setAgentStorage(next);
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  const syncAgentHistory = async () => {
+    setAgentSyncing(true);
+    setError('');
+    setAgentNotice('');
+    try {
+      await syncAgentUsage();
+      setAgentStorage(await getAgentUsageStorage());
+    } catch (requestError) {
+      setError(String(requestError));
+    } finally {
+      setAgentSyncing(false);
+    }
+  };
+
+  const clearAgentHistory = async () => {
+    const confirmed = await askConfirmation({
+      title: t('usage.dataManagement.agentStorageClearConfirmTitle'),
+      message: t('usage.dataManagement.agentStorageClearConfirm'),
+    });
+    if (!confirmed) return;
+    setAgentSyncing(true);
+    setError('');
+    setAgentNotice('');
+    try {
+      await clearAgentUsageHistory();
+      setAgentStorage(await getAgentUsageStorage());
+      setAgentNotice(t('usage.dataManagement.agentStorageCleared'));
+    } catch (requestError) {
+      setError(String(requestError));
+    } finally {
+      setAgentSyncing(false);
+    }
+  };
+
   const saveStorageLimit = async () => {
     const normalized = limitDraft.trim();
     const maxDatabaseSizeMb = Number(normalized);
@@ -784,7 +722,7 @@ function UsageDataManagementView() {
     setError('');
     setStorageNotice('');
     try {
-      const next = await invoke<UsageStorageSettings>('save_usage_storage_settings', { maxDatabaseSizeMb });
+      const next = await saveUsageStorageSettings({ maxDatabaseSizeMb });
       setStorage(next);
       setLimitDraft(String(next.maxDatabaseSizeMb));
       setStorageNotice(t(
@@ -816,7 +754,7 @@ function UsageDataManagementView() {
     setError('');
     setStorageNotice('');
     try {
-      const next = await invoke<UsageStorageSettings>('shrink_usage_database', { targetDatabaseSizeMb });
+      const next = await shrinkUsageDatabase({ targetDatabaseSizeMb });
       setStorage(next);
       setStorageNotice(t(
         next.deletedRecords > 0
@@ -840,9 +778,9 @@ function UsageDataManagementView() {
     setError('');
     setResult(null);
     try {
-      const next = await invoke<UsageRepairResult>('repair_usage_cache_records');
+      const next = await repairUsageCacheRecords();
       setResult(next);
-      const nextStorage = await invoke<UsageStorageSettings>('get_usage_storage_settings');
+      const nextStorage = await getUsageStorageSettings();
       setStorage(nextStorage);
     } catch (requestError) {
       setError(String(requestError));
@@ -852,7 +790,7 @@ function UsageDataManagementView() {
   };
 
   return (
-    <section className="panel usage-data-management-panel">
+    <section className="panel surface-card usage-data-management-panel">
       {confirmationDialog}
       <div className="usage-data-management-heading">
         <div>
@@ -862,7 +800,7 @@ function UsageDataManagementView() {
         <span className="usage-data-management-badge">{t('usage.dataManagement.manualBadge')}</span>
       </div>
 
-      <div className="usage-data-management-action usage-storage-limit-action">
+      <div className="surface-card usage-data-management-action usage-storage-limit-action">
         <div>
           <strong>{t('usage.dataManagement.storageTitle')}</strong>
           <span>{t('usage.dataManagement.storageDescription')}</span>
@@ -902,7 +840,7 @@ function UsageDataManagementView() {
         </div>
       </div>
 
-      <div className="usage-data-management-action">
+      <div className="surface-card usage-data-management-action">
         <div>
           <strong>{t('usage.dataManagement.shrinkTitle')}</strong>
           <span>{t('usage.dataManagement.shrinkDescription')}</span>
@@ -919,6 +857,7 @@ function UsageDataManagementView() {
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && !savingLimit && !shrinking && !running) void shrinkDatabase();
               }}
+              placeholder={t('usage.dataManagement.shrinkPlaceholder')}
               aria-label={t('usage.dataManagement.shrinkInput')}
             />
             <span>{t('usage.dataManagement.storageUnit')}</span>
@@ -936,7 +875,46 @@ function UsageDataManagementView() {
 
       {storageNotice ? <MessageNotice tone="success" message={storageNotice} onDismiss={() => setStorageNotice('')} /> : null}
 
-      <div className="usage-data-management-action">
+      <div className="surface-card usage-data-management-action agent-usage-storage-action">
+        <div>
+          <strong>{t('usage.dataManagement.agentStorageTitle')}</strong>
+          <span>{t('usage.dataManagement.agentStorageDescription')}</span>
+          <small>
+            {[
+              agentStorage ? t('usage.dataManagement.agentStorageCurrent', {
+                size: formatStorageBytes(agentStorage.databaseSizeBytes),
+                daily: compactNumber(agentStorage.dailyRows),
+                hourly: compactNumber(agentStorage.hourlyRows),
+              }) : '',
+              agentStorage?.lastSyncAt
+                ? t('usage.dataManagement.agentStorageLastSync', {
+                  time: new Intl.DateTimeFormat(getCurrentLocale(), { dateStyle: 'short', timeStyle: 'short' }).format(new Date(agentStorage.lastSyncAt)),
+                })
+                : t('usage.dataManagement.agentStorageNeverSynced'),
+            ].filter(Boolean).join(' · ')}
+          </small>
+        </div>
+        <div className="usage-storage-limit-editor">
+          <label className="agent-usage-interval-setting">
+            <span>{t('usage.dataManagement.agentStorageInterval')}</span>
+            <Select value={agentInterval} onChange={(event) => changeAgentInterval(event.currentTarget.value)}>
+              {AGENT_USAGE_REFRESH_INTERVALS.map((interval) => (
+                <option key={interval} value={interval}>{t(AGENT_INTERVAL_LABELS[interval])}</option>
+              ))}
+            </Select>
+          </label>
+          <button type="button" className="primary-button" onClick={() => void syncAgentHistory()} disabled={agentSyncing}>
+            {agentSyncing ? t('usage.dataManagement.agentStorageSyncing') : t('usage.dataManagement.agentStorageSync')}
+          </button>
+          <button type="button" className="secondary-button" onClick={() => void clearAgentHistory()} disabled={agentSyncing}>
+            {t('usage.dataManagement.agentStorageClear')}
+          </button>
+        </div>
+      </div>
+
+      {agentNotice ? <MessageNotice tone="success" message={agentNotice} onDismiss={() => setAgentNotice('')} /> : null}
+
+      <div className="surface-card usage-data-management-action">
         <div>
           <strong>{t('usage.dataManagement.actionTitle')}</strong>
           <span>{t('usage.dataManagement.actionDescription')}</span>
@@ -951,10 +929,10 @@ function UsageDataManagementView() {
         <>
           <MessageNotice tone="success" message={t('usage.dataManagement.success', { repaired: result.repaired, deleted: result.deleted })} />
           <div className="usage-data-management-result">
-          <div><span>{t('usage.dataManagement.scanned')}</span><strong>{result.scanned.toLocaleString()}</strong></div>
-          <div><span>{t('usage.dataManagement.repaired')}</span><strong>{result.repaired.toLocaleString()}</strong></div>
-          <div><span>{t('usage.dataManagement.deleted')}</span><strong>{result.deleted.toLocaleString()}</strong></div>
-          <div><span>{t('usage.dataManagement.backup')}</span><strong title={result.backupPath ?? undefined}>{result.backupPath ?? '—'}</strong></div>
+          <div className="surface-card usage-data-management-result-item"><span>{t('usage.dataManagement.scanned')}</span><strong>{result.scanned.toLocaleString()}</strong></div>
+          <div className="surface-card usage-data-management-result-item"><span>{t('usage.dataManagement.repaired')}</span><strong>{result.repaired.toLocaleString()}</strong></div>
+          <div className="surface-card usage-data-management-result-item"><span>{t('usage.dataManagement.deleted')}</span><strong>{result.deleted.toLocaleString()}</strong></div>
+          <div className="surface-card usage-data-management-result-item"><span>{t('usage.dataManagement.backup')}</span><strong title={result.backupPath ?? undefined}>{result.backupPath ?? '—'}</strong></div>
           </div>
         </>
       ) : null}
@@ -962,7 +940,7 @@ function UsageDataManagementView() {
   );
 }
 
-function OverviewView({ overview, range }: { overview: UsageOverview; range?: Pick<UsageQuery, 'start' | 'end'> }) {
+function UsageStatGrid({ overview }: { overview: UsageOverview }) {
   const { t } = useI18n();
   const cards = [
     {
@@ -1037,17 +1015,25 @@ function OverviewView({ overview, range }: { overview: UsageOverview; range?: Pi
   ];
 
   return (
+    <div className="surface-card usage-stat-grid">
+      {cards.map(({ key, tone, label, value, metaTitle }) => (
+        <article className={`panel usage-stat-card tone-${tone}`} key={key} title={metaTitle}>
+          <span className="usage-stat-card-label">{label}</span>
+          <strong className="usage-stat-card-value">{value}</strong>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function OverviewView({ overview, range }: { overview: UsageOverview; range?: Pick<UsageQuery, 'start' | 'end'> }) {
+  const { t } = useI18n();
+
+  return (
     <div className="usage-overview-layout">
-      <div className="usage-stat-grid">
-        {cards.map(({ key, tone, label, value, metaTitle }) => (
-          <article className={`panel usage-stat-card tone-${tone}`} key={key} title={metaTitle}>
-            <span className="usage-stat-card-label">{label}</span>
-            <strong className="usage-stat-card-value">{value}</strong>
-          </article>
-        ))}
-      </div>
+      <UsageStatGrid overview={overview} />
       <UsageOverviewPanels>
-        <section className="panel usage-trend-panel">
+        <section className="panel surface-card usage-trend-panel">
           <div className="usage-section-heading">
             <div>
               <strong>{t('usage.trend.title')}</strong>
@@ -1383,6 +1369,7 @@ function UsageTrend({
           {active ? (
             <div
               className={`usage-trend-tooltip${activePercent > 62 ? ' is-left' : ' is-right'}`}
+              data-theme-surface="overlay"
               style={{ left: `${activePercent}%` }}
             >
               <div className="usage-trend-tooltip-header">
@@ -1421,7 +1408,7 @@ function UsageTrend({
               <span
                 key={date.getTime()}
                 className={posClass}
-                style={{ left: `${left}%` }}
+                style={posClass === 'is-mid' ? { left: `${left}%` } : undefined}
                 title={date.toLocaleString(locale)}
               >
                 {formatTrendAxisLabel({ start: date }, series.bucket, locale, {
@@ -1455,7 +1442,7 @@ function TokenComposition({ overview }: { overview: UsageOverview }) {
     output: t('usage.token.output'),
   };
   return (
-    <section className="panel usage-health-panel" aria-labelledby="usage-token-title">
+    <section className="panel surface-card usage-health-panel" aria-labelledby="usage-token-title">
       <div className="usage-section-heading">
         <strong id="usage-token-title">{t('usage.token.title')}</strong>
       </div>
@@ -1510,7 +1497,7 @@ function TokenComposition({ overview }: { overview: UsageOverview }) {
           <span>{t('usage.stat.cacheHitRate')} <b>{(overview.cacheHitRate * 100).toFixed(1)}%</b></span>
         </div>
         <div className="usage-token-context">
-          <section className="usage-token-context-group usage-token-results" aria-labelledby="usage-token-results-title">
+          <section className="usage-token-context-group usage-token-results surface-sunken" aria-labelledby="usage-token-results-title">
             <h3 id="usage-token-results-title"><Activity size={14} aria-hidden="true" />{t('usage.token.requestStatus')}</h3>
             <dl className="usage-token-context-metrics">
               <div className="tone-success"><dt>{t('usage.result.success')}</dt><dd>{compactNumber(overview.successCount)}</dd></div>
@@ -1518,14 +1505,14 @@ function TokenComposition({ overview }: { overview: UsageOverview }) {
               <div><dt>{t('usage.result.canceled')}</dt><dd>{compactNumber(overview.canceledCount)}</dd></div>
             </dl>
           </section>
-          <section className="usage-token-context-group" aria-labelledby="usage-token-performance-title">
+          <section className="usage-token-context-group surface-sunken" aria-labelledby="usage-token-performance-title">
             <h3 id="usage-token-performance-title"><Gauge size={14} aria-hidden="true" />{t('usage.token.performance')}</h3>
             <dl className="usage-token-context-metrics">
-              <div><dt>RPM</dt><dd>{overview.rpm.toFixed(2)}</dd></div>
+              <div><dt>{t('usage.stat.rpm')}</dt><dd>{overview.rpm.toFixed(2)}</dd></div>
               <div><dt>{t('usage.stat.averageLatency')}</dt><dd>{compactDuration(overview.averageLatencyMs)}</dd></div>
             </dl>
           </section>
-          <section className="usage-token-context-group" aria-labelledby="usage-token-pricing-title" title={t('usage.stat.costNote')}>
+          <section className="usage-token-context-group surface-sunken" aria-labelledby="usage-token-pricing-title" title={t('usage.stat.costNote')}>
             <h3 id="usage-token-pricing-title"><Wallet size={14} aria-hidden="true" />{pricingLabel}</h3>
             <dl className="usage-token-context-metrics">
               <div><dt>{t('usage.token.priced')}</dt><dd>{compactNumber(overview.pricedRequests)}</dd></div>
@@ -1585,15 +1572,13 @@ function PricingView({
   const [syncing, setSyncing] = useState(false);
   const [applyingSync, setApplyingSync] = useState(false);
   const [syncSource, setSyncSource] = useState<'models-dev' | 'litellm'>(() => {
-    try { return localStorage.getItem('cpa-gui.pricing-sync-source.v1') === 'litellm' ? 'litellm' : 'models-dev'; }
+    try { return usagePreferences.getItem('cpa-gui.pricing-sync-source.v1') === 'litellm' ? 'litellm' : 'models-dev'; }
     catch { return 'models-dev'; }
   });
   const [syncPreview, setSyncPreview] = useState<ModelPriceSyncPreview | null>(null);
   const [syncDrafts, setSyncDrafts] = useState<SyncPriceDraft[]>([]);
   const [syncError, setSyncError] = useState('');
-  const syncDialog = useRef<HTMLDialogElement>(null);
   const { notice, revision, showNotice, clearNotice } = useAppNotice();
-
 
   const visibleRows = pricing.rows.filter((row) => {
     const keyword = search.trim().toLowerCase();
@@ -1608,7 +1593,7 @@ function PricingView({
     setSaving(true);
     clearNotice();
     try {
-      await invoke('save_usage_model_price', {
+      await saveUsageModelPrice({
         price: {
           model: draft.model.trim(),
           prompt: parsePrice(draft.prompt),
@@ -1638,7 +1623,7 @@ function PricingView({
     if (!await askConfirmation({ title: t('common.delete'), message: t('usage.pricing.deleteConfirm', { model }), confirmText: t('common.delete'), variant: 'danger' })) return;
     clearNotice();
     try {
-      await invoke('delete_usage_model_price', { model });
+      await deleteUsageModelPrice({ model });
       showNotice({ key: 'usage.pricing.deleted' });
       await onChanged();
     } catch (deleteError) {
@@ -1651,7 +1636,7 @@ function PricingView({
     setSyncError('');
     clearNotice();
     try {
-      const preview = await invoke<ModelPriceSyncPreview>('preview_usage_model_prices', { query, source: syncSource });
+      const preview = await previewUsageModelPrices({ query, source: syncSource });
       const existing = new Map(pricing.rows.map((row) => [row.model.toLowerCase(), row.price]));
       setSyncPreview(preview);
       setSyncDrafts(preview.matches.map((price) => ({
@@ -1662,7 +1647,6 @@ function PricingView({
         cacheRead: String(price.cacheRead),
         cacheCreation: String(price.cacheCreation),
       })));
-      syncDialog.current?.showModal();
     } catch (syncError) {
       showNotice(String(syncError), 'error');
     } finally {
@@ -1693,8 +1677,8 @@ function PricingView({
     setSyncError('');
     clearNotice();
     try {
-      const result = await invoke<ModelPriceSyncResult>('apply_usage_model_prices', { prices });
-      syncDialog.current?.close();
+      const result = await applyUsageModelPrices({ prices });
+      setSyncPreview(null);
       showNotice({ key: 'usage.pricing.syncResult', variables: { imported: result.imported } });
       await onChanged();
     } catch (syncError) {
@@ -1710,11 +1694,11 @@ function PricingView({
 
   const changeSyncSource = (source: 'models-dev' | 'litellm') => {
     setSyncSource(source);
-    try { localStorage.setItem('cpa-gui.pricing-sync-source.v1', source); } catch {}
+    try { usagePreferences.setItem('cpa-gui.pricing-sync-source.v1', source); } catch {}
   };
 
   return (
-    <section className="panel usage-pricing-panel">
+    <section className="panel surface-card usage-pricing-panel">
       {confirmationDialog}
       <div className="usage-pricing-toolbar">
         <div className="usage-pricing-summary">
@@ -1729,22 +1713,25 @@ function PricingView({
         </div>
         <div className="usage-pricing-actions">
           <div className="usage-pricing-action-group">
-            <input
-              value={search}
-              onChange={(event) => setSearch(event.currentTarget.value)}
-              placeholder={t('usage.pricing.search')}
-              aria-label={t('usage.pricing.search')}
-            />
-            <button type="button" className="secondary-button" onClick={() => setDraft(emptyPriceDraft())}>
+            <div className="usage-pricing-search search-control" data-size="default">
+              <Search size={16} aria-hidden="true" />
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.currentTarget.value)}
+                placeholder={t('usage.pricing.search')}
+                aria-label={t('usage.pricing.search')}
+              />
+            </div>
+            <button type="button" className="secondary-button compact-button" onClick={() => setDraft(emptyPriceDraft())}>
               {t('usage.pricing.add')}
             </button>
           </div>
           <div className="usage-pricing-action-group">
-            <select value={syncSource} onChange={(event) => changeSyncSource(event.currentTarget.value as 'models-dev' | 'litellm')} aria-label={t('usage.pricing.syncSource')}>
+            <Select value={syncSource} onChange={(event) => changeSyncSource(event.currentTarget.value as 'models-dev' | 'litellm')} aria-label={t('usage.pricing.syncSource')}>
               <option value="models-dev">Models.dev</option>
               <option value="litellm">LiteLLM</option>
-            </select>
-            <button type="button" className="primary-button" disabled={syncing} onClick={() => void previewPrices()}>
+            </Select>
+            <button type="button" className="primary-button compact-button" disabled={syncing} onClick={() => void previewPrices()}>
               {syncing ? t('usage.pricing.syncing') : t('usage.pricing.sync')}
             </button>
           </div>
@@ -1753,13 +1740,13 @@ function PricingView({
 
       <FloatingNotice key={revision} notice={notice} onDismiss={clearNotice} />
 
-      <dialog ref={syncDialog} className="usage-price-sync-dialog" onCancel={(event) => { if (applyingSync) event.preventDefault(); }} onClose={() => setSyncPreview(null)}>
+      {syncPreview ? <Dialog className="usage-price-sync-dialog" labelledBy="usage-price-sync-title" onClose={() => setSyncPreview(null)} closeDisabled={applyingSync}>
         <div className="usage-price-sync-header">
           <div>
-            <h2>{t('usage.pricing.syncPreview')}</h2>
+            <h2 id="usage-price-sync-title">{t('usage.pricing.syncPreview')}</h2>
             <a href={syncPreview?.sourceUrl} target="_blank" rel="noreferrer">{syncPreview?.source}</a>
           </div>
-          <button type="button" className="icon-button" aria-label={t('common.close')} disabled={applyingSync} onClick={() => syncDialog.current?.close()}><X size={16} /></button>
+          <button type="button" className="icon-button quiet" aria-label={t('common.close')} disabled={applyingSync} onClick={() => setSyncPreview(null)}><X size={16} /></button>
         </div>
         <p className="usage-price-sync-note">{t('usage.pricing.syncNote')}</p>
         <div className="usage-price-sync-controls">
@@ -1771,7 +1758,7 @@ function PricingView({
           {syncDrafts.map((item, index) => (
             <div className="usage-price-sync-row" key={item.price.model}>
               <label className="usage-price-sync-identity">
-                <input type="checkbox" checked={item.selected} disabled={applyingSync} onChange={(event) => updateSyncDraft(index, { selected: event.currentTarget.checked })} />
+                <Checkbox checked={item.selected} disabled={applyingSync} onChange={(event) => updateSyncDraft(index, { selected: event.currentTarget.checked })} />
                 <span><strong>{item.price.model}</strong><small>{item.price.sourceModelId}</small></span>
               </label>
               {(['prompt', 'completion', 'cacheRead', 'cacheCreation'] as const).map((field) => (
@@ -1791,17 +1778,17 @@ function PricingView({
             <p>{syncPreview?.unmatched.join(', ')}</p>
           </details>
         )}
-        {syncError && <p className="usage-price-sync-error" role="alert">{syncError}</p>}
+        {syncError && <Notice tone="error" variant="text">{syncError}</Notice>}
         <div className="usage-price-sync-footer">
-          <button type="button" className="secondary-button" disabled={applyingSync} onClick={() => syncDialog.current?.close()}>{t('common.cancel')}</button>
+          <button type="button" className="secondary-button" disabled={applyingSync} onClick={() => setSyncPreview(null)}>{t('common.cancel')}</button>
           <button type="button" className="primary-button" disabled={applyingSync || !syncDrafts.some((item) => item.selected)} onClick={() => void applySyncPrices()}>
             {applyingSync ? t('usage.pricing.saving') : t('usage.pricing.applySelected', { count: syncDrafts.filter((item) => item.selected).length })}
           </button>
         </div>
-      </dialog>
+      </Dialog> : null}
 
       {draft ? (
-        <div className="usage-price-editor">
+        <div className="surface-section usage-price-editor">
           <label>
             <span>{t('usage.pricing.model')}</span>
             <input
@@ -1853,11 +1840,11 @@ function PricingView({
             />
           </label>
           <div className="usage-price-editor-actions">
-            <button type="button" className="secondary-button" onClick={() => setDraft(null)}>
+            <button type="button" className="secondary-button compact-button" onClick={() => setDraft(null)}>
               <X size={14} />
               {t('common.cancel')}
             </button>
-            <button type="button" className="primary-button" disabled={saving} onClick={() => void savePrice()}>
+            <button type="button" className="primary-button compact-button" disabled={saving} onClick={() => void savePrice()}>
               {saving ? t('usage.pricing.saving') : t('common.save')}
             </button>
           </div>
@@ -1934,9 +1921,7 @@ function PricingView({
 function UsageEmpty() {
   const { t } = useI18n();
   return (
-    <div className="usage-empty">
-      <TriangleAlert size={18} />
-      <span>{t('usage.empty')}</span>
-    </div>
+    <EmptyState className="usage-empty" icon={<TriangleAlert size={18} />}>{t('usage.empty')}</EmptyState>
   );
 }
+import { RoutingPanel } from '../components/routing/RoutingPanel';

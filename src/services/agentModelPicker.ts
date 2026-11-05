@@ -32,6 +32,7 @@ export function filterAgentModelsByAlias(
   models: ModelOption[],
   aliasesOnly: boolean,
 ): ModelOption[] {
+  // An alias does not make its source model unavailable.
   return models.filter((model) => Boolean(model.isAlias) === aliasesOnly);
 }
 
@@ -42,7 +43,9 @@ export function resolveAgentModelForAliasMode(
 ): string {
   const candidates = filterAgentModelsByAlias(models, aliasesOnly);
   const selected = findAgentModel(models, current);
-  if (selected && Boolean(selected.isAlias) === aliasesOnly) return selected.name;
+  if (selected && candidates.some((candidate) => normalized(candidate.name) === normalized(selected.name))) {
+    return selected.name;
+  }
 
   if (selected && aliasesOnly) {
     const alias = candidates.find((candidate) => normalized(candidate.alias ?? '') === normalized(selected.name));
@@ -75,5 +78,6 @@ export function findAgentModel(models: ModelOption[], value: string): ModelOptio
 }
 
 export function resolveAgentModelSelection(models: ModelOption[], previous: string): string {
-  return findAgentModel(models, previous)?.name ?? models[0]?.name.trim() ?? '';
+  // A refresh may temporarily omit a model; only default when no choice exists.
+  return findAgentModel(models, previous)?.name ?? (previous.trim() || models[0]?.name.trim() || '');
 }

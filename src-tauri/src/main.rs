@@ -1,6 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agents;
+mod agent_skills;
+mod agent_usage;
+mod agent_usage_store;
 mod app_settings;
 mod app_update;
 mod claude_catalog;
@@ -9,9 +12,13 @@ mod codex_sessions;
 mod configuration_watcher;
 mod core_config;
 mod core_runtime;
+mod core_recovery;
 mod desktop_theme;
 mod instance_lock;
+#[cfg(any(target_os = "linux", test))]
+mod linux_graphics;
 mod management_api;
+mod mcp_servers;
 mod network_proxy;
 #[cfg(any(
     target_os = "linux",
@@ -20,10 +27,13 @@ mod network_proxy;
 ))]
 mod native_i18n;
 mod oauth_browser;
+mod plugin_webview;
 mod plugins;
+mod privacy_mode;
 mod progress;
 mod provider_health;
 mod storage;
+mod reverse_proxy;
 #[cfg(any(
     target_os = "linux",
     target_os = "macos",
@@ -31,12 +41,18 @@ mod storage;
 ))]
 mod tray;
 mod usage;
+#[cfg(target_os = "windows")]
+mod windows_frame;
+mod window_material;
+mod window_activity;
+#[cfg(any(windows, test))]
+mod webview_recovery;
 
 #[cfg(test)]
 use configuration_watcher::nearest_existing_watch_directory;
 use management_api::{
     format_management_request_error, management_authorization, management_endpoint,
-    management_http_client, read_management_text, read_management_value,
+    management_http_client, management_plaintext_key, read_management_text, read_management_value,
 };
 use oauth_browser::*;
 #[cfg(test)]
@@ -104,12 +120,20 @@ const RELEASE_PAGE_URL: &str = "https://github.com/router-for-me/CLIProxyAPI/rel
 const RELEASE_ATOM_URL: &str = "https://github.com/router-for-me/CLIProxyAPI/releases.atom";
 const RELEASE_DOWNLOAD_PREFIX: &str =
     "https://github.com/router-for-me/CLIProxyAPI/releases/download/";
+const CORE_RELEASES_API_URL: &str =
+    "https://api.github.com/repos/router-for-me/CLIProxyAPI/releases?per_page=100";
 #[cfg(windows)]
 const APP_UPDATE_MANIFEST_URL: &str = "https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/latest/download/portable-update-windows.json";
 #[cfg(target_os = "linux")]
 const APP_UPDATE_MANIFEST_URL: &str = "https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/latest/download/portable-update-linux.json";
 #[cfg(target_os = "macos")]
 const APP_UPDATE_MANIFEST_URL: &str = "https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/latest/download/portable-update-darwin-v2.json";
+#[cfg(windows)]
+const APP_UPDATE_MANIFEST_FILE: &str = "portable-update-windows.json";
+#[cfg(target_os = "linux")]
+const APP_UPDATE_MANIFEST_FILE: &str = "portable-update-linux.json";
+#[cfg(target_os = "macos")]
+const APP_UPDATE_MANIFEST_FILE: &str = "portable-update-darwin-v2.json";
 const APP_RELEASE_DOWNLOAD_PREFIX: &str =
     "https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/download/";
 #[cfg(windows)]
@@ -158,7 +182,7 @@ const DEFAULT_REQUEST_RETRY: u32 = 3;
 const DEFAULT_MAX_RETRY_CREDENTIALS: u32 = 0;
 const DEFAULT_MAX_RETRY_INTERVAL: i64 = 30;
 const DEFAULT_STREAMING_BOOTSTRAP_RETRIES: u32 = 0;
-const DEFAULT_DISABLE_COOLING: bool = false;
+const DEFAULT_DISABLE_COOLING: bool = true;
 const DEFAULT_LOGS_MAX_TOTAL_SIZE_MB: u32 = 0;
 const DEFAULT_ERROR_LOGS_MAX_FILES: u32 = 10;
 const DEFAULT_REDIS_USAGE_QUEUE_RETENTION_SECONDS: u32 = 60;
@@ -175,12 +199,17 @@ const DEEPSEEK_HARNESS_SETTINGS_FILE: &str = "settings.yaml";
 const DEEPSEEK_HARNESS_CREDENTIALS_FILE: &str = ".credentials.yaml";
 const PI_AGENT_ID: &str = "pi";
 const PI_AGENT_NAME: &str = "Pi";
+const OMP_AGENT_PROVIDER_ID: &str = "easy-cliproxyapi";
+const OMP_AGENT_API: &str = "openai-responses";
+const OMP_MODELS_FILE: &str = "models.yml";
+const OMP_SETTINGS_FILE: &str = "config.yml";
 const PI_CLIPROXYAPI_PACKAGE: &str = "npm:@router-for-me/pi-cliproxyapi-provider";
 const PI_CLIPROXYAPI_NPM_LATEST_URL: &str =
     "https://registry.npmjs.org/@router-for-me%2Fpi-cliproxyapi-provider/latest";
 const PI_CLIPROXYAPI_PROVIDER_ID: &str = "cliproxyapi";
 const PI_AGENT_CONFIG_FILE: &str = "cliproxyapi.json";
 const PI_AGENT_SETTINGS_FILE: &str = "settings.json";
+const PI_AGENT_MODELS_CACHE_FILE: &str = "cliproxyapi-models.json";
 const CODEX_MODEL_CATALOG_FILE: &str = "cpa-gui-model-catalog.json";
 const CODEX_OAUTH_LOGIN_REQUIRED_ERROR: &str = "CODEX_OAUTH_LOGIN_REQUIRED";
 const CLAUDE_DESKTOP_PROFILE_ID: &str = "00000000-0000-4000-8000-000000831700";
@@ -197,11 +226,14 @@ const MANAGED_CLAUDE_HAIKU_ALIAS_DISPLAY_NAME: &str =
 const DEFAULT_CLAUDE_CONTEXT_WINDOW: u64 = 200_000;
 const CLAUDE_DESKTOP_EXTENDED_CONTEXT_WINDOW: u64 = 1_000_000;
 const CLAUDE_CODE_MAX_CONTEXT_TOKENS_ENV: &str = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
+const CLAUDE_CODE_AUTO_COMPACT_WINDOW_ENV: &str = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
 const CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY_ENV: &str =
     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY";
 const CLAUDE_CODE_AUTO_MODE_SERVER_ENV: &str = "CLAUDE_CODE_AUTO_MODE_SERVER";
 const CLAUDE_AUTOCOMPACT_PCT_OVERRIDE_ENV: &str = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE";
 const DISABLE_AUTO_COMPACT_ENV: &str = "DISABLE_AUTO_COMPACT";
+const CLAUDE_CODE_MANAGED_MODEL_SETTINGS_ENV: &str = "EASYCLIPROXY_CLAUDE_CODE_MODEL_SETTINGS";
+const CLAUDE_CODE_MANAGED_STARTUP_MODEL_ENV: &str = "EASYCLIPROXY_CLAUDE_CODE_STARTUP_MODEL";
 const DEFAULT_CLAUDE_AUTO_COMPACT_PCT: u8 = 90;
 const MODEL_ALIAS_CONFIG_SECTIONS: &[&str] = &[
     "codex-api-key",
@@ -288,6 +320,7 @@ struct AppUpdateInner {
 
 #[derive(Default)]
 struct CoreProcessState {
+    recovery: core_recovery::CoreRecovery,
     child: Mutex<Option<CoreChild>>,
     adopted_processes: Mutex<Vec<AdoptedCoreProcess>>,
     starting: AtomicBool,
@@ -330,8 +363,10 @@ struct SavedWindowSize {
     height: u32,
 }
 
-struct MainWindowSizeState {
+struct MainWindowState {
     inner: Mutex<Option<SavedWindowSize>>,
+    position: Mutex<Option<tauri::PhysicalPosition<i32>>>,
+    position_tracking: AtomicBool,
 }
 
 #[derive(Default)]
@@ -418,6 +453,8 @@ struct CoreStatus {
     install_dir: String,
     binary_path: Option<String>,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery: Option<core_recovery::RecoveryStatus>,
 }
 
 #[derive(Serialize)]
@@ -429,6 +466,14 @@ struct CoreLatest {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CoreVersionOption {
+    version: String,
+    asset_name: String,
+    prerelease: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AppUpdateInfo {
     current_version: String,
     latest_version: String,
@@ -436,9 +481,11 @@ struct AppUpdateInfo {
     release_url: String,
     release_notes: HashMap<String, String>,
     published_at: String,
+    current_build_at: Option<String>,
     auto_update_supported: bool,
     download_size_bytes: Option<u64>,
     unsupported_reason: Option<String>,
+    update_channel: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -476,6 +523,8 @@ struct PortableAppManifest {
     schema_version: u32,
     application: String,
     version: String,
+    #[serde(default)]
+    built_at: Option<String>,
     platform: String,
     arch: String,
     #[serde(default)]
@@ -604,18 +653,25 @@ struct GuiConfigFile {
     default_terminal: String,
     window_width: Option<u32>,
     window_height: Option<u32>,
+    window_x: Option<i32>,
+    window_y: Option<i32>,
     auth_dir: String,
     auth_dir_user_selected: bool,
+    image_generation_user_selected: bool,
     #[serde(deserialize_with = "deserialize_gui_api_keys")]
     api_keys: Vec<GuiApiKeyEntry>,
     api_access_remarks: Vec<GuiApiAccessRemark>,
     management_secret_key: String,
     debug: bool,
+    #[serde(default = "default_update_channel")]
+    update_channel: String,
     commercial_mode: bool,
     logging_to_file: bool,
     logs_max_total_size_mb: u32,
     error_logs_max_files: u32,
     usage_statistics_enabled: bool,
+    #[serde(rename = "usage_statistics_disabled", skip_serializing_if = "Option::is_none")]
+    usage_statistics_disabled: Option<bool>,
     redis_usage_queue_retention_seconds: u32,
     request_log: bool,
     plugins_enabled: bool,
@@ -911,20 +967,25 @@ impl Default for GuiConfigFile {
             default_terminal: DEFAULT_AGENT_TERMINAL.to_string(),
             window_width: Some(DEFAULT_MAIN_WINDOW_WIDTH),
             window_height: Some(DEFAULT_MAIN_WINDOW_HEIGHT),
+            window_x: None,
+            window_y: None,
             auth_dir: DEFAULT_AUTH_DIR.to_string(),
             auth_dir_user_selected: false,
+            image_generation_user_selected: false,
             api_keys: vec![default_api_key_entry()],
             api_access_remarks: Vec::new(),
             management_secret_key: LEGACY_DEFAULT_MANAGEMENT_SECRET_KEY.to_string(),
             debug: false,
+            update_channel: default_update_channel(),
             commercial_mode: false,
             logging_to_file: false,
             logs_max_total_size_mb: DEFAULT_LOGS_MAX_TOTAL_SIZE_MB,
             error_logs_max_files: DEFAULT_ERROR_LOGS_MAX_FILES,
             usage_statistics_enabled: true,
+            usage_statistics_disabled: None,
             redis_usage_queue_retention_seconds: DEFAULT_REDIS_USAGE_QUEUE_RETENTION_SECONDS,
             request_log: false,
-            plugins_enabled: false,
+            plugins_enabled: true,
             routing_strategy: "round-robin".to_string(),
             proxy_url: String::new(),
             proxy_override: false,
@@ -1042,8 +1103,12 @@ struct AgentConfigStatus {
     configuration_synchronized: bool,
     connection_state: String,
     current_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_api_key: Option<String>,
     oauth_configuration: bool,
     codex_native_oauth: bool,
+    codex_openai_provider: bool,
+    codex_remote_compaction: bool,
     modification_enabled: bool,
     modification_state: String,
     backup_available: bool,
@@ -1122,6 +1187,8 @@ struct AgentModelOption {
     input_modalities: Option<Vec<String>>,
     #[serde(skip)]
     harness_metadata: Option<serde_json::Value>,
+    #[serde(skip)]
+    reasoning_levels: Vec<String>,
 }
 
 
@@ -1137,6 +1204,10 @@ struct ClaudeDesktopModelMappings {
     #[serde(default)]
     haiku: String,
     #[serde(default)]
+    fable: String,
+    #[serde(default)]
+    fable_1m: bool,
+    #[serde(default)]
     opus_1m: bool,
     #[serde(default)]
     sonnet_1m: bool,
@@ -1148,6 +1219,22 @@ struct ClaudeDesktopModelMappings {
     auto_compact_pct: u8,
     #[serde(default)]
     disable_auto_compact: bool,
+    /// Keep Claude Code's session/default model selection under CPA control.
+    /// Defaults to true for backwards compatibility with existing profiles.
+    #[serde(default = "default_true")]
+    manage_default_model: bool,
+    /// Set CLAUDE_CODE_SUBAGENT_MODEL when enabled; otherwise allow inheritance.
+    /// Defaults to true for backwards compatibility with existing profiles.
+    #[serde(default = "default_true")]
+    manage_subagent_model: bool,
+    /// Optional explicit model written to the root Claude Code `model` setting.
+    #[serde(default)]
+    startup_model: Option<String>,
+    /// Optional explicit model written to CLAUDE_CODE_SUBAGENT_MODEL.
+    #[serde(default)]
+    subagent_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    response_language: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -1193,6 +1280,19 @@ fn default_claude_auto_compact_pct() -> u8 {
     DEFAULT_CLAUDE_AUTO_COMPACT_PCT
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_update_channel() -> String {
+    // A preview binary keeps following the preview channel until switched explicitly.
+    if env!("CARGO_PKG_VERSION").to_ascii_lowercase().contains("preview") {
+        "preview".to_string()
+    } else {
+        "stable".to_string()
+    }
+}
+
 impl ClaudeDesktopModelMappings {
     fn all(model: &str) -> Self {
         Self {
@@ -1200,12 +1300,19 @@ impl ClaudeDesktopModelMappings {
             opus: model.to_string(),
             sonnet: model.to_string(),
             haiku: model.to_string(),
+            fable: model.to_string(),
+            fable_1m: false,
             opus_1m: false,
             sonnet_1m: false,
             haiku_1m: false,
             max_context_tokens: default_claude_code_max_context_tokens(),
             auto_compact_pct: default_claude_auto_compact_pct(),
             disable_auto_compact: false,
+            manage_default_model: true,
+            manage_subagent_model: true,
+            startup_model: None,
+            subagent_model: None,
+            response_language: None,
         }
     }
 }
@@ -1220,9 +1327,19 @@ struct CodexModelDefinition {
     supports_tools: Option<bool>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+// Coordinates in the configuration arrays; never persisted into CPA configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelAliasPosition {
+    section: String,
+    provider_index: Option<usize>,
+    model_index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ThinkingAliasEntry {
+    position: ModelAliasPosition,
     source_model: String,
     alias: String,
     effort: Option<String>,
@@ -1234,6 +1351,7 @@ struct ThinkingAliasEntry {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SpeedAliasEntry {
+    position: ModelAliasPosition,
     source_model: String,
     alias: String,
     service_tier: String,
@@ -1340,8 +1458,11 @@ enum AgentClient {
     ZCode,
     WorkBuddy,
     AntigravityCli,
+    CopilotCli,
+    VscodeCopilot,
     KimiCode,
     GrokBuild,
+    Omp,
 }
 
 #[derive(Clone, Debug)]
@@ -1364,8 +1485,11 @@ impl AgentClient {
             "zcode" => Ok(Self::ZCode),
             "workbuddy" => Ok(Self::WorkBuddy),
             "antigravity-cli" => Ok(Self::AntigravityCli),
+            "copilot-cli" => Ok(Self::CopilotCli),
+            "vscode-copilot" => Ok(Self::VscodeCopilot),
             "kimi-code" => Ok(Self::KimiCode),
             "grok-build" => Ok(Self::GrokBuild),
+            "omp" => Ok(Self::Omp),
             _ => Err(format!("Unsupported agent client: {value}")),
         }
     }
@@ -1382,8 +1506,11 @@ impl AgentClient {
             Self::ZCode => "zcode",
             Self::WorkBuddy => "workbuddy",
             Self::AntigravityCli => "antigravity-cli",
+            Self::CopilotCli => "copilot-cli",
+            Self::VscodeCopilot => "vscode-copilot",
             Self::KimiCode => "kimi-code",
             Self::GrokBuild => "grok-build",
+            Self::Omp => "omp",
         }
     }
 
@@ -1399,8 +1526,11 @@ impl AgentClient {
             Self::ZCode => "ZCode",
             Self::WorkBuddy => "WorkBuddy",
             Self::AntigravityCli => "Antigravity CLI",
+            Self::CopilotCli => "Copilot CLI",
+            Self::VscodeCopilot => "VSCode Copilot",
             Self::KimiCode => "Kimi Code",
             Self::GrokBuild => "Grok Build",
+            Self::Omp => "Oh My Pi",
         }
     }
 
@@ -1425,8 +1555,11 @@ impl AgentClient {
             Self::ZCode => &["zcode"],
             Self::WorkBuddy => &[],
             Self::AntigravityCli => &["agy"],
+            Self::CopilotCli => &["copilot"],
+            Self::VscodeCopilot => &["code"],
             Self::KimiCode => &["kimi"],
             Self::GrokBuild => &["grok"],
+            Self::Omp => &["omp"],
         }
     }
 }
@@ -1541,6 +1674,12 @@ struct CoreConfigSettings {
     #[serde(skip_serializing)]
     auth_dir: String,
     api_keys: Vec<String>,
+    /// Whether the kernel configuration sets `auth-dir`; otherwise `auth_dir` is the kernel default.
+    #[serde(skip_serializing)]
+    auth_dir_configured: bool,
+    /// Whether the kernel configuration declares API keys other than the example placeholders.
+    #[serde(skip_serializing)]
+    api_keys_configured: bool,
     management_secret_configured: bool,
     debug: bool,
     commercial_mode: bool,
@@ -1838,6 +1977,7 @@ impl AppUpdateState {
 impl CoreProcessState {
     fn new(starting: bool) -> Self {
         Self {
+            recovery: core_recovery::CoreRecovery::default(),
             child: Mutex::new(None),
             adopted_processes: Mutex::new(Vec::new()),
             starting: AtomicBool::new(starting),
@@ -1869,11 +2009,16 @@ impl CoreProcessState {
     fn managed_pid(&self) -> Option<u32> {
         if let Ok(mut child) = self.child.lock() {
             if let Some(process) = child.as_mut() {
-                if let Ok(None) = process.try_wait() {
-                    return Some(process.id());
+                match process.try_wait() {
+                    Ok(None) => return Some(process.id()),
+                    Ok(Some(exit)) => {
+                        self.recovery.exited(format!("PID {}: {exit}", process.id()));
+                        *child = None;
+                    }
+                    // A status-check error is not proof of exit. Dropping a live
+                    // CoreChild would terminate its Windows job and create an outage.
+                    Err(_) => return Some(process.id()),
                 }
-
-                *child = None;
             }
         }
 
@@ -1881,11 +2026,15 @@ impl CoreProcessState {
             .lock()
             .ok()
             .and_then(|mut processes| {
+                let had_processes = !processes.is_empty();
                 processes.retain(|process| {
                     process_executable_path(process.process_id)
                         .as_deref()
                         .is_some_and(|path| executable_paths_match(&process.binary_path, path))
                 });
+                if had_processes && processes.is_empty() {
+                    self.recovery.exited("Adopted kernel process exited".into());
+                }
                 processes.first().map(|process| process.process_id)
             })
     }
@@ -1909,6 +2058,9 @@ impl CoreProcessState {
             .collect();
         adopted.sort_unstable_by_key(|process| process.process_id);
         adopted.dedup_by_key(|process| process.process_id);
+        if !adopted.is_empty() {
+            self.recovery.running();
+        }
         Ok(())
     }
 
@@ -1935,15 +2087,34 @@ impl CoreProcessState {
             .lock()
             .map_err(|_| "Kernel process status lock is poisoned".to_string())?;
         *managed_child = Some(child);
+        self.recovery.running();
         Ok(pid)
     }
 }
 
-impl MainWindowSizeState {
-    fn new(size: Option<SavedWindowSize>) -> Self {
+impl MainWindowState {
+    fn new(size: Option<SavedWindowSize>, position: Option<tauri::PhysicalPosition<i32>>) -> Self {
         Self {
             inner: Mutex::new(size),
+            position: Mutex::new(position),
+            position_tracking: AtomicBool::new(false),
         }
+    }
+
+    fn position(&self) -> Result<Option<tauri::PhysicalPosition<i32>>, String> {
+        self.position
+            .lock()
+            .map(|position| *position)
+            .map_err(|_| "Main window position status lock is poisoned".to_string())
+    }
+
+    fn replace_position(&self, position: tauri::PhysicalPosition<i32>) -> Result<(), String> {
+        *self
+            .position
+            .lock()
+            .map_err(|_| "Main window position status lock is poisoned".to_string())? =
+            Some(position);
+        Ok(())
     }
 
     fn snapshot(&self) -> Result<Option<SavedWindowSize>, String> {
@@ -2106,6 +2277,13 @@ impl GuiConfigState {
         self.set_download_candidate(VersionDownloadCandidate::builtin(download_source))
     }
 
+    fn set_update_channel(&self, update_channel: &str) -> Result<GuiConfigFile, String> {
+        self.update(|config| {
+            config.update_channel = update_channel.to_string();
+            Ok(())
+        })
+    }
+
     fn set_download_candidate(
         &self,
         candidate: VersionDownloadCandidate,
@@ -2150,10 +2328,16 @@ impl GuiConfigState {
         Ok(Some(config))
     }
 
-    fn set_window_size(&self, size: SavedWindowSize) -> Result<GuiConfigFile, String> {
+    fn set_window_geometry(
+        &self,
+        size: SavedWindowSize,
+        position: Option<tauri::PhysicalPosition<i32>>,
+    ) -> Result<GuiConfigFile, String> {
         self.update(|config| {
             config.window_width = Some(size.width);
             config.window_height = Some(size.height);
+            config.window_x = position.map(|position| position.x);
+            config.window_y = position.map(|position| position.y);
             Ok(())
         })
     }
@@ -2166,14 +2350,18 @@ impl GuiConfigState {
     }
 
     fn sync_core_settings(&self, settings: &CoreConfigSettings) -> Result<GuiConfigFile, String> {
-        self.sync_core_settings_internal(settings, None, false)
+        self.sync_core_settings_internal(settings, None, false, false)
+    }
+
+    fn sync_core_logging_settings(&self, settings: &CoreConfigSettings) -> Result<GuiConfigFile, String> {
+        self.sync_core_settings_internal(settings, None, false, true)
     }
 
     fn sync_core_settings_external(
         &self,
         settings: &CoreConfigSettings,
     ) -> Result<GuiConfigFile, String> {
-        self.sync_core_settings_internal(settings, None, true)
+        self.sync_core_settings_internal(settings, None, true, false)
     }
 
     fn sync_core_settings_with_api_key(
@@ -2181,7 +2369,7 @@ impl GuiConfigState {
         settings: &CoreConfigSettings,
         added_api_key: Option<GuiApiKeyEntry>,
     ) -> Result<GuiConfigFile, String> {
-        self.sync_core_settings_internal(settings, added_api_key, false)
+        self.sync_core_settings_internal(settings, added_api_key, false, false)
     }
 
     fn sync_core_settings_internal(
@@ -2189,6 +2377,7 @@ impl GuiConfigState {
         settings: &CoreConfigSettings,
         added_api_key: Option<GuiApiKeyEntry>,
         apply_external_proxy: bool,
+        save_usage_preference: bool,
     ) -> Result<GuiConfigFile, String> {
         self.update(|config| {
             config.api_keys = merge_core_api_keys_with_gui_metadata(
@@ -2206,6 +2395,9 @@ impl GuiConfigState {
             config.logs_max_total_size_mb = settings.logs_max_total_size_mb;
             config.error_logs_max_files = settings.error_logs_max_files;
             config.usage_statistics_enabled = settings.usage_statistics_enabled;
+            if save_usage_preference {
+                config.usage_statistics_disabled = (!settings.usage_statistics_enabled).then_some(true);
+            }
             config.redis_usage_queue_retention_seconds =
                 settings.redis_usage_queue_retention_seconds;
             config.request_log = settings.request_log;
@@ -2268,6 +2460,8 @@ impl From<&GuiConfigFile> for CoreConfigSettings {
             port: config.port,
             auth_dir: config.auth_dir.clone(),
             api_keys: gui_api_key_values(&config.api_keys),
+            auth_dir_configured: true,
+            api_keys_configured: true,
             management_secret_configured: !config.management_secret_key.is_empty(),
             debug: config.debug,
             commercial_mode: config.commercial_mode,
@@ -2348,6 +2542,10 @@ struct GithubAsset {
 
 fn main() {
     let helper_args = env::args_os().collect::<Vec<_>>();
+    if helper_args.get(1).is_some_and(|a| a == "--cpa-copilot-cli") {
+        let code = run_copilot_helper(&helper_args).unwrap_or_else(|error| { eprintln!("{error}"); 1 });
+        std::process::exit(code);
+    }
     if antigravity_helper_requested(&helper_args) {
         let code = run_antigravity_helper(&helper_args).unwrap_or_else(|error| {
             eprintln!("{error}");
@@ -2370,9 +2568,19 @@ fn main() {
         }
     }
 
+    // SAFETY: no worker threads or GTK/WebKit runtime have started yet.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        linux_graphics::configure();
+    }
+
     let _instance_guard = match acquire_app_instance_guard() {
         Ok(guard) => guard,
         Err(error) => {
+            #[cfg(target_os = "linux")]
+            if portable_update_ack_argument().is_none() && request_running_app_activation() {
+                return;
+            }
             eprintln!("{error}");
             return;
         }
@@ -2394,13 +2602,24 @@ fn main() {
         }
     };
     let initial_window_size = configured_window_size(&gui_config);
+    let initial_window_position = configured_window_position(&gui_config);
     let start_hidden = should_start_hidden(&gui_config);
+
+    let context = tauri::generate_context!();
+    #[cfg(target_os = "linux")]
+    let context = {
+        let mut context = context;
+        // Prevent #491's partial blank rendering on Linux (AMD and NVIDIA): disable native
+        // transparency before build creates the window, not later in setup.
+        linux_graphics::configure_main_window(context.config_mut());
+        context
+    };
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
+            Some(vec![AUTOSTART_ARGUMENT]),
         ))
         .plugin(
             tauri_plugin_opener::Builder::new()
@@ -2409,16 +2628,52 @@ fn main() {
         )
         .manage(CoreDownloadState::default())
         .manage(AppUpdateState::default())
-        .manage(CoreProcessState::new(gui_config.start_core_on_launch))
+        .manage(window_activity::WindowActivity::default())
+        .manage(CoreProcessState::new(should_start_core_on_launch(
+            &gui_config,
+        )))
         .manage(DeepSeekHarnessProcessState::default())
         .manage(usage::UsageCollectorState::default())
+        .manage(agent_usage::AgentUsageState::default())
         .manage(GuiConfigState::new(gui_config))
-        .manage(MainWindowSizeState::new(initial_window_size))
-        .manage(AgentConfigStatusCache::default());
+        .manage(plugin_webview::PluginWebviewState::default())
+        .manage(MainWindowState::new(
+            initial_window_size,
+            initial_window_position,
+        ))
+        .manage(AgentConfigStatusCache::default())
+        .manage(reverse_proxy::ReverseProxyManagerState::default());
 
     let app = app.on_window_event(|window, event| {
         if window.label() != "main" {
             return;
+        }
+
+        #[cfg(windows)]
+        if matches!(
+            event,
+            tauri::WindowEvent::Resized(_)
+                | tauri::WindowEvent::ScaleFactorChanged { .. }
+                | tauri::WindowEvent::Focused(true)
+        ) {
+            webview_recovery::request(window.app_handle());
+        }
+
+        if matches!(event, tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Focused(_)) {
+            window_activity::sync(window.app_handle());
+        }
+
+        if let tauri::WindowEvent::Moved(position) = event {
+            let state = window.state::<MainWindowState>();
+            // Ignore startup placement and the OS's minimized/maximized coordinates.
+            if state.position_tracking.load(Ordering::Acquire)
+                && !window.is_minimized().unwrap_or(true)
+                && !window.is_maximized().unwrap_or(true)
+            {
+                if let Err(error) = state.replace_position(*position) {
+                    eprintln!("Failed to record main window position: {error}");
+                }
+            }
         }
 
         let observed_size = match event {
@@ -2436,7 +2691,7 @@ fn main() {
         };
 
         if let Some(observed_size) = observed_size {
-            let window_size_state = window.state::<MainWindowSizeState>();
+            let window_size_state = window.state::<MainWindowState>();
             if let Err(error) = window_size_state.replace(observed_size) {
                 eprintln!("Failed to record main window size: {error}");
             }
@@ -2449,7 +2704,7 @@ fn main() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 set_macos_dock_visible(window.app_handle(), false);
-                if let Err(error) = window.hide() {
+                if let Err(error) = window_activity::hide(window) {
                     eprintln!("Failed to hide main window: {error}");
                     set_macos_dock_visible(window.app_handle(), true);
                 }
@@ -2471,6 +2726,16 @@ fn main() {
 
     let app = app
         .setup(move |app| {
+            // Match WindowFrame's Windows-only shell before showing the main window.
+            #[cfg(target_os = "windows")]
+            if let Some(window) = app.get_webview_window("main") {
+                windows_frame::install(&window)?;
+                window.set_decorations(false)?;
+                webview_recovery::install(&window)?;
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_background_color(Some(tauri::window::Color(255, 255, 255, 255)))?;
+            }
             if let Err(error) = network_proxy::refresh(app.state::<GuiConfigState>().inner()) {
                 eprintln!("Failed to read startup proxy settings: {error}");
             }
@@ -2480,18 +2745,15 @@ fn main() {
             if let Err(error) = load_codex_model_catalog_override(app.handle()) {
                 eprintln!("Failed to load Codex model catalog update file; using bundled catalog: {error}");
             }
-            let catalog_update_app = app.handle().clone();
             if let Err(error) = load_codex_model_customizations(app.handle()) {
                 eprintln!("Failed to load Codex custom model configuration: {error}");
             }
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) = update_codex_model_catalog_inner(&catalog_update_app).await {
-                    eprintln!("Failed to update Codex model catalog in the background; continuing with current catalog: {error}");
-                }
-            });
-            if let Err(error) = restore_main_window_size(app.handle()) {
+            if let Err(error) = restore_main_window_geometry(app.handle()) {
                 eprintln!("{error}");
             }
+            app.state::<MainWindowState>()
+                .position_tracking
+                .store(true, Ordering::Release);
 
             #[cfg(target_os = "macos")]
             setup_macos_tray(app)?;
@@ -2508,6 +2770,21 @@ fn main() {
                 eprintln!("Failed to configure startup window state: {error}");
             }
 
+            #[cfg(target_os = "linux")]
+            {
+                let activation_app = app.handle().clone();
+                if let Err(error) = start_app_activation_listener(move || {
+                    let app_handle = activation_app.clone();
+                    if let Err(error) = activation_app
+                        .run_on_main_thread(move || show_windows_main_window(&app_handle))
+                    {
+                        eprintln!("Failed to schedule showing the main window: {error}");
+                    }
+                }) {
+                    eprintln!("{error}");
+                }
+            }
+
             if let Err(error) =
                 configuration_watcher::start_configuration_file_watcher(app.handle().clone())
             {
@@ -2515,7 +2792,9 @@ fn main() {
             }
 
             network_proxy::start_monitor(app.handle().clone());
+            core_recovery::start(app.handle().clone());
             start_codex_model_catalog_sync(app.handle().clone());
+            agent_usage::start_background_sync(app.handle().clone());
 
             let usage_app = app.handle().clone();
             tauri::async_runtime::spawn_blocking(move || {
@@ -2539,6 +2818,7 @@ fn main() {
             });
 
             let core_app = app.handle().clone();
+            let runtime_update_ack = portable_update_ack.clone();
             tauri::async_runtime::spawn_blocking(move || {
                 let Ok(_guard) = CORE_OPERATION_LOCK.lock() else {
                     return;
@@ -2554,7 +2834,7 @@ fn main() {
                     return;
                 };
 
-                if config.start_core_on_launch {
+                if should_start_core_on_launch(&config) {
                     if let Ok(status) =
                         current_core_status(Some(process_state.inner()), Some(config.port))
                     {
@@ -2565,11 +2845,19 @@ fn main() {
                 match auto_install_bundled_core_if_needed(&core_app) {
                     Ok(true) => eprintln!("Automatically installed or upgraded to the CPA kernel version bundled with the application"),
                     Ok(false) => {}
-                    Err(error) => eprintln!("Failed to automatically install CPA offline kernel: {error}"),
+                    Err(error) => {
+                        eprintln!("Failed to automatically install CPA offline kernel: {error}");
+                        if runtime_update_ack.is_some() {
+                            process_state.set_starting(false);
+                            return;
+                        }
+                    }
                 }
 
-                let adopted_process_ids = match adopt_existing_core_processes(process_state.inner())
-                {
+                let adopted_process_ids = match adopt_existing_core_processes(
+                    process_state.inner(),
+                    &config,
+                ) {
                     Ok(process_ids) => process_ids,
                     Err(error) => {
                         eprintln!("Failed to scan for and adopt the CPA kernel in the current directory: {error}");
@@ -2586,8 +2874,18 @@ fn main() {
                             .join(", ")
                     );
                 } else if should_start_core_on_launch(&config) {
-                    if let Err(error) = start_core_process_inner(process_state.inner(), &config) {
+                    let start_result = retry_core_operation(3, Duration::from_millis(400), || {
+                        process_state.ensure_active()?;
+                        start_core_process_inner(process_state.inner(), &config)
+                    });
+                    if let Err(error) = start_result {
                         eprintln!("Failed to automatically start CPA kernel: {error}");
+                        if runtime_update_ack.is_some() {
+                            process_state.set_starting(false);
+                            return;
+                        }
+                    } else if let Err(error) = gui_config_state.set_run_on_startup(true) {
+                        eprintln!("Failed to save automatically started kernel state: {error}");
                     }
                 }
 
@@ -2598,21 +2896,54 @@ fn main() {
                 {
                     emit_core_status(&core_app, &status);
                 }
+                if let Some(ack_path) = runtime_update_ack.as_ref() {
+                    let core_expected =
+                        !adopted_process_ids.is_empty() || should_start_core_on_launch(&config);
+                    if let Err(error) = acknowledge_update_runtime(
+                        ack_path,
+                        process_state.inner(),
+                        &config,
+                        core_expected,
+                    ) {
+                        eprintln!("Application update runtime acceptance failed: {error}");
+                    }
+                }
             });
-
-            if let Some(ack_path) = portable_update_ack.as_ref() {
-                fs::write(ack_path, env!("CARGO_PKG_VERSION").as_bytes())
-                    .map_err(|error| format!("Failed to write application update startup confirmation: {error}"))?;
-            }
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            window_activity::main_window_active,
             desktop_theme::get_linux_system_theme,
+            desktop_theme::list_custom_themes,
+            desktop_theme::open_custom_themes_directory,
+            desktop_theme::get_theme_selection,
+            desktop_theme::save_theme_selection,
+            window_material::detect_window_material,
+            window_material::set_window_material,
+            privacy_mode::get_privacy_mode,
+            privacy_mode::save_privacy_mode,
             health_check,
             detect_core_platform,
             get_core_status,
             get_gui_settings,
+            get_usage_view_preferences,
+            save_usage_view_preferences,
+            agent_usage::get_agent_usage,
+            agent_usage::sync_agent_usage,
+            agent_usage::get_agent_usage_storage,
+            agent_usage::clear_agent_usage_history,
+            mcp_servers::list_mcp_servers,
+            mcp_servers::save_mcp_server,
+            mcp_servers::delete_mcp_server,
+            mcp_servers::set_mcp_server_enabled,
+            mcp_servers::sync_mcp_server_to_openclaw,
+            mcp_servers::import_mcp_servers_json,
+            mcp_servers::export_mcp_servers_json,
+            mcp_servers::open_mcp_skills_directory,
+            agent_skills::list_skills,
+            agent_skills::get_skill_detail,
+            agent_skills::set_skill_enabled,
             resolve_api_access_remarks,
             save_api_access_remark,
             set_app_locale,
@@ -2620,6 +2951,7 @@ fn main() {
             get_software_settings,
             save_software_settings,
             get_agent_config_statuses,
+            get_agent_environment_options,
             create_agent_config_backup,
             list_agent_config_backups,
             preview_agent_config_backup,
@@ -2640,6 +2972,8 @@ fn main() {
             save_deepseek_harness_model_catalog_editor,
             get_codex_model_catalog_editor,
             save_codex_model_catalog_editor,
+            get_zcode_model_catalog_editor,
+            save_zcode_model_catalog_editor,
             get_thinking_aliases,
             get_model_alias_sources,
             get_model_alias_edit_source,
@@ -2653,6 +2987,12 @@ fn main() {
             apply_agent_config,
             clear_codex_config,
             restore_codex_official_config,
+            set_codex_openai_provider,
+            set_codex_remote_compaction,
+            get_codex_subagent_config,
+            save_codex_subagent_config,
+            get_zcode_subagent_config,
+            save_zcode_subagent_config,
             close_codex_config_modification,
             set_agent_config_enabled,
             update_agent_config,
@@ -2663,6 +3003,8 @@ fn main() {
             restart_agent_app,
             restart_codex_app,
             restart_opencode_app,
+            get_codex_cli_daemon_running,
+            restart_codex_cli_daemon,
             get_lan_ipv4,
             save_gui_settings,
             save_network_routing_settings,
@@ -2684,12 +3026,20 @@ fn main() {
             set_core_management_secret_key,
             clear_core_management_secret_key,
             management_api::management_request,
+            management_api::prepare_management_request,
+            management_api::cancel_management_request,
             plugins::get_plugin_support,
-            plugins::get_plugin_resource_url,
+            plugins::local_install::install_local_plugin,
+            plugin_webview::show_plugin_webview,
+            plugin_webview::set_plugin_webview_bounds,
+            plugin_webview::hide_plugin_webview,
+            plugin_webview::close_plugin_webview,
+            plugins::get_plugin_latest_releases,
             provider_health::provider_health_probe,
             provider_health::get_core_models,
             provider_health::core_health_probe,
             management_api::upload_auth_file,
+            management_api::import_vertex_credential,
             management_api::open_auth_files_directory,
             management_api::open_core_logs_directory,
             set_core_plugins_enabled,
@@ -2708,11 +3058,15 @@ fn main() {
             add_custom_download_mirror,
             remove_custom_download_mirror,
             set_prefer_gitcode_downloads,
+            get_update_channel,
+            list_update_channels,
+            set_update_channel,
             check_app_update,
             get_app_update_task,
             start_app_update,
             cancel_app_update,
             check_latest_core,
+            core_runtime::list_core_versions,
             detect_bundled_core,
             install_core_version,
             install_bundled_core,
@@ -2722,6 +3076,7 @@ fn main() {
             usage::get_usage_overview,
             usage::get_usage_analysis,
             usage::get_usage_events,
+            usage::save_usage_events_export,
             usage::get_usage_pricing,
             usage::subscription_value::get_subscription_value,
             usage::subscription_value::save_subscription_fees,
@@ -2745,9 +3100,16 @@ fn main() {
             codex_sessions::delete_codex_sessions,
             codex_sessions::repair_codex_session_metadata,
             codex_sessions::preview_codex_session_index_cleanup,
-            codex_sessions::apply_codex_session_index_cleanup
+            codex_sessions::apply_codex_session_index_cleanup,
+            codex_sessions::context::get_codex_session_context,
+            codex_sessions::context::save_codex_session_context,
+            codex_sessions::context::open_codex_session_rollout,
+            reverse_proxy::reverse_proxy_get_state,
+            reverse_proxy::reverse_proxy_apply,
+            reverse_proxy::reverse_proxy_start,
+            reverse_proxy::reverse_proxy_stop
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("failed to build app");
 
     app.run(|app_handle, event| match event {
@@ -2757,6 +3119,8 @@ fn main() {
             ..
         } => show_main_window(app_handle),
         tauri::RunEvent::ExitRequested { api, code, .. } => {
+            #[cfg(windows)]
+            webview_recovery::stop(app_handle);
             let process_state = app_handle.state::<CoreProcessState>();
             if process_state.shutdown_complete.load(Ordering::Acquire) {
                 return;
@@ -2765,8 +3129,9 @@ fn main() {
             if process_state.shutting_down.swap(true, Ordering::AcqRel) {
                 return;
             }
-            if let Err(error) = persist_main_window_size(app_handle) {
-                eprintln!("Failed to save main window size: {error}");
+            process_state.recovery.cancel();
+            if let Err(error) = persist_main_window_geometry(app_handle) {
+                eprintln!("Failed to save main window geometry: {error}");
             }
             app_handle.state::<CoreDownloadState>().cancel();
             let app_handle = app_handle.clone();
@@ -2788,6 +3153,8 @@ fn main() {
             });
         }
         tauri::RunEvent::Exit => {
+            #[cfg(windows)]
+            webview_recovery::stop(app_handle);
             usage::stop_usage_collector(app_handle);
             let deepseek_process_state = app_handle.state::<DeepSeekHarnessProcessState>();
             if let Err(error) = stop_managed_deepseek_harness(deepseek_process_state.inner()) {
@@ -2802,6 +3169,24 @@ fn main() {
         }
         _ => {}
     });
+}
+
+/// Returns a path under the system temporary directory that is unique for the
+/// lifetime of the test process. The wall clock alone is not enough: parallel
+/// tests that start within the clock's resolution would otherwise share a
+/// directory and delete or overwrite each other's files.
+#[cfg(test)]
+pub(crate) fn unique_test_temp_path(prefix: &str) -> PathBuf {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "{prefix}-{}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
 }
 
 #[cfg(test)]

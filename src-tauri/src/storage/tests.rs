@@ -466,3 +466,50 @@ fn backup_does_not_follow_symbolic_links() {
     assert!(fixture.start().last_error.unwrap().contains("Linked"));
     assert!(!destination.join(MANIFEST).exists());
 }
+
+#[test]
+fn upstream_preferences_and_agent_history_survive_backup_and_restore() {
+    let fixture = Fixture::new();
+    let files = [
+        "usage-view-preferences.json",
+        "theme-selection.json",
+        "privacy-mode.json",
+        "skill-states.json",
+        "mcp-servers.json",
+        "theme-preference.json",
+        "themes/custom.json",
+    ];
+    for path in files {
+        let file = fixture.source.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, "{\"fixture\":true}").unwrap();
+    }
+    fs::create_dir_all(fixture.source.join("agent-usage")).unwrap();
+    let connection = Connection::open(fixture.source.join("agent-usage/agent_usage.db")).unwrap();
+    connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE history (tokens INTEGER); INSERT INTO history VALUES (42);").unwrap();
+    let backup = fixture.backup();
+    assert!(!backup.join("agent-usage/agent_usage.db-wal").exists());
+    for path in files {
+        assert_eq!(
+            fs::read(backup.join(path)).unwrap(),
+            fs::read(fixture.source.join(path)).unwrap()
+        );
+    }
+    let destination = fixture.root.join("restored");
+    fixture.schedule(Operation::Restore {
+        backup,
+        destination: destination.clone(),
+    });
+    let result = fixture.start();
+    assert_eq!(result.last_error, None);
+    for path in files {
+        assert!(destination.join(path).is_file(), "{path}");
+    }
+    let restored = Connection::open(destination.join("agent-usage/agent_usage.db")).unwrap();
+    assert_eq!(
+        restored
+            .query_row("SELECT tokens FROM history", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        42
+    );
+}

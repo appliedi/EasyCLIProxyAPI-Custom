@@ -1,12 +1,22 @@
+import { EmptyState } from '../components/EmptyState';
+import { Checkbox } from '../components/Checkbox';
+import { onCodexSessionRepairProgress } from '../services/events';
+import {
+  listCodexSessions,
+  deleteCodexSessions,
+  repairCodexSessionMetadata,
+  previewCodexSessionIndexCleanup,
+  applyCodexSessionIndexCleanup,
+} from '../services/codexSessions';
 import { MessageNotice } from '../appNotice';
+import { CodexSessionContextEditor } from './CodexSessionContextEditor';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
 import {
   ArrowLeft,
   ArrowRight,
   Archive,
   Database,
+  FileText,
   LoaderCircle,
   RefreshCw,
   ScanSearch,
@@ -16,17 +26,14 @@ import {
   X,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
-import { useDialogFocusTrap } from '../components/useDialogFocusTrap';
+import { Dialog } from '../components/Dialog';
 import {
   codexSessionPageCounts,
   retainVisibleCodexSessionIds,
-  type CodexSessionDeleteBatchResult,
   type CodexSessionPage,
   type CodexSessionRepairProgress,
-  type CodexSessionRepairResult,
   type CodexSessionSummary,
   type SessionIndexCleanupPreview,
-  type SessionIndexCleanupResult,
 } from '../services/codexSessionState';
 
 type Notice = {
@@ -61,6 +68,8 @@ export function CodexSessionsPanel() {
   const [selectionMode, setSelectionMode] = useState(() => sessionViewCache.selectionMode);
   const [selectedIds, setSelectedIds] = useState(() => new Set(sessionViewCache.selectedIds));
   const [deleteConfirmation, setDeleteConfirmation] = useState<DeleteConfirmation | null>(null);
+  const [backupBeforeDelete, setBackupBeforeDelete] = useState(true);
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [cleanupPreview, setCleanupPreview] = useState<SessionIndexCleanupPreview | null>(null);
   const [cleanupSelectedIds, setCleanupSelectedIds] = useState<Set<string>>(() => new Set());
   const [repairProgress, setRepairProgress] = useState<CodexSessionRepairProgress>({
@@ -72,16 +81,6 @@ export function CodexSessionsPanel() {
   const mountedRef = useRef(false);
   const loadRequestRef = useRef(0);
   const initialOffsetRef = useRef(sessionViewCache.offset);
-  const deleteDialogRef = useDialogFocusTrap<HTMLElement>({
-    active: Boolean(deleteConfirmation),
-    onEscape: operation === 'delete' ? undefined : () => setDeleteConfirmation(null),
-    preventEscape: operation === 'delete',
-  });
-  const cleanupDialogRef = useDialogFocusTrap<HTMLElement>({
-    active: Boolean(cleanupPreview),
-    onEscape: operation === 'cleanup' ? undefined : () => setCleanupPreview(null),
-    preventEscape: operation === 'cleanup',
-  });
 
   useEffect(() => {
     mountedRef.current = true;
@@ -107,7 +106,7 @@ export function CodexSessionsPanel() {
       setNotice((current) => current?.kind === 'error' ? null : current);
     }
     try {
-      const result = await invoke<CodexSessionPage>('list_codex_sessions', {
+      const result = await listCodexSessions({
         request: { offset, limit: PAGE_SIZE },
       });
       if (!mountedRef.current || requestId !== loadRequestRef.current) return null;
@@ -136,7 +135,7 @@ export function CodexSessionsPanel() {
   useEffect(() => {
     let disposed = false;
     let stop: (() => void) | undefined;
-    void listen<CodexSessionRepairProgress>('codex-session-repair-progress', (event) => {
+    void onCodexSessionRepairProgress((event) => {
       if (!disposed) setRepairProgress(event.payload);
     }).then((unlisten) => {
       if (disposed) unlisten();
@@ -175,6 +174,7 @@ export function CodexSessionsPanel() {
       .map((session) => session.title || session.id)
       .join('、');
     const extra = Math.max(0, targets.length - 6);
+    setBackupBeforeDelete(true);
     setDeleteConfirmation({
       ids: targets.map((session) => session.id),
       title: targets.length === 1
@@ -197,8 +197,8 @@ export function CodexSessionsPanel() {
     setOperation('delete');
     setNotice(null);
     try {
-      const result = await invoke<CodexSessionDeleteBatchResult>('delete_codex_sessions', {
-        request: { sessionIds: request.ids },
+      const result = await deleteCodexSessions({
+        request: { sessionIds: request.ids, skipBackup: !backupBeforeDelete },
       });
       const failed = result.results.filter((item) => !['deleted', 'partial'].includes(item.status));
       const partial = result.results.filter((item) => item.status === 'partial');
@@ -229,7 +229,7 @@ export function CodexSessionsPanel() {
     setNotice(null);
     setRepairProgress({ phase: 'scanning', percent: 4, processed: 0, total: 0 });
     try {
-      const result = await invoke<CodexSessionRepairResult>('repair_codex_session_metadata');
+      const result = await repairCodexSessionMetadata();
       const messages = [
         t('agents.sessions.repairResult', {
           provider: result.targetProvider,
@@ -257,7 +257,7 @@ export function CodexSessionsPanel() {
     setOperation('preview');
     setNotice(null);
     try {
-      const preview = await invoke<SessionIndexCleanupPreview>('preview_codex_session_index_cleanup');
+      const preview = await previewCodexSessionIndexCleanup();
       setCleanupSelectedIds(new Set());
       if (preview.candidates.length === 0) {
         setCleanupPreview(null);
@@ -280,7 +280,7 @@ export function CodexSessionsPanel() {
     setOperation('cleanup');
     setNotice(null);
     try {
-      const result = await invoke<SessionIndexCleanupResult>('apply_codex_session_index_cleanup', {
+      const result = await applyCodexSessionIndexCleanup({
         request: {
           snapshotSha256: cleanupPreview.snapshotSha256,
           threadIds: Array.from(cleanupSelectedIds),
@@ -311,9 +311,19 @@ export function CodexSessionsPanel() {
     | 'agents.sessions.progress.updatingDatabase'
     | 'agents.sessions.progress.complete');
 
+  if (editingSessionId) {
+    return (
+      <CodexSessionContextEditor
+        sessionId={editingSessionId}
+        onBack={() => setEditingSessionId(null)}
+        onSessionUpdated={() => void loadPage(currentOffset, true)}
+      />
+    );
+  }
+
   return (
     <div className="codex-sessions-page">
-      <section className="codex-session-overview">
+      <section className="surface-section surface-muted codex-session-overview">
         <div className="codex-session-overview-head">
           <div>
             <strong>{t('agents.sessions.title')}</strong>
@@ -321,7 +331,7 @@ export function CodexSessionsPanel() {
           </div>
           <button
             type="button"
-            className="secondary-button compact-button"
+            className="secondary-button small-button"
             disabled={busy || loading}
             onClick={() => void loadPage(currentOffset)}
           >
@@ -343,7 +353,7 @@ export function CodexSessionsPanel() {
           </div>
         </div>
 
-        <div className="codex-session-repair-panel">
+        <div className="surface-section codex-session-repair-panel">
           <div className="codex-session-repair-copy">
             <ShieldCheck size={18} />
             <div>
@@ -354,7 +364,7 @@ export function CodexSessionsPanel() {
           <div className="codex-session-repair-actions">
             <button
               type="button"
-              className="secondary-button compact-button"
+              className="secondary-button small-button"
               disabled={busy || loading}
               onClick={() => void previewCleanup()}
             >
@@ -363,7 +373,7 @@ export function CodexSessionsPanel() {
             </button>
             <button
               type="button"
-              className="secondary-button compact-button"
+              className="secondary-button small-button"
               disabled={busy}
               onClick={() => void repairSessions()}
             >
@@ -399,7 +409,7 @@ export function CodexSessionsPanel() {
 
       <MessageNotice message={notice?.message} tone={notice?.kind === 'warning' ? 'info' : notice?.kind ?? 'info'} onDismiss={() => setNotice(null)} />
 
-      <section className="codex-session-list-section">
+      <section className="surface-section codex-session-list-section">
         <div className="codex-session-list-head">
           <div>
             <strong>{t('agents.sessions.localSessions')}</strong>
@@ -409,14 +419,14 @@ export function CodexSessionsPanel() {
             {selectionMode ? <span>{t('agents.sessions.selected', { count: selectedSessions.length })}</span> : null}
             {selectionMode ? (
               <>
-                <button type="button" className="secondary-button compact-button" disabled={busy || allSelected} onClick={() => setSelectedIds(new Set(sessions.map((session) => session.id)))}>{t('agents.sessions.selectAll')}</button>
-                <button type="button" className="secondary-button compact-button" disabled={busy || selectedIds.size === 0} onClick={() => setSelectedIds(new Set())}>{t('agents.sessions.clearSelection')}</button>
-                <button type="button" className="danger-button compact-button" disabled={busy || selectedSessions.length === 0} onClick={() => requestDelete(selectedSessions)}><Trash2 size={14} />{t('agents.sessions.deleteSelected')}</button>
+                <button type="button" className="secondary-button small-button" disabled={busy || allSelected} onClick={() => setSelectedIds(new Set(sessions.map((session) => session.id)))}>{t('agents.sessions.selectAll')}</button>
+                <button type="button" className="secondary-button small-button" disabled={busy || selectedIds.size === 0} onClick={() => setSelectedIds(new Set())}>{t('agents.sessions.clearSelection')}</button>
+                <button type="button" className="danger-button small-button" disabled={busy || selectedSessions.length === 0} onClick={() => requestDelete(selectedSessions)}><Trash2 size={14} />{t('agents.sessions.deleteSelected')}</button>
               </>
             ) : null}
             <button
               type="button"
-              className="secondary-button compact-button"
+              className="secondary-button small-button"
               disabled={busy || sessions.length === 0}
               onClick={() => {
                 setSelectionMode((current) => !current);
@@ -429,21 +439,16 @@ export function CodexSessionsPanel() {
         </div>
 
         {loading ? (
-          <div className="codex-session-empty"><LoaderCircle size={22} className="spin" /><span>{t('agents.sessions.loading')}</span></div>
+          <EmptyState variant="box" className="codex-session-empty" icon={<LoaderCircle size={22} className="spin" />}>{t('agents.sessions.loading')}</EmptyState>
         ) : sessions.length === 0 ? (
-          <div className="codex-session-empty"><Archive size={22} /><span>{t('agents.sessions.empty')}</span></div>
+          <EmptyState variant="box" className="codex-session-empty" icon={<Archive size={22} />}>{t('agents.sessions.empty')}</EmptyState>
         ) : (
-          <div className="codex-session-list">
+          <div className="surface-section codex-session-list">
             {sessions.map((session) => (
               <article className={`codex-session-row ${selectedIds.has(session.id) ? 'selected' : ''}`} key={session.id}>
                 {selectionMode ? (
                   <label className="codex-session-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={selectedIds.has(session.id)}
-                      aria-label={t('agents.sessions.selectSession', { title: session.title || session.id })}
-                      onChange={(event) => toggleSelected(session.id, event.currentTarget.checked)}
-                    />
+                    <Checkbox checked={selectedIds.has(session.id)} aria-label={t('agents.sessions.selectSession', { title: session.title || session.id })} onChange={(event) => toggleSelected(session.id, event.currentTarget.checked)} />
                   </label>
                 ) : null}
                 <div className="codex-session-main">
@@ -456,15 +461,27 @@ export function CodexSessionsPanel() {
                   <small>{session.modelProvider || t('agents.sessions.noProvider')}</small>
                   <time>{session.updatedAtMs ? formatDate(session.updatedAtMs, { dateStyle: 'medium', timeStyle: 'short' }) : t('agents.sessions.noTime')}</time>
                 </div>
-                <button
-                  type="button"
-                  className="danger-button compact-button codex-session-delete-button"
-                  disabled={busy}
-                  onClick={() => requestDelete([session])}
-                >
-                  <Trash2 size={14} />
-                  {t('common.delete')}
-                </button>
+                <div className="codex-session-actions">
+                  <button
+                    type="button"
+                    className="secondary-button small-button codex-session-context-button"
+                    disabled={busy}
+                    onClick={() => setEditingSessionId(session.id)}
+                    title={t('agents.sessions.editContext')}
+                  >
+                    <FileText size={14} />
+                    <span>{t('agents.sessions.editContext')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="danger-button small-button codex-session-delete-button"
+                    disabled={busy}
+                    onClick={() => requestDelete([session])}
+                  >
+                    <Trash2 size={14} />
+                    {t('common.delete')}
+                  </button>
+                </div>
               </article>
             ))}
           </div>
@@ -492,63 +509,58 @@ export function CodexSessionsPanel() {
       </section>
 
       {deleteConfirmation ? (
-        <div className="config-dialog-backdrop">
-          <section ref={deleteDialogRef} className="config-dialog codex-session-dialog" role="alertdialog" aria-modal="true" aria-labelledby="codex-session-delete-title">
-            <div className="config-dialog-heading"><div><TriangleAlert size={19} /><h2 id="codex-session-delete-title">{deleteConfirmation.title}</h2></div></div>
+        <Dialog alert className="config-dialog codex-session-dialog" labelledBy="codex-session-delete-title" onClose={() => setDeleteConfirmation(null)} closeDisabled={operation === 'delete'}>
+          <div className="config-dialog-heading"><div><TriangleAlert size={19} /><h2 id="codex-session-delete-title">{deleteConfirmation.title}</h2></div></div>
+          <div className="codex-session-delete-content">
             <p>{deleteConfirmation.description}</p>
-            <div className="config-dialog-actions two-actions">
-              <button type="button" className="secondary-button" onClick={() => setDeleteConfirmation(null)}>{t('common.cancel')}</button>
-              <button type="button" className="danger-button" onClick={() => void confirmDelete()}><Trash2 size={15} />{t('agents.sessions.confirmDelete')}</button>
-            </div>
-          </section>
-        </div>
+            <label className="codex-session-delete-backup">
+              <Checkbox checked={backupBeforeDelete} onChange={(event) => setBackupBeforeDelete(event.currentTarget.checked)} />
+              <span>{t('agents.sessions.backupBeforeDelete')}</span>
+            </label>
+            {!backupBeforeDelete ? <p>{t('agents.sessions.deleteWithoutBackupWarning')}</p> : null}
+          </div>
+          <div className="config-dialog-actions two-actions">
+            <button type="button" className="secondary-button" onClick={() => setDeleteConfirmation(null)}>{t('common.cancel')}</button>
+            <button type="button" className="danger-button" onClick={() => void confirmDelete()}><Trash2 size={15} />{t(backupBeforeDelete ? 'agents.sessions.confirmDelete' : 'agents.sessions.confirmDeleteWithoutBackup')}</button>
+          </div>
+        </Dialog>
       ) : null}
 
       {cleanupPreview ? (
-        <div className="config-dialog-backdrop">
-          <section ref={cleanupDialogRef} className="config-dialog codex-session-cleanup-dialog" role="dialog" aria-modal="true" aria-labelledby="codex-session-cleanup-title">
-            <div className="config-dialog-heading">
-              <div><TriangleAlert size={19} /><h2 id="codex-session-cleanup-title">{t('agents.sessions.cleanupTitle')}</h2></div>
-              <button type="button" className="codex-session-dialog-close" aria-label={t('common.close')} onClick={() => setCleanupPreview(null)}><X size={16} /></button>
-            </div>
-            <p>{t('agents.sessions.cleanupDescription', { count: cleanupPreview.candidates.length })}</p>
-            <label className="codex-session-cleanup-select-all">
-              <input
-                type="checkbox"
-                checked={cleanupSelectedIds.size === cleanupPreview.candidates.length && cleanupPreview.candidates.length > 0}
-                onChange={(event) => setCleanupSelectedIds(event.currentTarget.checked ? new Set(cleanupPreview.candidates.map((candidate) => candidate.id)) : new Set())}
-              />
-              <span>{t('agents.sessions.cleanupSelectAll')}</span>
-            </label>
-            <div className="codex-session-cleanup-list">
-              {cleanupPreview.candidates.map((candidate) => (
-                <label key={candidate.id}>
-                  <input
-                    type="checkbox"
-                    checked={cleanupSelectedIds.has(candidate.id)}
-                    onChange={(event) => {
-                      const checked = event.currentTarget.checked;
-                      setCleanupSelectedIds((current) => {
-                        const next = new Set(current);
-                        if (checked) next.add(candidate.id);
-                        else next.delete(candidate.id);
-                        return next;
-                      });
-                    }}
-                  />
-                  <span><strong>{candidate.threadName || t('agents.sessions.untitled')}</strong><code>{candidate.id}</code><small>{candidate.updatedAt}</small></span>
-                </label>
-              ))}
-            </div>
-            <div className="config-dialog-actions two-actions">
-              <button type="button" className="secondary-button" disabled={operation === 'cleanup'} onClick={() => setCleanupPreview(null)}>{t('common.cancel')}</button>
-              <button type="button" className="danger-button" disabled={operation === 'cleanup' || cleanupSelectedIds.size === 0} onClick={() => void applyCleanup()}>
-                {operation === 'cleanup' ? <LoaderCircle size={15} className="spin" /> : <Trash2 size={15} />}
-                {t('agents.sessions.cleanupConfirm', { count: cleanupSelectedIds.size })}
-              </button>
-            </div>
-          </section>
-        </div>
+        <Dialog className="config-dialog codex-session-cleanup-dialog" labelledBy="codex-session-cleanup-title" onClose={() => setCleanupPreview(null)} closeDisabled={operation === 'cleanup'}>
+          <div className="config-dialog-heading">
+            <div><TriangleAlert size={19} /><h2 id="codex-session-cleanup-title">{t('agents.sessions.cleanupTitle')}</h2></div>
+            <button type="button" className="icon-button quiet ghost tiny-button" aria-label={t('common.close')} onClick={() => setCleanupPreview(null)}><X size={16} /></button>
+          </div>
+          <p>{t('agents.sessions.cleanupDescription', { count: cleanupPreview.candidates.length })}</p>
+          <label className="codex-session-cleanup-select-all">
+            <Checkbox checked={cleanupSelectedIds.size === cleanupPreview.candidates.length && cleanupPreview.candidates.length > 0} indeterminate={cleanupSelectedIds.size > 0 && cleanupSelectedIds.size < cleanupPreview.candidates.length} onChange={(event) => setCleanupSelectedIds(event.currentTarget.checked ? new Set(cleanupPreview.candidates.map((candidate) => candidate.id)) : new Set())} />
+            <span>{t('agents.sessions.cleanupSelectAll')}</span>
+          </label>
+          <div className="surface-section codex-session-cleanup-list">
+            {cleanupPreview.candidates.map((candidate) => (
+              <label key={candidate.id}>
+                <Checkbox checked={cleanupSelectedIds.has(candidate.id)} onChange={(event) => {
+                    const checked = event.currentTarget.checked;
+                    setCleanupSelectedIds((current) => {
+                      const next = new Set(current);
+                      if (checked) next.add(candidate.id);
+                      else next.delete(candidate.id);
+                      return next;
+                    });
+                  }} />
+                <span><strong>{candidate.threadName || t('agents.sessions.untitled')}</strong><code>{candidate.id}</code><small>{candidate.updatedAt}</small></span>
+              </label>
+            ))}
+          </div>
+          <div className="config-dialog-actions two-actions">
+            <button type="button" className="secondary-button" disabled={operation === 'cleanup'} onClick={() => setCleanupPreview(null)}>{t('common.cancel')}</button>
+            <button type="button" className="danger-button" disabled={operation === 'cleanup' || cleanupSelectedIds.size === 0} onClick={() => void applyCleanup()}>
+              {operation === 'cleanup' ? <LoaderCircle size={15} className="spin" /> : <Trash2 size={15} />}
+              {t('agents.sessions.cleanupConfirm', { count: cleanupSelectedIds.size })}
+            </button>
+          </div>
+        </Dialog>
       ) : null}
     </div>
   );

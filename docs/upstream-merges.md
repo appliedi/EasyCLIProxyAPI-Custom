@@ -18,14 +18,16 @@ Use separate refs for upstream releases: our `v*` tags trigger our releases and 
 
 | Field | Value |
 | --- | --- |
-| Custom release | `0.4.1` |
-| Upstream desktop release | `v0.3.22` |
-| Upstream commit | `56a88ccb6f9128793a810b2bb17a474dade2939b` |
-| Core version | `8.0.15` |
-| Custom pre-merge checkpoint | `5d5bab29e68145dc1d2f731940089476f8c0f691` |
-| Merge commit | `dbd0a11de81739168c2e3355ac57ed4275d9202f` |
+| Custom version | `0.4.2` (Unreleased; latest published `0.4.1`) |
+| Upstream desktop release | `v0.3.76` |
+| Upstream commit | `027cdb94d228907a3922d807d5790b52d0d08600` |
+| Core version | `8.0.52` |
+| Custom pre-merge checkpoint | `d09537044137d30f3c520ba0053b1ad5d8bad9b4` |
+| Merge commit | `PENDING_MERGE_COMMIT` |
 
-The merge had conflicts in `src/pages/QuotaPage.tsx`, `src/pages/QuotaPage.css`, `src/mocks/browserMockRuntime.ts`, and `tests/quotaRendering.test.tsx`. We combined the dashboard with upstream reset/expiry behavior, preserved ledger layout, and adopted the expanded upstream quota mocks. In 0.4.1, the custom dashboard moved to `SubscriptionUsagePage.tsx`/`.css`; `QuotaPage.tsx`/`.css` now match this upstream base exactly. Preserve that separation during future merges.
+See the [v0.3.76 integration report](upstream-0.3.76-validation.md) for resolutions, passing checks and inherited failures. No release has been published for this merge.
+
+The previous v0.3.22 merge (`dbd0a11de81739168c2e3355ac57ed4275d9202f`) had conflicts in `src/pages/QuotaPage.tsx`, `src/pages/QuotaPage.css`, `src/mocks/browserMockRuntime.ts`, and `tests/quotaRendering.test.tsx`. We combined the dashboard with upstream reset/expiry behavior, preserved ledger layout, and adopted the expanded upstream quota mocks. In 0.4.1, the custom dashboard moved to `SubscriptionUsagePage.tsx`/`.css`; `QuotaPage.tsx`/`.css` matched the v0.3.22 upstream base exactly. Preserve that separation during future merges.
 
 ## Customization map
 

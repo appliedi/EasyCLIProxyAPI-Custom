@@ -140,6 +140,9 @@ fn merge_user_image(
             .map(|bytes| std::str::from_utf8(bytes).map_err(|_| "Original state is not UTF-8 text"))
             .transpose()?,
     )?;
+    if client == "vscode-copilot" {
+        return render(path, &merge_copilot_groups_original(&baseline_value, &current_value)).map(|s| Some(s.into_bytes()));
+    }
     let mut merged = merge_user_value(
         baseline.map(|_| &baseline_value),
         applied.map(|_| &applied_value),
@@ -259,13 +262,9 @@ pub(crate) fn validate_config_path(path: &Path) -> Result<(), String> {
     for ancestor in path.ancestors() {
         match fs::symlink_metadata(ancestor) {
             Ok(meta) => {
-                let linked = meta.file_type().is_symlink();
-                #[cfg(windows)]
-                let linked = {
-                    use std::os::windows::fs::MetadataExt;
-                    linked || meta.file_attributes() & 0x400 != 0
-                };
-                if linked {
+                if path_has_reparse_point(ancestor, &meta)
+                    && !relocated_configuration_root_allowed(ancestor)
+                {
                     return Err(format!(
                         "Configuration path cannot contain symbolic links: {}",
                         path_to_string(ancestor)
@@ -280,6 +279,161 @@ pub(crate) fn validate_config_path(path: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn path_has_reparse_point(path: &Path, meta: &fs::Metadata) -> bool {
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        let _ = path;
+        return meta.file_attributes() & 0x400 != 0;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// A configuration root may itself be relocated with a symlink or junction.
+/// Deeper links are still rejected so a file inside that root cannot escape it.
+fn relocated_configuration_root_allowed(path: &Path) -> bool {
+    let Ok(canonical_path) = normalize_existing_path(path) else {
+        return false;
+    };
+    if std::env::temp_dir()
+        .ancestors()
+        .any(|ancestor| ancestor == path)
+    {
+        return true;
+    }
+    let Some(home) = user_home_directory() else {
+        return false;
+    };
+    if home.ancestors().any(|ancestor| ancestor == path) {
+        return true;
+    }
+
+    configuration_root_candidates(&home)
+        .into_iter()
+        .any(|root| paths_equivalent(&root, path) || paths_equivalent(&root, &canonical_path))
+}
+
+fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (normalize_existing_path(left), normalize_existing_path(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn normalize_existing_path(path: &Path) -> Result<PathBuf, String> {
+    fs::canonicalize(path).map_err(|_| "Unable to resolve configuration path".into())
+}
+
+fn user_home_directory() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let name = "USERPROFILE";
+    #[cfg(not(windows))]
+    let name = "HOME";
+    env::var_os(name)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
+fn configuration_root_candidates(home: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![
+        home.join(".claude"),
+        home.join(".copilot"),
+        home.join(".codex"),
+        home.join(".config").join("opencode"),
+        home.join(".openclaw"),
+        home.join(".hermes"),
+        home.join(".dsh"),
+        home.join(".workbuddy"),
+        home.join(".workbuddy-ai"),
+        home.join(".gemini"),
+        home.join(".gemini").join("antigravity-cli"),
+        home.join(".zcode"),
+        home.join(".zcode").join("v2"),
+        home.join(".kimi-code"),
+        home.join(".grok"),
+        home.join(".omp"),
+        home.join(".omp").join("agent"),
+        home.join(".pi"),
+        home.join(".pi").join("agent"),
+        home.join(".minimax"),
+    ];
+    // ZCode may relocate its data directory; include the custom root so backups
+    // and restores cover the files CPA actually writes there.
+    if let Some(custom) = zcode_data_base_dir(home) {
+        roots.push(custom.join(".zcode"));
+        roots.push(custom.join(".zcode").join("v2"));
+    }
+    if let Some(parent) = copilot_config_paths(AgentClient::VscodeCopilot, home)[0].parent() {
+        roots.push(parent.to_path_buf());
+    }
+    if let Some(parent) = copilot_config_paths(AgentClient::CopilotCli, home)[0].parent() {
+        roots.push(parent.to_path_buf());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let support = home.join("Library/Application Support");
+        roots.push(support.join("Claude"));
+        roots.push(support.join("Claude-3p"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let local = env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .unwrap_or_else(|| home.join("AppData/Local"));
+        roots.push(local.join("Claude"));
+        roots.push(local.join("Claude-3p"));
+        roots.push(local.join("hermes"));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let config_home = env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .unwrap_or_else(|| home.join(".config"));
+        roots.push(config_home.join("Claude"));
+        roots.push(config_home.join("Claude-3p"));
+    }
+    for name in [
+        "CODEX_HOME",
+        "OPENCODE_CONFIG",
+        "XDG_CONFIG_HOME",
+        "OPENCLAW_CONFIG_PATH",
+        "OPENCLAW_STATE_DIR",
+        "OPENCLAW_HOME",
+        "KIMI_CODE_HOME",
+        "GROK_HOME",
+        "PI_CODING_AGENT_DIR",
+        "DSH_HOME",
+        "HERMES_HOME",
+        "WORKBUDDY_CONFIG_DIR",
+        "CODEBUDDY_CONFIG_DIR",
+        "MINIMAX_DATA_DIR",
+    ] {
+        if let Some(path) = env::var_os(name).map(PathBuf::from) {
+            if path.is_absolute() {
+                roots.push(path);
+            }
+        }
+    }
+    if let Ok(custom) = AGENT_CONFIG_DIRECTORIES
+        .try_with(|directories| directories.values().map(PathBuf::from).collect::<Vec<_>>())
+    {
+        roots.extend(custom);
+    }
+    roots
 }
 
 pub(crate) fn config_images(paths: &[PathBuf]) -> Result<Images, String> {
@@ -573,6 +727,10 @@ pub(crate) fn validate_config_images(images: &Images) -> Result<(), String> {
 
 pub(crate) fn validate_client_config_images(client: &str, images: &Images) -> Result<(), String> {
     validate_config_images(images)?;
+    if client == "vscode-copilot" {
+        for (path, bytes) in images { validate_copilot_groups_image(path, text(bytes.as_deref())?)?; }
+        return Ok(());
+    }
     if client == "workbuddy" {
         for (_, bytes) in images {
             parse_workbuddy_config(text(bytes.as_deref())?)?;
@@ -580,7 +738,11 @@ pub(crate) fn validate_client_config_images(client: &str, images: &Images) -> Re
         return Ok(());
     }
     for (path, bytes) in images {
-        if !parse(path, text(bytes.as_deref())?)?.is_object() {
+        let value = parse(path, text(bytes.as_deref())?)?;
+        let is_allowed_array = path.file_name().is_some_and(|n| {
+            n == "models.json" || n == "chatLanguageModels.json" || n == "cordis.patch.yml" || n == "cordis.patch.yaml"
+        }) && value.is_array();
+        if !value.is_object() && !is_allowed_array {
             return Err("Configuration root must be an object".into());
         }
     }
@@ -622,6 +784,12 @@ pub(crate) fn prepare_config_updates(
             .ok_or("Configuration update path mismatch")?;
         let mut rendered = update.after.clone();
         let mut generated = parse(&update.path, Some(&rendered))?;
+        if template && is_cordis_patch_path(&update.path) && !generated.is_array() {
+            return Err(format!(
+                "DSH Cordis profile patch must be a top-level YAML array: {}",
+                path_to_string(&update.path)
+            ));
+        }
         if !template {
             let original = parse(&update.path, text(entry.1.as_deref())?)?;
             if client == "codex"
@@ -750,6 +918,24 @@ fn preserve_model_extensions(client: &str, path: &Path, before: &Value, after: &
         let pointer = format!("/llm-pi-ai/providers/{DEEPSEEK_HARNESS_PROVIDER_ID}/models");
         if let (Some(old), Some(new)) = (before.pointer(&pointer), after.pointer_mut(&pointer)) {
             inventory(client, old, new);
+        } else if let (Some(old_arr), Some(new_arr)) = (before.as_array(), after.as_array_mut()) {
+            let old_models = old_arr
+                .iter()
+                .find(|entry| entry.get("id").and_then(Value::as_str) == Some("llm-pi-ai"))
+                .and_then(|e| e.get("config"))
+                .and_then(|c| c.get("providers"))
+                .and_then(|p| p.get(DEEPSEEK_HARNESS_PROVIDER_ID))
+                .and_then(|d| d.get("models"));
+            if let Some(old_models) = old_models {
+                if let Some(new_entry) = new_arr.iter_mut().find(|entry| entry.get("id").and_then(Value::as_str) == Some("llm-pi-ai")) {
+                    if let Some(new_models) = new_entry.get_mut("config")
+                        .and_then(|c| c.get_mut("providers"))
+                        .and_then(|p| p.get_mut(DEEPSEEK_HARNESS_PROVIDER_ID))
+                        .and_then(|d| d.get_mut("models")) {
+                        inventory(client, old_models, new_models);
+                    }
+                }
+            }
         }
     }
     if client == "hermes" {
@@ -832,19 +1018,40 @@ fn validate_unmanaged_preserved(
     if client == "workbuddy" {
         return validate_workbuddy_unmanaged_preserved(before, after);
     }
+    if client == "vscode-copilot" { return validate_copilot_groups_preserved(before, after); }
     let project = |value: &Value| -> Result<Value, String> {
         let mut value = value.clone();
+        if client == "codex" && path.file_name().and_then(|v| v.to_str()) == Some("config.toml") {
+            let rendered = render(path, &value)?;
+            if codex_uses_openai_proxy(&parse_codex_document(Some(&rendered), "Codex configuration")?) {
+                if let Some(root) = value.as_object_mut() { root.remove("openai_base_url"); }
+            }
+        }
         if client == "claude-desktop" && paths.get(3).is_some_and(|p| p == path) {
             if let Some(root) = value.as_object_mut() {
                 repair_claude_desktop_meta_names(root);
             }
         }
         if client == "claude-code" {
+            if let Some(root) = value.as_object_mut() {
+                // These are CPA-managed Claude Code settings. Exclude them
+                // when comparing user-owned configuration so a model update
+                // does not get rejected as an unrelated custom edit.
+                root.remove("model");
+                root.remove("modelSettings");
+                root.remove("autoCompactWindow");
+                root.remove("autoCompactEnabled");
+            }
             if let Some(env) = value.get_mut("env").and_then(Value::as_object_mut) {
                 env.retain(|key, _| {
                     !matches!(
                         key.as_str(),
-                        "CLAUDE_CODE_SUBAGENT_MODEL" | "CLAUDE_CODE_EFFORT_LEVEL"
+                        "CLAUDE_CODE_SUBAGENT_MODEL"
+                            | CLAUDE_CODE_MANAGED_MODEL_SETTINGS_ENV
+                            | CLAUDE_CODE_MANAGED_STARTUP_MODEL_ENV
+                            | "CLAUDE_CODE_EFFORT_LEVEL"
+                            | "EASYCLIPROXY_MANAGE_CLAUDE_CODE_DEFAULT_MODEL"
+                            | "EASYCLIPROXY_MANAGE_CLAUDE_CODE_SUBAGENT_MODEL"
                     ) && !key.starts_with("ANTHROPIC_DEFAULT_")
                         && !key.starts_with("ANTHROPIC_MODEL_")
                         && !key.starts_with("ANTHROPIC_CUSTOM_MODEL_OPTION")
@@ -853,24 +1060,93 @@ fn validate_unmanaged_preserved(
         }
         if client == "deepseek-harness" {
             if path == &paths[0] {
-                for key in ["apiKeyEnv", "baseURL", "models"].into_iter().chain(harness_fields("provider")) {
-                    set(
-                        &mut value,
-                        &[
-                            "llm-pi-ai".into(),
-                            "providers".into(),
-                            DEEPSEEK_HARNESS_PROVIDER_ID.into(),
-                            key.into(),
-                        ],
-                        None,
-                    );
-                }
-                for key in ["provider", "model", "reasoningEffort"] {
-                    set(
-                        &mut value,
-                        &["agent-default-model".into(), key.into()],
-                        None,
-                    );
+                if let Some(seq) = value.as_array_mut() {
+                    let mut remove_indices = Vec::new();
+                    for (i, entry) in seq.iter_mut().enumerate() {
+                        let id = entry.get("id").and_then(Value::as_str).map(str::to_string);
+                        match id.as_deref() {
+                            Some("llm-pi-ai") => {
+                                for key in ["apiKeyEnv", "baseURL", "models"].into_iter().chain(harness_fields("provider")) {
+                                    set(
+                                        entry,
+                                        &[
+                                            "config".into(),
+                                            "providers".into(),
+                                            DEEPSEEK_HARNESS_PROVIDER_ID.into(),
+                                            key.into(),
+                                        ],
+                                        None,
+                                    );
+                                }
+                                let is_empty = entry.get("config").and_then(Value::as_object).map_or(true, |c| c.is_empty());
+                                if is_empty {
+                                    remove_indices.push(i);
+                                }
+                            }
+                            Some("agent-default-model") => {
+                                let is_cpa = entry.get("config")
+                                    .and_then(|c| c.get("provider"))
+                                    .and_then(Value::as_str)
+                                    == Some(DEEPSEEK_HARNESS_PROVIDER_ID);
+                                if is_cpa {
+                                    for key in ["provider", "model", "reasoningEffort"] {
+                                        set(
+                                            entry,
+                                            &["config".into(), key.into()],
+                                            None,
+                                        );
+                                    }
+                                    let is_empty = entry.get("config").and_then(Value::as_object).map_or(true, |c| c.is_empty());
+                                    if is_empty {
+                                        remove_indices.push(i);
+                                    }
+                                }
+                            }
+                            Some("subagent-model-selection-settings") => {
+                                if let Some(allowed) = entry.get_mut("config")
+                                    .and_then(|c| c.get_mut("allowedModels"))
+                                    .and_then(Value::as_array_mut)
+                                {
+                                    allowed.retain(|item| {
+                                        item.get("provider").and_then(Value::as_str) != Some(DEEPSEEK_HARNESS_PROVIDER_ID)
+                                    });
+                                }
+                                if entry.get("config").and_then(|c| c.get("allowedModels")).and_then(Value::as_array).is_some_and(|a| a.is_empty()) {
+                                    set(entry, &["config".into(), "allowedModels".into()], None);
+                                }
+                                let is_empty_or_only_enabled = entry.get("config")
+                                    .and_then(Value::as_object)
+                                    .map_or(true, |c| c.is_empty() || (c.len() == 1 && c.contains_key("enabled")));
+                                if is_empty_or_only_enabled {
+                                    remove_indices.push(i);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    for &i in remove_indices.iter().rev() {
+                        seq.remove(i);
+                    }
+                } else {
+                    for key in ["apiKeyEnv", "baseURL", "models"].into_iter().chain(harness_fields("provider")) {
+                        set(
+                            &mut value,
+                            &[
+                                "llm-pi-ai".into(),
+                                "providers".into(),
+                                DEEPSEEK_HARNESS_PROVIDER_ID.into(),
+                                key.into(),
+                            ],
+                            None,
+                        );
+                    }
+                    for key in ["provider", "model", "reasoningEffort"] {
+                        set(
+                            &mut value,
+                            &["agent-default-model".into(), key.into()],
+                            None,
+                        );
+                    }
                 }
             } else {
                 set(
@@ -904,6 +1180,15 @@ pub(crate) fn text(bytes: Option<&[u8]>) -> Result<Option<&str>, String> {
         .transpose()
 }
 
+/// Parses JSON configuration, accepting JSON5 syntax (comments, trailing commas) as well.
+/// Strict JSON is tried first: the json5 (pest) parser needs about 80x the input size in memory,
+/// so a 64 MB generated Codex model catalog took more than 5 GB at every start.
+pub(crate) fn parse_json_or_json5(content: &str) -> Result<Value, String> {
+    serde_json::from_str::<Value>(content)
+        .or_else(|_| json5::from_str::<Value>(content))
+        .map_err(|e| e.to_string())
+}
+
 pub(crate) fn parse(path: &Path, content: Option<&str>) -> Result<Value, String> {
     let Some(content) = content else {
         return Ok(serde_json::json!({}));
@@ -914,7 +1199,7 @@ pub(crate) fn parse(path: &Path, content: Option<&str>) -> Result<Value, String>
             .map_err(|e| e.to_string())
             .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
         Some("yaml" | "yml") => serde_norway::from_str::<Value>(content).map_err(|e| e.to_string()),
-        _ => json5::from_str::<Value>(content).map_err(|e| e.to_string()),
+        _ => parse_json_or_json5(content),
     };
     let value = result.map_err(|_| {
         format!(
@@ -922,8 +1207,10 @@ pub(crate) fn parse(path: &Path, content: Option<&str>) -> Result<Value, String>
             path_to_string(path)
         )
     })?;
-    // WorkBuddy also saves models.json as a top-level array.
-    if !value.is_object() && !(path.file_name().is_some_and(|n| n == "models.json") && value.is_array()) {
+    // WorkBuddy also saves models.json as a top-level array; DeepSeek Harness Cordis profile uses cordis.patch.yml as a top-level array.
+    if !value.is_object() && !(path.file_name().is_some_and(|n| {
+        n == "models.json" || n == "chatLanguageModels.json" || n == "cordis.patch.yml" || n == "cordis.patch.yaml"
+    }) && value.is_array()) {
         return Err(format!("{} configuration root must be an object", path_to_string(path)));
     }
     Ok(value)
@@ -1001,6 +1288,7 @@ fn restore_text(
         let mut root = parse(path, Some(current))?;
         let target = parse(path, target)?;
         set(&mut root, &["appliedId".into()], target.get("appliedId"));
+        set(&mut root, &["hybridPointer".into()], target.get("hybridPointer"));
         let mut entries = root
             .get("entries")
             .and_then(Value::as_array)

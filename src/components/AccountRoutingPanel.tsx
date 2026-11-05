@@ -1,5 +1,6 @@
+import { Switch } from './Switch';
 import { useEffect, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../services/platform';
 import { useI18n } from '../i18n';
 
 type SessionRoutingSettings = {
@@ -63,7 +64,7 @@ export function AccountRoutingPanel() {
     <p>{t('quota.routing.priorityHint')}</p>
     <form onSubmit={(event) => { event.preventDefault(); void save(); }}>
       <fieldset disabled={loading || saving || !settings}>
-        <label className="quota-affinity-toggle"><input type="checkbox" checked={enabled} onChange={(event) => { setEnabled(event.target.checked); setSaved(false); }} />{t('config.network.sessionAffinity')}</label>
+        <label className="quota-affinity-toggle"><Switch checked={enabled} onChange={(event) => { setEnabled(event.target.checked); setSaved(false); }} />{t('config.network.sessionAffinity')}</label>
         <label className="quota-layout-control">{t('quota.routing.idleTimeout')}<input aria-label={t('quota.routing.idleTimeout')} value={ttl} placeholder="1h" onChange={(event) => { setTtl(event.target.value); setSaved(false); }} /></label>
         <button type="submit" className="primary-button compact-button" disabled={!dirty || saving}>{t(saving ? 'common.saving' : 'common.save')}</button>
       </fieldset>

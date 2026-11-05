@@ -16,6 +16,8 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 
+pub(crate) mod context;
+
 const DEFAULT_PAGE_SIZE: usize = 50;
 const MAX_PAGE_SIZE: usize = 100;
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -82,6 +84,8 @@ pub(crate) struct CodexSessionPage {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DeleteCodexSessionsRequest {
     session_ids: Vec<String>,
+    #[serde(default)]
+    skip_backup: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -221,7 +225,7 @@ pub(crate) async fn delete_codex_sessions(
         .map_err(|error| format!("Failed to get user directory: {error}"))?;
     let codex_home = resolve_codex_home(&user_home);
     tauri::async_runtime::spawn_blocking(move || {
-        delete_codex_sessions_from_home(&codex_home, request.session_ids)
+        delete_codex_sessions_from_home(&codex_home, request.session_ids, request.skip_backup)
     })
     .await
     .map_err(|error| format!("Failed to delete Codex session task: {error}"))?
@@ -230,6 +234,7 @@ pub(crate) async fn delete_codex_sessions(
 #[tauri::command]
 pub(crate) async fn repair_codex_session_metadata(
     app: tauri::AppHandle,
+    expected_provider: Option<String>,
 ) -> Result<CodexSessionRepairResult, String> {
     let user_home = app
         .path()
@@ -238,7 +243,12 @@ pub(crate) async fn repair_codex_session_metadata(
     let codex_home = resolve_codex_home(&user_home);
     let progress_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _guard = crate::AGENT_CONFIG_FILE_LOCK.lock()
+            .map_err(|_| "Agent configuration file lock is poisoned".to_string())?;
         let target_provider = resolve_current_codex_provider(&codex_home)?;
+        if expected_provider.as_deref().is_some_and(|expected| expected != target_provider) {
+            return Err("Codex provider changed before session synchronization. Refresh and try again".to_string());
+        }
         repair_codex_session_metadata_from_home(&codex_home, &target_provider, |progress| {
             let _ = progress_app.emit(REPAIR_PROGRESS_EVENT, progress);
         })
@@ -458,7 +468,8 @@ fn list_codex_sessions_from_home(
             Err(error) => warnings.push(error),
         }
     }
-    let (mut rollout_sessions, rollout_warnings) = list_sessions_from_rollouts(codex_home);
+    let (mut rollout_sessions, rollout_warnings) =
+        list_sessions_from_rollouts(codex_home, &total_session_ids);
     sessions.append(&mut rollout_sessions);
     warnings.extend(rollout_warnings);
     total_session_ids.extend(
@@ -533,7 +544,10 @@ fn fill_missing_session_fields(target: &mut CodexSessionSummary, fallback: &Code
     }
 }
 
-fn list_sessions_from_rollouts(codex_home: &Path) -> (Vec<CodexSessionSummary>, Vec<String>) {
+fn list_sessions_from_rollouts(
+    codex_home: &Path,
+    indexed_ids: &HashSet<String>,
+) -> (Vec<CodexSessionSummary>, Vec<String>) {
     let mut warnings = Vec::new();
     let metadata = match read_session_index_metadata(codex_home) {
         Ok(metadata) => metadata,
@@ -551,17 +565,13 @@ fn list_sessions_from_rollouts(codex_home: &Path) -> (Vec<CodexSessionSummary>, 
     };
     let mut sessions = Vec::new();
     for path in paths {
-        match summarize_rollout_session(codex_home, &path, &metadata) {
-            Ok(Some(session)) => sessions.push(session),
-            Ok(None) => {}
-            Err(error) if is_locked_error_message(&error) => {
-                warnings.push(format!(
-                    "Session file is in use; skipped {}: {error}",
-                    path.display()
-                ));
-            }
-            Err(error) => warnings.push(error),
+        let Some(id) = rollout_thread_id_from_file_name(&path) else {
+            continue;
+        };
+        if indexed_ids.contains(&session_identity_key(&id)) {
+            continue;
         }
+        sessions.push(summarize_rollout_session(codex_home, &path, &id, &metadata));
     }
     (sessions, warnings)
 }
@@ -614,69 +624,13 @@ fn read_session_index_metadata(
 fn summarize_rollout_session(
     codex_home: &Path,
     path: &Path,
+    id: &str,
     metadata: &HashMap<String, SessionIndexMetadata>,
-) -> Result<Option<CodexSessionSummary>, String> {
-    let file = fs::File::open(path)
-        .map_err(|error| format!("Failed to read rollout {}: {error}", path.display()))?;
-    let mut id = None;
-    let mut title = String::new();
-    let mut cwd = String::new();
-    let mut model_provider = String::new();
-    let mut updated_at_ms = None;
-    for line in BufReader::new(file).lines() {
-        let line =
-            line.map_err(|error| format!("Failed to read rollout {}: {error}", path.display()))?;
-        let Ok(record) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        if record.get("type").and_then(Value::as_str) != Some("session_meta") {
-            continue;
-        }
-        let Some(payload) = record.get("payload").and_then(Value::as_object) else {
-            continue;
-        };
-        id = payload
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-        title = payload
-            .get("title")
-            .or_else(|| payload.get("name"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        cwd = payload
-            .get("cwd")
-            .and_then(Value::as_str)
-            .and_then(normalize_workspace_path)
-            .unwrap_or_default();
-        model_provider = payload
-            .get("model_provider")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        updated_at_ms = record
-            .get("timestamp")
-            .and_then(Value::as_str)
-            .and_then(parse_session_timestamp_millis);
-        break;
-    }
-    let id = id.or_else(|| rollout_thread_id_from_file_name(path));
-    let Some(id) = id else {
-        return Ok(None);
-    };
-    let normalized_id = normalize_thread_id(&id);
-    let index_metadata = metadata.get(&id).or_else(|| metadata.get(&normalized_id));
-    if title.trim().is_empty() {
-        title = index_metadata
-            .map(|item| item.title.clone())
-            .unwrap_or_default();
-    }
-    updated_at_ms = index_metadata
+) -> CodexSessionSummary {
+    let normalized_id = normalize_thread_id(id);
+    let index_metadata = metadata.get(id).or_else(|| metadata.get(&normalized_id));
+    let updated_at_ms = index_metadata
         .and_then(|item| item.updated_at_ms)
-        .or(updated_at_ms)
         .or_else(|| {
             fs::metadata(path)
                 .and_then(|metadata| metadata.modified())
@@ -684,15 +638,17 @@ fn summarize_rollout_session(
                 .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
                 .and_then(|duration| i64::try_from(duration.as_millis()).ok())
         });
-    Ok(Some(CodexSessionSummary {
-        id,
-        title,
-        cwd,
-        model_provider,
+    CodexSessionSummary {
+        id: id.to_string(),
+        title: index_metadata
+            .map(|item| item.title.clone())
+            .unwrap_or_default(),
+        cwd: String::new(),
+        model_provider: String::new(),
         archived: path.starts_with(codex_home.join("archived_sessions")),
         updated_at_ms,
         database_path: String::new(),
-    }))
+    }
 }
 
 fn parse_session_timestamp_millis(value: &str) -> Option<i64> {
@@ -872,6 +828,7 @@ fn session_identity_key(value: &str) -> String {
 fn delete_codex_sessions_from_home(
     codex_home: &Path,
     session_ids: Vec<String>,
+    skip_backup: bool,
 ) -> Result<CodexSessionDeleteBatchResult, String> {
     let _guard = CODEX_SESSION_WRITE_LOCK
         .lock()
@@ -899,7 +856,12 @@ fn delete_codex_sessions_from_home(
     }
     let mut results = Vec::new();
     for id in unique {
-        results.push(delete_one_session(codex_home, &database_paths, &id));
+        results.push(delete_one_session(
+            codex_home,
+            &database_paths,
+            &id,
+            skip_backup,
+        ));
     }
     let deleted_count = results
         .iter()
@@ -917,6 +879,7 @@ fn delete_one_session(
     codex_home: &Path,
     database_paths: &[PathBuf],
     session_id: &str,
+    skip_backup: bool,
 ) -> CodexSessionDeleteResult {
     let outcome = (|| -> Result<CodexSessionDeleteResult, String> {
         let mut plans = Vec::new();
@@ -933,7 +896,15 @@ fn delete_one_session(
                 backup_path: None,
             });
         }
-        let backup_dir = create_delete_backup(codex_home, session_id, &plans)?;
+        let backup_path = if skip_backup {
+            None
+        } else {
+            Some(
+                create_delete_backup(codex_home, session_id, &plans)?
+                    .to_string_lossy()
+                    .to_string(),
+            )
+        };
         for (committed_databases, plan) in plans.iter().enumerate() {
             if let Err(error) = apply_database_delete_plan(plan, session_id) {
                 let status = if committed_databases > 0 {
@@ -947,7 +918,7 @@ fn delete_one_session(
                     message: format!(
                         "Committed {committed_databases} database transactions; deletion failed for the remaining databases: {error}"
                     ),
-                    backup_path: Some(backup_dir.to_string_lossy().to_string()),
+                    backup_path,
                 });
             }
         }
@@ -992,7 +963,7 @@ fn delete_one_session(
             session_id: session_id.to_string(),
             status: status.to_string(),
             message,
-            backup_path: Some(backup_dir.to_string_lossy().to_string()),
+            backup_path,
         })
     })();
     outcome.unwrap_or_else(|message| CodexSessionDeleteResult {
@@ -1294,12 +1265,23 @@ fn validated_rollout_path(codex_home: &Path, path: &Path) -> Result<Option<PathB
     if !candidate.is_file() {
         return Ok(None);
     }
-    let canonical = fs::canonicalize(&candidate)
-        .map_err(|error| format!("Failed to resolve rollout path {}: {error}", candidate.display()))?;
+    let canonical_home = fs::canonicalize(codex_home).map_err(|error| {
+        format!(
+            "Failed to resolve Codex home {}: {error}",
+            codex_home.display()
+        )
+    })?;
+    let canonical = fs::canonicalize(&candidate).map_err(|error| {
+        format!(
+            "Failed to resolve rollout path {}: {error}",
+            candidate.display()
+        )
+    })?;
     for directory in SESSION_DIRS {
         let root = codex_home.join(directory);
         if let Ok(root) = fs::canonicalize(root) {
-            if canonical.starts_with(root)
+            if root.starts_with(&canonical_home)
+                && canonical.starts_with(&root)
                 && canonical.extension().and_then(OsStr::to_str) == Some("jsonl")
             {
                 return Ok(Some(canonical));
@@ -1650,7 +1632,8 @@ fn build_rollout_repair(
             .map_or((body_with_cr, ""), |body| (body, "\r"));
         let mut output = body.to_string();
         if let Ok(mut record) = serde_json::from_str::<Value>(body) {
-            if record.get("type").and_then(Value::as_str) == Some("session_meta") {
+            let record_type = record.get("type").and_then(Value::as_str);
+            if record_type == Some("session_meta") {
                 if let Some(payload) = record.get_mut("payload").and_then(Value::as_object_mut) {
                     session_meta_count += 1;
                     if thread_id.is_none() {
@@ -1676,6 +1659,32 @@ fn build_rollout_repair(
                         output = serde_json::to_string(&record)
                             .map_err(|error| format!("Failed to serialize session_meta: {error}"))?;
                         changed = true;
+                    }
+                }
+            } else if record_type == Some("event_msg") {
+                if let Some(payload) = record.get_mut("payload").and_then(Value::as_object_mut) {
+                    if payload.get("type").and_then(Value::as_str) == Some("thread_settings_applied") {
+                        if let Some(thread_settings) = payload
+                            .get_mut("thread_settings")
+                            .and_then(Value::as_object_mut)
+                        {
+                            if let Some(provider) = thread_settings
+                                .get("model_provider_id")
+                                .and_then(Value::as_str)
+                            {
+                                providers.push(provider.to_string());
+                                if provider != target_provider {
+                                    thread_settings.insert(
+                                        "model_provider_id".to_string(),
+                                        json!(target_provider),
+                                    );
+                                    output = serde_json::to_string(&record).map_err(|error| {
+                                        format!("Failed to serialize thread_settings_applied: {error}")
+                                    })?;
+                                    changed = true;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1768,6 +1777,22 @@ fn repair_maps(
     (user_event_ids, cwd_by_id)
 }
 
+/// Rows of `local_thread_catalog` that belong to this CODEX_HOME's sessions.
+/// Codex Desktop lists ChatGPT cloud, SSH and WSL threads in the same table;
+/// those carry no local provider and must keep their value. `None` when the
+/// table cannot be scoped to the local host.
+fn local_catalog_scope(connection: &Connection) -> Result<Option<&'static str>, String> {
+    let columns = table_columns(connection, "local_thread_catalog")?;
+    if !columns.contains("model_provider") || !columns.contains("host_id") {
+        return Ok(None);
+    }
+    Ok(Some(if table_exists(connection, "local_thread_catalog_hosts")? {
+        "host_id IN (SELECT host_id FROM local_thread_catalog_hosts WHERE host_kind = 'local')"
+    } else {
+        "host_id = 'local'"
+    }))
+}
+
 fn count_sqlite_repairs(
     paths: &[PathBuf],
     repairs: &[RolloutRepair],
@@ -1816,6 +1841,16 @@ fn count_sqlite_repairs(
                         as usize;
                 }
             }
+            if let Some(scope) = local_catalog_scope(&connection)? {
+                count += connection
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM local_thread_catalog WHERE COALESCE(model_provider, '') <> ?1 AND {scope}"),
+                        [target_provider],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|error| format!("Failed to count session catalog provider rows: {error}"))?
+                    as usize;
+            }
             Ok(count)
         })();
         match count_result {
@@ -1843,7 +1878,10 @@ fn apply_sqlite_repairs(
         let update_result = (|| -> Result<usize, String> {
             let mut connection = open_read_write(path)?;
             let columns = table_columns(&connection, "threads")?;
-            if columns.is_empty() {
+            // Codex Desktop keeps its thread list in codex-dev.db, which has
+            // local_thread_catalog but no threads table.
+            let catalog_scope = local_catalog_scope(&connection)?;
+            if columns.is_empty() && catalog_scope.is_none() {
                 return Ok(0);
             }
             let transaction = connection
@@ -1877,6 +1915,14 @@ fn apply_sqlite_repairs(
                         )
                         .map_err(|error| format!("Failed to update session project path: {error}"))?;
                 }
+            }
+            if let Some(scope) = catalog_scope {
+                updated += transaction
+                    .execute(
+                        &format!("UPDATE local_thread_catalog SET model_provider = ?1 WHERE COALESCE(model_provider, '') <> ?1 AND {scope}"),
+                        [target_provider],
+                    )
+                    .map_err(|error| format!("Failed to update session catalog provider: {error}"))?;
             }
             transaction
                 .commit()
@@ -2414,7 +2460,7 @@ mod tests {
         assert_eq!(parse_windows_tasklist_process_ids(output), vec![1234, 5678]);
     }
 
-    fn test_root(name: &str) -> PathBuf {
+    pub(super) fn test_root(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "easy-cli-proxy-codex-sessions-{name}-{}-{}",
             std::process::id(),
@@ -2483,41 +2529,118 @@ mod tests {
     }
 
     #[test]
-    fn list_includes_rollout_sessions_from_every_provider() {
+    fn list_includes_unindexed_sessions_without_rollout_metadata() {
         let root = test_root("list-all-providers");
-        let api_rollout = root.join("sessions/api.jsonl");
-        let oauth_rollout = root.join("archived_sessions/oauth.jsonl");
+        let api_id = "019f1234-abcd-7000-8000-000000000001";
+        let oauth_id = "019f1234-abcd-7000-8000-000000000002";
+        let api_rollout = root
+            .join("sessions")
+            .join(format!("rollout-2026-08-04T12-00-00-{api_id}.jsonl"));
+        let oauth_rollout = root
+            .join("archived_sessions")
+            .join(format!("rollout-2026-08-03T12-00-00-{oauth_id}.jsonl"));
         fs::create_dir_all(api_rollout.parent().unwrap()).unwrap();
         fs::create_dir_all(oauth_rollout.parent().unwrap()).unwrap();
         fs::write(
             &api_rollout,
-            "{\"timestamp\":\"2026-08-04T12:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"api-thread\",\"cwd\":\"C:/api\",\"model_provider\":\"cpa-gui\"}}\n",
+            "not parsed by the session list\n",
         )
         .unwrap();
         fs::write(
             &oauth_rollout,
-            "{\"timestamp\":\"2026-08-03T12:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"oauth-thread\",\"cwd\":\"C:/oauth\",\"model_provider\":\"openai\"}}\n",
+            "not parsed by the session list\n",
         )
         .unwrap();
         fs::write(
             root.join("session_index.jsonl"),
             concat!(
-                "{\"id\":\"api-thread\",\"thread_name\":\"API session\",\"updated_at\":\"2026-08-04T12:00:00Z\"}\n",
-                "{\"id\":\"oauth-thread\",\"thread_name\":\"OAuth session\",\"updated_at\":\"2026-08-03T12:00:00Z\"}\n"
+                "{\"id\":\"019f1234-abcd-7000-8000-000000000001\",\"thread_name\":\"API session\",\"updated_at\":\"2026-08-04T12:00:00Z\"}\n",
+                "{\"id\":\"019f1234-abcd-7000-8000-000000000002\",\"thread_name\":\"OAuth session\",\"updated_at\":\"2026-08-03T12:00:00Z\"}\n"
             ),
         )
         .unwrap();
 
         let page = list_codex_sessions_from_home(&root, 0, 50).unwrap();
         assert_eq!(page.sessions.len(), 2);
-        assert_eq!(page.sessions[0].id, "api-thread");
+        assert_eq!(page.sessions[0].id, api_id);
         assert_eq!(page.sessions[0].title, "API session");
-        assert_eq!(page.sessions[0].model_provider, "cpa-gui");
         assert!(!page.sessions[0].archived);
-        assert_eq!(page.sessions[1].id, "oauth-thread");
+        assert_eq!(page.sessions[1].id, oauth_id);
         assert_eq!(page.sessions[1].title, "OAuth session");
-        assert_eq!(page.sessions[1].model_provider, "openai");
         assert!(page.sessions[1].archived);
+        assert!(page.sessions.iter().all(|session| session.cwd.is_empty() && session.model_provider.is_empty()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn listing_uses_filenames_and_index_without_parsing_rollouts() {
+        let root = test_root("list-no-rollout-reads");
+        fs::create_dir_all(root.join("sessions")).unwrap();
+        fs::create_dir_all(root.join("archived_sessions")).unwrap();
+        let mut index = String::new();
+        for number in 0..6 {
+            let id = format!("019f1234-abcd-7000-8000-{number:012}");
+            let directory = if number % 2 == 0 {
+                "sessions"
+            } else {
+                "archived_sessions"
+            };
+            let path = root
+                .join(directory)
+                .join(format!("rollout-2026-10-10T10-00-00-{id}.jsonl"));
+            fs::write(
+                path,
+                b"not JSON; listing must not read or parse this file\xff",
+            )
+            .unwrap();
+            index.push_str(&format!("{}\n", json!({"id":id,"thread_name":format!("Session {number}"),"updated_at":(1000 + number).to_string()})));
+        }
+        fs::write(root.join("session_index.jsonl"), index).unwrap();
+        let page = list_codex_sessions_from_home(&root, 2, 2).unwrap();
+        assert_eq!(page.total_count, 6);
+        assert_eq!(page.sessions.len(), 2);
+        assert!(page.has_more);
+        assert!(page.warnings.is_empty(), "{:?}", page.warnings);
+        assert_eq!(page.sessions[0].title, "Session 3");
+        assert!(page.sessions[0].archived);
+        assert_eq!(page.sessions[1].title, "Session 2");
+        assert!(!page.sessions[1].archived);
+        assert!(page
+            .sessions
+            .iter()
+            .all(|session| session.cwd.is_empty() && session.model_provider.is_empty()));
+        assert!(!root.join("backups_state").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn listing_succeeds_when_every_rollout_is_locked_against_reads() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = test_root("list-locked-rollouts");
+        fs::create_dir_all(root.join("sessions")).unwrap();
+        let mut guards = Vec::new();
+        for number in 0..4 {
+            let path = root.join("sessions").join(format!(
+                "rollout-019f1234-abcd-7000-8000-{number:012}.jsonl"
+            ));
+            fs::write(&path, "secret message contents").unwrap();
+            guards.push(
+                fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(0)
+                    .open(&path)
+                    .unwrap(),
+            );
+            assert!(fs::File::open(&path).is_err());
+        }
+        for offset in [0, 2] {
+            let page = list_codex_sessions_from_home(&root, offset, 2).unwrap();
+            assert_eq!(page.total_count, 4);
+            assert_eq!(page.sessions.len(), 2);
+            assert!(page.warnings.is_empty(), "{:?}", page.warnings);
+        }
+        drop(guards);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2564,7 +2687,7 @@ mod tests {
         fs::write(&rollout, "session\n").unwrap();
         create_threads_db(&root.join("state_5.sqlite"), &rollout);
 
-        let result = delete_codex_sessions_from_home(&root, vec!["thread-1".to_string()]).unwrap();
+        let result = delete_codex_sessions_from_home(&root, vec!["thread-1".to_string()], false).unwrap();
         assert_eq!(result.deleted_count, 1);
         assert_eq!(result.results[0].status, "deleted");
         assert!(!rollout.exists());
@@ -2581,6 +2704,38 @@ mod tests {
         );
         drop(connection);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deletion_without_backup_removes_session_without_creating_backup_files() {
+        let root = test_root("delete-without-backup");
+        let rollout = root.join("sessions/2026/rollout.jsonl");
+        fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        fs::write(&rollout, "session\n").unwrap();
+        create_threads_db(&root.join("state_5.sqlite"), &rollout);
+
+        let result = delete_codex_sessions_from_home(&root, vec!["thread-1".to_string()], true).unwrap();
+        assert_eq!(result.deleted_count, 1);
+        assert_eq!(result.results[0].status, "deleted");
+        assert!(result.results[0].backup_path.is_none());
+        assert!(!rollout.exists());
+        assert!(!root.join("backups_state").exists());
+        let connection = Connection::open(root.join("state_5.sqlite")).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM threads", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deletion_request_keeps_backup_enabled_for_existing_callers() {
+        let request: DeleteCodexSessionsRequest =
+            serde_json::from_value(json!({"sessionIds": ["thread-1"]})).unwrap();
+        assert!(!request.skip_backup);
     }
 
     #[test]
@@ -2612,7 +2767,7 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        let result = delete_codex_sessions_from_home(&root, vec!["thread-1".to_string()]).unwrap();
+        let result = delete_codex_sessions_from_home(&root, vec!["thread-1".to_string()], false).unwrap();
         assert_eq!(result.results[0].status, "partial");
         assert!(outside_rollout.is_file());
         let backup = PathBuf::from(result.results[0].backup_path.as_ref().unwrap());
@@ -2672,7 +2827,7 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        let result = delete_codex_sessions_from_home(&root, vec!["thread-1".to_string()]).unwrap();
+        let result = delete_codex_sessions_from_home(&root, vec!["thread-1".to_string()], false).unwrap();
         assert_eq!(result.results[0].status, "deleted");
         let connection = Connection::open(&database).unwrap();
         assert_eq!(
@@ -2710,7 +2865,7 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        let result = delete_codex_sessions_from_home(&root, vec!["thread-1".to_string()]).unwrap();
+        let result = delete_codex_sessions_from_home(&root, vec!["thread-1".to_string()], false).unwrap();
         assert_eq!(result.results[0].status, "failed");
         let backup = PathBuf::from(result.results[0].backup_path.as_ref().unwrap());
         assert!(backup.join("database-0-rows.json").is_file());
@@ -2765,7 +2920,7 @@ mod tests {
             .unwrap();
         drop(automation);
 
-        let result = delete_codex_sessions_from_home(&root, vec!["thread-1".to_string()]).unwrap();
+        let result = delete_codex_sessions_from_home(&root, vec!["thread-1".to_string()], false).unwrap();
         assert_eq!(result.results[0].status, "partial");
         assert_eq!(result.deleted_count, 1);
         assert!(result.results[0].backup_path.is_some());
@@ -2889,6 +3044,87 @@ mod tests {
             fs::metadata(&rollout).unwrap().modified().unwrap(),
             before_mtime
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn provider_repair_updates_thread_settings_applied_and_local_thread_catalog() {
+        let root = test_root("repair-thread-settings-applied");
+        fs::create_dir_all(root.join("sessions")).unwrap();
+        let rollout = root.join("sessions/rollout.jsonl");
+        let original = concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-1\",\"model_provider\":\"cpa-gui\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\",\"thread_id\":\"thread-1\",\"thread_settings\":{\"model\":\"claude-opus-5-5\",\"model_provider_id\":\"openai\"}}}\n"
+        );
+        fs::write(&rollout, original).unwrap();
+        create_threads_db(&root.join("state_5.sqlite"), &rollout);
+        fs::create_dir_all(root.join("sqlite")).unwrap();
+        let desktop_db = root.join("sqlite/codex-dev.db");
+        Connection::open(&desktop_db)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE inbox_items (id TEXT, thread_id TEXT);\n\
+                 CREATE TABLE local_thread_catalog_hosts (host_id TEXT PRIMARY KEY, host_kind TEXT NOT NULL);\n\
+                 CREATE TABLE local_thread_catalog (host_id TEXT, thread_id TEXT, model_provider TEXT, PRIMARY KEY (host_id, thread_id));\n\
+                 INSERT INTO local_thread_catalog_hosts VALUES ('local', 'local'), ('chatgpt:account', 'chatgpt'), ('ssh:box', 'ssh');\n\
+                 INSERT INTO local_thread_catalog VALUES ('local', 'thread-1', 'openai'), ('chatgpt:account', 'cloud-1', NULL), ('ssh:box', 'remote-1', 'openai');",
+            )
+            .unwrap();
+
+        let result = repair_codex_session_metadata_from_home(&root, "cpa-gui", |_| {}).unwrap();
+        assert_eq!(result.changed_rollout_files, 1);
+        let updated_text = fs::read_to_string(&rollout).unwrap();
+        assert!(!updated_text.contains("\"model_provider_id\":\"openai\""));
+        assert!(updated_text.contains("\"model_provider_id\":\"cpa-gui\""));
+
+        let connection = Connection::open(&desktop_db).unwrap();
+        let provider_of = |thread: &str| -> Option<String> {
+            connection
+                .query_row(
+                    "SELECT model_provider FROM local_thread_catalog WHERE thread_id = ?1",
+                    [thread],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(provider_of("thread-1").as_deref(), Some("cpa-gui"));
+        // Cloud and remote-host threads are not local sessions of this CODEX_HOME.
+        assert_eq!(provider_of("cloud-1"), None);
+        assert_eq!(provider_of("remote-1").as_deref(), Some("openai"));
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn catalog_only_provider_change_is_backed_up_before_it_is_applied() {
+        let root = test_root("repair-catalog-backup");
+        fs::create_dir_all(root.join("sessions")).unwrap();
+        fs::write(
+            root.join("sessions/rollout.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-1\",\"model_provider\":\"cpa-gui\"}}\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("sqlite")).unwrap();
+        let desktop_db = root.join("sqlite/codex-dev.db");
+        Connection::open(&desktop_db)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE inbox_items (id TEXT, thread_id TEXT);\n\
+                 CREATE TABLE local_thread_catalog (host_id TEXT, thread_id TEXT, model_provider TEXT, PRIMARY KEY (host_id, thread_id));\n\
+                 INSERT INTO local_thread_catalog VALUES ('local', 'thread-1', 'openai');",
+            )
+            .unwrap();
+
+        let result = repair_codex_session_metadata_from_home(&root, "cpa-gui", |_| {}).unwrap();
+        assert_eq!(result.changed_rollout_files, 0);
+        assert_eq!(result.sqlite_rows_updated, 1);
+        let backup = PathBuf::from(result.backup_path.expect("a catalog rewrite needs a backup"));
+        let backed_up = Connection::open(backup.join("databases/sqlite/codex-dev.db")).unwrap();
+        let provider: String = backed_up
+            .query_row("SELECT model_provider FROM local_thread_catalog", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(provider, "openai");
+        drop(backed_up);
         fs::remove_dir_all(root).unwrap();
     }
 

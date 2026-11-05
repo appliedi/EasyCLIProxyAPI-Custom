@@ -636,6 +636,7 @@ pub(crate) fn fresh_agent_contents(
 ) -> Result<Vec<String>, String> {
     let models = [AgentModelOption {
         input_modalities: None,
+        reasoning_levels: Vec::new(),
         harness_metadata: None,
         name: model.to_string(),
         alias: None,
@@ -727,12 +728,13 @@ pub(crate) fn fresh_agent_contents_with_oauth(
             build_deepseek_harness_settings(None, &openai_base, model, models)?,
             build_deepseek_harness_credentials(None, api_key)?,
         ]),
+        AgentClient::CopilotCli | AgentClient::VscodeCopilot => Err("Copilot template requires user directory information".into()),
         AgentClient::AntigravityCli => Err("Antigravity template requires installation and user directory information".into()),
         AgentClient::WorkBuddy => Ok(vec![build_workbuddy_agent_config(
             None, &openai_base, api_key, model, models,
         )?]),
         AgentClient::ZCode => Ok(vec![build_zcode_agent_config(
-            None, &root_base, api_key, model, models,
+            None, &openai_base, api_key, model, models,
         )?]),
         AgentClient::KimiCode => Ok(vec![build_kimi_code_agent_config(
             None,
@@ -748,6 +750,10 @@ pub(crate) fn fresh_agent_contents_with_oauth(
             model,
             models,
         )?]),
+        AgentClient::Omp => Ok(vec![
+            build_omp_models_config(None, &openai_base, api_key)?,
+            build_omp_settings_config(None, model)?,
+        ]),
     }
 }
 
@@ -770,7 +776,7 @@ pub(crate) fn agent_contents_equal(client: AgentClient, actual: &str, expected: 
             serde_yaml::from_str::<serde_yaml::Value>(actual).ok()
                 == serde_yaml::from_str::<serde_yaml::Value>(expected).ok()
         }
-        AgentClient::DeepSeekHarness => {
+        AgentClient::Omp | AgentClient::DeepSeekHarness => {
             serde_norway::from_str::<serde_norway::Value>(actual).ok()
                 == serde_norway::from_str::<serde_norway::Value>(expected).ok()
         }
@@ -1488,6 +1494,7 @@ pub(crate) fn reset_agent_configuration_to_default(
         model,
         models: &[AgentModelOption {
             input_modalities: None,
+            reasoning_levels: Vec::new(),
             harness_metadata: None,
             name: model.to_string(),
             alias: None,
@@ -1540,23 +1547,36 @@ pub(crate) fn build_agent_template_updates(
         claude_code_model_mappings,
         claude_desktop_model_mappings,
     } = request;
+    if matches!(client, AgentClient::CopilotCli | AgentClient::VscodeCopilot) {
+        return build_copilot_updates(client, home, &format!("{}/v1", managed_core_loopback_origin(port)), api_key, model, models, true);
+    }
     if client == AgentClient::AntigravityCli {
         return build_antigravity_updates(client, home, &managed_core_loopback_origin(port), api_key, model, true);
     }
     let paths = agent_config_paths(client, home);
-    let contents = fresh_agent_contents_with_oauth(
-        client,
-        port,
-        api_key,
-        model,
-        AgentConfigurationOptions {
-            models,
-            codex_catalog,
-            oauth_configuration,
-            claude_code_model_mappings,
-            claude_desktop_model_mappings,
-        },
-    )?;
+    let contents = if client == AgentClient::DeepSeekHarness
+        && paths.first().is_some_and(|path| is_cordis_patch_path(path))
+    {
+        let openai_base = format!("{}/v1", managed_core_loopback_origin(port));
+        vec![
+            build_deepseek_harness_cordis_patch_template(&openai_base, model, models)?,
+            build_deepseek_harness_credentials(None, api_key)?,
+        ]
+    } else {
+        fresh_agent_contents_with_oauth(
+            client,
+            port,
+            api_key,
+            model,
+            AgentConfigurationOptions {
+                models,
+                codex_catalog,
+                oauth_configuration,
+                claude_code_model_mappings,
+                claude_desktop_model_mappings,
+            },
+        )?
+    };
     if paths.len() != contents.len() {
         return Err("Base configuration template file count mismatch".to_string());
     }

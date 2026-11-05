@@ -69,6 +69,7 @@ const PATHS: &[(&str, &str)] = &[
     ("server/discovery", "discovery"),
     ("server/tls", "tls"),
     ("server/commercial-mode", "commercial-mode"),
+    ("server/github-token", "github-token"),
     ("management", "remote-management"),
     ("credentials/concurrency", "credential-concurrency"),
     ("credentials/in-flight", "credential-in-flight"),
@@ -242,6 +243,13 @@ pub(crate) fn extended_config_view(document: &serde_norway::Value) -> Result<Jso
             set(&mut config, &legacy, None)?;
         }
     }
+    // Missing compatibility switches default to enabled; explicit false remains respected.
+    for field in ["enable-apply-patch", "optimize-multi-agent-v2"] {
+        let native = parts(&format!("client/codex/{field}"));
+        if at(&config, &native).is_none() {
+            set(&mut config, &native, Some(Json::Bool(true)))?;
+        }
+    }
     // Move narrow legacy fields first so broader provider blocks do not retain
     // fields which now belong to client.* or a separate header-defaults block.
     for (native, legacy) in PATHS {
@@ -300,6 +308,16 @@ const OBJECT_PATHS: &[&str] = &[
     "credentials/concurrency",
     "credentials/in-flight",
     "client/codex",
+    "client/codex/web-search-result-cache",
+    "server/response-compression",
+    "server/discovery",
+    "requests/streaming",
+    "routing/retry",
+    "upstream",
+    "upstream/codex",
+    "upstream/claude",
+    "upstream/claude/header-defaults",
+    "upstream/xai",
     "observability/pprof",
     "multimedia",
     "oauth/providers",
@@ -316,6 +334,12 @@ const OBJECT_PATHS: &[&str] = &[
     "oauth/providers/xai",
 ];
 const FIELD_GROUPS: &[(&str, &str, &str)] = &[
+    ("server", "string", "github-token"),
+    ("server", "uint", "max-request-body-bytes"),
+    ("server", "strings", "trusted-proxies"),
+    ("server/response-compression", "bool", "enabled"),
+    ("server/response-compression", "uint", "min-bytes"),
+    ("server/discovery", "bool", "enabled"),
     ("management", "bool", "allow-remote disable-control-panel disable-auto-update-panel"),
     ("management", "string", "base-url panel-github-repository"),
     ("credentials/concurrency", "string", "cpa-heartbeat-timeout cpa-cancel-bound reclaim-grace cleanup-interval release-flush-interval release-max-backoff busy-retry-min busy-retry-max"),
@@ -323,12 +347,20 @@ const FIELD_GROUPS: &[(&str, &str, &str)] = &[
     ("credentials/in-flight", "string", "snapshot-interval stale-after staging-retention"),
     ("credentials/in-flight", "uint", "max-part-bytes max-part-count max-revision-bytes max-aggregate-groups max-details max-string-bytes"),
     ("routing", "bool", "session-affinity-subagents force-model-prefix"),
+    ("routing", "rebind-on", "session-affinity-rebind-on"),
+    ("routing/retry", "uint", "request-retry max-retry-credentials max-retry-interval"),
     ("routing/cooldown", "bool", "save-cooldown-status"),
     ("routing/cooldown", "int", "transient-error-cooldown-seconds"),
     ("requests", "bool", "passthrough-headers"),
     ("requests", "int", "nonstream-keepalive-interval"),
+    ("requests", "uint", "tls-handshake-timeout-seconds"),
     ("requests/streaming", "int", "keepalive-seconds"),
+    ("requests/streaming", "bool", "send-keepalive-before-ft"),
+    ("requests/streaming", "uint", "bootstrap-retries"),
     ("client/codex", "bool", "enable-apply-patch optimize-multi-agent-v2"),
+    ("client/codex/web-search-result-cache", "bool", "enabled"),
+    ("client/codex/web-search-result-cache", "string", "ttl"),
+    ("client/codex/web-search-result-cache", "uint", "limit"),
     ("oauth", "int", "auth-auto-refresh-workers"),
     ("oauth", "auth-dir", "auth-dir"),
     ("oauth/providers/aistudio", "bool", "ws-auth"),
@@ -351,6 +383,14 @@ const FIELD_GROUPS: &[(&str, &str, &str)] = &[
     ("oauth/providers/antigravity/connection-pool", "uint", "max-idle-conns-per-host"),
     ("oauth/providers/devin", "strings", "sensitive-words"),
     ("oauth/providers/xai", "bool", "inject-x-search"),
+    ("upstream/codex", "bool", "upstream-request-compression websocket-compression response-steering disable-codex-cloaking stream-bootstrap-buffering orphan-delegation-compatibility model-level-cooling"),
+    ("upstream/codex", "uint", "upstream-request-compression-min-bytes"),
+    ("upstream/codex", "string", "stream-bootstrap-timeout"),
+    ("upstream/claude", "bool", "tool-search model-level-cooling disable-claude-cloak-mode disable-cloaking-model-list"),
+    ("upstream/claude", "uint", "session-date-pin-days"),
+    ("upstream/claude/header-defaults", "string", "user-agent package-version runtime-version os arch timeout timezone"),
+    ("upstream/claude/header-defaults", "bool", "stabilize-device-profile"),
+    ("upstream/xai", "bool", "inject-x-search"),
     ("multimedia", "image-mode", "disable-image-generation"),
     ("multimedia", "string", "gpt-image-2-base-model video-result-auth-cache-ttl"),
     ("observability/logs", "bool", "request-log"),
@@ -539,6 +579,7 @@ fn validate_string(path: &[String], value: &str) -> bool {
             | "idle-conn-timeout"
             | "stream-bootstrap-timeout"
             | "video-result-auth-cache-ttl"
+            | "ttl"
     ) {
         return duration_nanos(value)
             .is_some_and(|nanos| !path.starts_with(&parts("credentials")) || nanos > 0);
@@ -682,6 +723,11 @@ fn validate_value(path: &[String], value: &Json, before: &Json) -> Result<(), St
             }
         }
         Some("bool") if value.is_boolean() => {}
+        Some("rebind-on") => {
+            if !matches!(value.as_str(), Some("any" | "quota")) {
+                return Err(error());
+            }
+        }
         Some("auth-dir") => {
             let value = value.as_str().ok_or_else(error)?;
             if value.trim().is_empty()
@@ -1068,6 +1114,8 @@ fn prepare_patch(
                 "server/host",
                 "server/port",
                 "server/tls",
+                "server/trusted-proxies",
+                "server/discovery",
                 "management",
                 "oauth/auth-dir",
             ]
@@ -1104,15 +1152,16 @@ pub(crate) fn save_extended_core_config(
     let content = fs::read_to_string(&path)
         .map_err(|error| format!("Cannot read kernel configuration: {error}"))?;
     let (updated, result) = prepare_patch(&content, &changes)?;
-    if updated == content {
-        return Ok(result);
-    }
     let mut config_guard = gui_config_state
         .inner
         .lock()
         .map_err(|_| "GUI configuration lock is poisoned")?;
     let previous = config_guard.clone();
     let mut next = previous.clone();
+    let image_preference_changed = record_image_generation_preference(&mut next, &changes);
+    if updated == content && !image_preference_changed {
+        return Ok(result);
+    }
     if changes
         .iter()
         .any(|change| change.path == parts("observability/logs/request-log"))
@@ -1127,7 +1176,7 @@ pub(crate) fn save_extended_core_config(
     {
         next.plugins_enabled = at(&result.config, &parts("plugins/enabled"))
             .and_then(Json::as_bool)
-            .unwrap_or(false);
+            .unwrap_or(true);
     }
     if changes
         .iter()
@@ -1147,6 +1196,7 @@ pub(crate) fn save_extended_core_config(
     // Preserve the inode watched by the running core. Every change is validated
     // before this single write, and restore both stores if persistence fails.
     let gui_changed = next.request_log != previous.request_log
+        || image_preference_changed
         || next.plugins_enabled != previous.plugins_enabled
         || next.auth_dir != previous.auth_dir
         || next.auth_dir_user_selected != previous.auth_dir_user_selected;
@@ -1162,6 +1212,16 @@ pub(crate) fn save_extended_core_config(
     }
     *config_guard = next;
     Ok(result)
+}
+
+fn record_image_generation_preference(config: &mut GuiConfigFile, changes: &[ExtendedConfigChange]) -> bool {
+    if config.image_generation_user_selected
+        || !changes.iter().any(|change| change.path == parts("multimedia/disable-image-generation"))
+    {
+        return false;
+    }
+    config.image_generation_user_selected = true;
+    true
 }
 
 #[cfg(test)]
@@ -1181,6 +1241,32 @@ mod tests {
             expected: current.cloned().unwrap_or(Json::Null),
             expected_exists: current.is_some(),
         }
+    }
+
+    #[test]
+    fn image_generation_user_choice_survives_startup_including_enable_and_reset() {
+        for initial in [
+            "config-version: 8\nmultimedia: {disable-image-generation: false}\napi-keys: {codex: [{name: relay, keys: [{api-key: test-key}]}]}\n",
+            "disable-image-generation: false\ncodex-api-key: [{api-key: test-key}]\n",
+        ] {
+            for (value, remove) in [(json!(false), false), (json!(true), false), (json!("chat"), false), (json!("passthrough"), false), (Json::Null, true)] {
+                let edits = vec![change(initial, "multimedia/disable-image-generation", value.clone(), remove)];
+                let (saved, _) = prepare_patch(initial, &edits).unwrap();
+                let mut config = GuiConfigFile::default();
+                assert!(record_image_generation_preference(&mut config, &edits));
+                assert!(!record_image_generation_preference(&mut config, &edits));
+                let restarted = merge_core_config_yaml(initial, Some(&saved), &config).unwrap();
+                let document = serde_norway::from_str(&restarted).unwrap();
+                let view = extended_config_view(&document).unwrap();
+                let actual = at(&view, &parts("multimedia/disable-image-generation"));
+                assert_eq!(actual, if remove { None } else { Some(&value) });
+            }
+        }
+        let initial = "config-version: 8\nplugins: {enabled: false}\n";
+        let edits = vec![change(initial, "plugins/enabled", json!(true), false)];
+        let mut config = GuiConfigFile::default();
+        assert!(!record_image_generation_preference(&mut config, &edits));
+        assert!(!config.image_generation_user_selected);
     }
 
     #[test]
@@ -1222,6 +1308,17 @@ client: {codex: {optimize-multi-agent-v2: false}}
         );
         assert_eq!(view["client"]["codex"]["optimize-multi-agent-v2"], false);
         assert!(view.get("codex").is_none());
+    }
+
+    #[test]
+    fn codex_compatibility_switches_default_on_only_when_missing() {
+        let document = serde_norway::from_str(
+            "config-version: 8\nclient: {codex: {enable-apply-patch: false}}\n",
+        )
+        .unwrap();
+        let view = extended_config_view(&document).unwrap();
+        assert_eq!(view["client"]["codex"]["enable-apply-patch"], false);
+        assert_eq!(view["client"]["codex"]["optimize-multi-agent-v2"], true);
     }
 
     #[test]
@@ -1513,6 +1610,60 @@ client: {codex: {optimize-multi-agent-v2: false}}
     }
 
     #[test]
+    fn extended_github_token_is_writable_in_native_and_legacy_layouts() {
+        let native = "config-version: 8\nserver: {port: 8317}\n";
+        let (rendered, result) = prepare_patch(
+            native,
+            &[change(
+                native,
+                "server/github-token",
+                json!("github-secret"),
+                false,
+            )],
+        )
+        .unwrap();
+        assert_eq!(result.config["server"]["github-token"], "github-secret");
+        let document: serde_norway::Value = serde_norway::from_str(&rendered).unwrap();
+        assert_eq!(document["server"]["github-token"], "github-secret");
+        assert_eq!(document["server"]["port"], 8317);
+
+        let configured =
+            "config-version: 8\nserver: {github-token: kept-secret}\nplugins: {enabled: false}\n";
+        let (rendered, _) = prepare_patch(
+            configured,
+            &[change(configured, "plugins/enabled", json!(true), false)],
+        )
+        .unwrap();
+        let document: serde_norway::Value = serde_norway::from_str(&rendered).unwrap();
+        assert_eq!(document["server"]["github-token"], "kept-secret");
+
+        let legacy = "port: 8317\ngithub-token: old-secret\n";
+        let view = extended_config_view(&serde_norway::from_str(legacy).unwrap()).unwrap();
+        assert_eq!(view["server"]["github-token"], "old-secret");
+        let (rendered, _) = prepare_patch(
+            legacy,
+            &[change(
+                legacy,
+                "server/github-token",
+                json!("new-secret"),
+                false,
+            )],
+        )
+        .unwrap();
+        let document: serde_norway::Value = serde_norway::from_str(&rendered).unwrap();
+        assert_eq!(document["github-token"], "new-secret");
+        assert!(document.get("server").is_none());
+
+        let (rendered, _) = prepare_patch(
+            legacy,
+            &[change(legacy, "server/github-token", Json::Null, true)],
+        )
+        .unwrap();
+        let document: serde_norway::Value = serde_norway::from_str(&rendered).unwrap();
+        assert!(document.get("github-token").is_none());
+    }
+
+    #[test]
     fn extended_restart_hint_distinguishes_live_updates_from_startup_settings() {
         let content = "config-version: 8\n";
         for (path, value) in [
@@ -1523,6 +1674,7 @@ client: {codex: {optimize-multi-agent-v2: false}}
             ("observability/pprof/addr", json!("127.0.0.1:9316")),
             ("plugins/dir", json!("custom-plugins")),
             ("plugins/enabled", json!(true)),
+            ("server/github-token", json!("github-secret")),
         ] {
             let (_, result) =
                 prepare_patch(content, &[change(content, path, value, false)]).unwrap();

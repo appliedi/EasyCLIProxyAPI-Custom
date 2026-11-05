@@ -63,12 +63,13 @@ pub(crate) fn build_pi_template_updates(
 
 pub(crate) async fn prepare_desktop_core_update(
     config: &GuiConfigFile,
-    mappings: &ClaudeDesktopModelMappings,
+    mappings: &mut ClaudeDesktopModelMappings,
     models: &[AgentModelOption],
 ) -> Result<(String, String), String> {
     let before = fetch_management_config_yaml(config)
         .await
         .map_err(agent_core_error)?;
+    assign_available_claude_desktop_aliases(mappings, models, &before).map_err(agent_core_error)?;
     let after = match ensure_claude_desktop_model_aliases_in_yaml(&before, mappings, models) {
         Ok(after) => after,
         Err(_) => {
@@ -121,18 +122,18 @@ pub(crate) fn agent_core_error(error: String) -> String {
 
 pub(crate) async fn commit_agent_with_core<T>(
     config: &GuiConfigFile,
-    mappings: Option<&ClaudeDesktopModelMappings>,
+    mut mappings: Option<ClaudeDesktopModelMappings>,
     models: &[AgentModelOption],
-    commit: impl FnOnce() -> Result<T, String>,
+    commit: impl FnOnce(Option<&ClaudeDesktopModelMappings>) -> Result<T, String>,
 ) -> Result<T, String> {
-    if let Some(mappings) = mappings {
-        let (before, after) = prepare_desktop_core_update(config, mappings, models).await?;
-        commit_management_alias_config_changes(config, &before, &after, commit)
-            .await
-            .map_err(agent_core_error)
+    let (before, after) = if let Some(mappings) = mappings.as_mut() {
+        prepare_desktop_core_update(config, mappings, models).await?
     } else {
-        commit()
-    }
+        return commit(None);
+    };
+    commit_management_alias_config_changes(config, &before, &after, || commit(mappings.as_ref()))
+        .await
+        .map_err(agent_core_error)
 }
 
 async fn prepare_template_plan(
@@ -143,11 +144,12 @@ async fn prepare_template_plan(
     oauth_configuration: bool,
     claude_code_model_mappings: Option<ClaudeDesktopModelMappings>,
     claude_desktop_model_mappings: Option<ClaudeDesktopModelMappings>,
+    api_key: Option<&str>,
 ) -> Result<TemplatePlan, String> {
     if client == "codex" { ensure_codex_cpa_mode(home)?; }
     let paths = config_paths(client, home)?;
-    let api_key = effective_agent_api_key(config);
-    let (model, mappings, before, after) = if client == PI_AGENT_ID {
+    let api_key = resolve_agent_api_key(config, api_key);
+    let (model, mappings, before, after, core) = if client == PI_AGENT_ID {
         let model = resolve_pi_default_model(config, model).await?;
         let _guard = AGENT_CONFIG_FILE_LOCK
             .lock()
@@ -155,7 +157,7 @@ async fn prepare_template_plan(
         let before = config_images(&paths)?;
         let updates = build_pi_template_updates(home, config.port, api_key, &model)?;
         let after = prepare_config_updates(client, &paths, &before, &updates, true)?;
-        (model, None, before, after)
+        (model, None, before, after, None)
     } else {
         let parsed = AgentClient::parse(client)?;
         let prepared = fetch_prepared_agent_models(parsed, config).await?;
@@ -168,12 +170,18 @@ async fn prepare_template_plan(
             &model,
             claude_code_model_mappings,
         )?;
-        let mappings = resolve_claude_desktop_model_mappings(
+        let mut mappings = resolve_claude_desktop_model_mappings(
             parsed,
             &prepared.models,
             &model,
             claude_desktop_model_mappings,
         )?;
+        let core = if let Some(mappings) = mappings.as_mut() {
+            let prepared_desktop = fetch_prepared_agent_models(AgentClient::ClaudeDesktop, config).await?;
+            Some(prepare_desktop_core_update(config, mappings, &prepared_desktop.models).await?)
+        } else {
+            None
+        };
         let _guard = AGENT_CONFIG_FILE_LOCK
             .lock()
             .map_err(|_| "Configuration file lock is poisoned")?;
@@ -191,15 +199,9 @@ async fn prepare_template_plan(
             claude_desktop_model_mappings: mappings.as_ref(),
         })?;
         let after = prepare_config_updates(client, &paths, &before, &updates, true)?;
-        (model, mappings, before, after)
+        (model, mappings, before, after, core)
     };
     let mapping_revision = mapping_revision(client, &paths)?;
-    let core = if let Some(mappings) = mappings.as_ref() {
-        let prepared = fetch_prepared_agent_models(AgentClient::ClaudeDesktop, config).await?;
-        Some(prepare_desktop_core_update(config, mappings, &prepared.models).await?)
-    } else {
-        None
-    };
     let core_revision = core
         .as_ref()
         .map(|(a, b)| {
@@ -279,6 +281,34 @@ pub(crate) async fn preview_agent_config_template(
     oauth_configuration: bool,
     claude_code_model_mappings: Option<ClaudeDesktopModelMappings>,
     claude_desktop_model_mappings: Option<ClaudeDesktopModelMappings>,
+    api_key: Option<String>,
+    config_directories: Option<AgentConfigDirectories>,
+) -> Result<TemplatePreview, String> {
+    let directories = validate_agent_config_directories(config_directories)?;
+    AGENT_CONFIG_DIRECTORIES
+        .scope(directories, async move {
+            preview_agent_config_template_in_directories(
+                app,
+                client,
+                model,
+                oauth_configuration,
+                claude_code_model_mappings,
+                claude_desktop_model_mappings,
+                api_key,
+            )
+            .await
+        })
+        .await
+}
+
+pub(crate) async fn preview_agent_config_template_in_directories(
+    app: tauri::AppHandle,
+    client: String,
+    model: String,
+    oauth_configuration: bool,
+    claude_code_model_mappings: Option<ClaudeDesktopModelMappings>,
+    claude_desktop_model_mappings: Option<ClaudeDesktopModelMappings>,
+    api_key: Option<String>,
 ) -> Result<TemplatePreview, String> {
     let home = app.path().home_dir().map_err(|_| "Failed to get user directory")?;
     let config = app.state::<GuiConfigState>().snapshot()?;
@@ -290,6 +320,7 @@ pub(crate) async fn preview_agent_config_template(
         oauth_configuration,
         claude_code_model_mappings,
         claude_desktop_model_mappings,
+        api_key.as_deref(),
     )
     .await?
     .preview)
@@ -304,6 +335,36 @@ pub(crate) async fn apply_agent_config_template(
     claude_code_model_mappings: Option<ClaudeDesktopModelMappings>,
     claude_desktop_model_mappings: Option<ClaudeDesktopModelMappings>,
     revision: String,
+    api_key: Option<String>,
+    config_directories: Option<AgentConfigDirectories>,
+) -> Result<AgentConfigActionResult, String> {
+    let directories = validate_agent_config_directories(config_directories)?;
+    AGENT_CONFIG_DIRECTORIES
+        .scope(directories, async move {
+            apply_agent_config_template_in_directories(
+                app,
+                client,
+                model,
+                oauth_configuration,
+                claude_code_model_mappings,
+                claude_desktop_model_mappings,
+                revision,
+                api_key,
+            )
+            .await
+        })
+        .await
+}
+
+pub(crate) async fn apply_agent_config_template_in_directories(
+    app: tauri::AppHandle,
+    client: String,
+    model: String,
+    oauth_configuration: bool,
+    claude_code_model_mappings: Option<ClaudeDesktopModelMappings>,
+    claude_desktop_model_mappings: Option<ClaudeDesktopModelMappings>,
+    revision: String,
+    api_key: Option<String>,
 ) -> Result<AgentConfigActionResult, String> {
     let home = app.path().home_dir().map_err(|_| "Failed to get user directory")?;
     let config = app.state::<GuiConfigState>().snapshot()?;
@@ -315,6 +376,7 @@ pub(crate) async fn apply_agent_config_template(
         oauth_configuration,
         claude_code_model_mappings,
         claude_desktop_model_mappings,
+        api_key.as_deref(),
     )
     .await?;
     let result = execute_template_plan(&config, plan, &revision).await?;

@@ -1,3 +1,4 @@
+@layer components {
 .provider-group-hint,
 .provider-group-heading p {
   margin: 0;
@@ -12,8 +13,6 @@
 .provider-group-heading > div { min-width: 0; }
 .provider-group-key {
   min-width: 0; margin: 0; padding: 10px 12px;
-  border: 1px solid var(--theme-e8e4dc); border-radius: 10px;
-  background: var(--bg-tertiary);
 }
 .provider-group-key legend { padding: 0 6px; font-size: 12px; font-weight: 600; }
 .provider-group-key-main { display: flex; align-items: end; gap: 6px; }
@@ -27,15 +26,14 @@
 .provider-health-key-selector select { min-width: 0; flex: 1; }
 .provider-group-key .model-config-entry { min-width: 0; }
 .provider-group-key select, .provider-health-key-selector select {
-  min-height: 36px; border: 1px solid var(--theme-e8e4dc); border-radius: 7px;
-  background: var(--bg-primary); color: var(--text-primary); padding: 5px 8px; font: inherit;
+  min-height: max(36px, calc(1.6em + 2px)); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-md);
+  background: var(--bg-primary); color: var(--text-primary); padding: 0 8px; font: inherit;
 }
-.api-provider-dialog .provider-group-key-main .icon-button { width: 32px; min-width: 32px; height: 32px; }
 .provider-row-title > span { color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
 .config-dialog.management-dialog.api-provider-dialog { width: min(640px, 100%); }
 .api-provider-dialog .provider-dialog-section {
   min-width: 0; display: grid; gap: 10px; padding: 12px 0;
-  border-top: 1px solid var(--theme-e8e4dc);
+  border-top: 1px solid var(--dialog-divider-border, var(--color-border-subtle));
 }
 .api-provider-dialog .provider-dialog-section > h3 {
   margin: 0; color: var(--text-primary); font-size: 13px; font-weight: 600;
@@ -57,11 +55,13 @@
 .provider-dialog-secret > input { flex: 1; min-width: 0; }
 .provider-dialog-secret > label { flex: 1; min-width: 0; }
 .provider-dialog-secret > label > input { min-width: 0; width: 100%; }
-.api-provider-dialog .provider-dialog-secret > button { flex-shrink: 0; width: auto; height: 36px; white-space: nowrap; }
+.api-provider-dialog .provider-dialog-secret > button { flex-shrink: 0; width: auto; white-space: nowrap; }
 @media (max-width: 480px) {
   .provider-dialog-basic-grid { grid-template-columns: minmax(0, 1fr); }
   .provider-group-heading { align-items: flex-start; }
   .provider-group-key { padding: 8px; }
   .provider-group-key-main { flex-wrap: wrap; }
   .provider-group-key-main > label { flex-basis: 100%; }
+}
+
 }

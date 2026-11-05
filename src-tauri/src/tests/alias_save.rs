@@ -252,7 +252,11 @@ impl MockCore {
                 let request_body = &bytes[header_end..header_end + content_length];
                 let mut status = "200 OK";
                 let mut response = "{\"status\":\"ok\"}".to_string();
-                if method == "GET" {
+                if method == "GET" && matches!(path, "/v1/models" | "/models") {
+                    // Public discovery is not a complete routing contract.
+                    // Keep this empty even after a successful alias write.
+                    response = r#"{"data":[]}"#.to_string();
+                } else if method == "GET" {
                     assert_eq!(path, "/v8/management/config.yaml");
                     response = if v8_response {
                         v8_yaml_from_legacy_json(&persisted)
@@ -411,6 +415,28 @@ fn v8_yaml_from_legacy_json(legacy: &serde_json::Value) -> String {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn desktop_save_does_not_require_routes_to_appear_in_public_discovery() {
+    let initial = "codex-api-key:\n  - api-key: test-upstream\n    models: [{name: model-a}]\n";
+    let core = MockCore::new(initial, Failure::None);
+    assert!(fetch_agent_models(core.config.port, "test-client").await.unwrap().is_empty());
+    let models = super::support::test_agent_models(&["model-a"]);
+    let mappings = ClaudeDesktopModelMappings::all("model-a");
+    let profile = commit_agent_with_core(&core.config, Some(mappings), &models, |mappings| {
+        build_claude_desktop_profile(None, "http://127.0.0.1:8317", "test-client",
+            "model-a", &models, mappings)
+    }).await.unwrap();
+    let profile: serde_json::Value = serde_json::from_str(&profile).unwrap();
+    assert!(!profile["inferenceModels"].as_array().unwrap().is_empty());
+    assert!(fetch_agent_models(core.config.port, "test-client").await.unwrap().is_empty());
+    let (persisted, requests) = core.finish();
+    assert!(persisted["codex-api-key"][0]["models"].as_array().unwrap().iter()
+        .any(|model| model["alias"] == CLAUDE_DESKTOP_SONNET_MODEL_ID));
+    // Only the two explicit reads above; saving must not poll discovery or infer.
+    assert_eq!(requests.iter().filter(|request| *request == "GET /v1/models").count(), 2);
+    assert!(!requests.iter().any(|request| request.contains("/v1/messages")));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn alias_save_uses_only_targeted_writes_with_a_real_v8_config_view() {
     let core = MockCore::new_v8(CURRENT, Failure::None);
     let current = fetch_management_config_yaml(&core.config).await.unwrap();
@@ -556,7 +582,7 @@ async fn alias_save_does_not_rollback_over_external_changes() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn alias_save_rejects_stale_snapshot_before_any_write() {
+async fn alias_save_allows_unrelated_changes_while_editor_was_open() {
     let core = MockCore::new(&format!("{CURRENT}debug: true\n"), Failure::None);
     let result = put_management_alias_config_changes(
         &core.config,
@@ -564,9 +590,9 @@ async fn alias_save_rejects_stale_snapshot_before_any_write() {
         &CURRENT.replace("my-alias", "renamed"),
     )
     .await;
-    assert!(result.unwrap_err().contains("Configuration changed"));
-    let (_, requests) = core.finish();
-    assert_eq!(requests, ["GET /v8/management/config.yaml"]);
+    result.unwrap();
+    let (_persisted, requests) = core.finish();
+    assert!(requests.iter().any(|request| request.starts_with("PUT")));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -586,7 +612,7 @@ async fn alias_save_succeeds_for_mixed_oauth_only_and_yaml_only_changes() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn alias_save_serializes_concurrent_writers_and_rejects_the_stale_one() {
+async fn alias_save_serializes_concurrent_writers() {
     let core = MockCore::new(CURRENT, Failure::None);
     let first = CURRENT.replace("my-alias", "first");
     let second = CURRENT.replace("my-alias", "second");
@@ -594,24 +620,21 @@ async fn alias_save_serializes_concurrent_writers_and_rejects_the_stale_one() {
         put_management_alias_config_changes(&core.config, CURRENT, &first),
         put_management_alias_config_changes(&core.config, CURRENT, &second),
     );
-    assert_ne!(a.is_ok(), b.is_ok());
+    assert!(a.is_ok());
+    assert!(b.is_ok());
     let (persisted, requests) = core.finish();
-    assert_eq!(
-        persisted,
-        yaml_json(if a.is_ok() { &first } else { &second })
-    );
+    assert!(persisted == yaml_json(&first) || persisted == yaml_json(&second));
     assert_eq!(
         requests
             .iter()
             .filter(|request| request.starts_with("PUT"))
             .count(),
-        2
+        4
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn alias_save_can_retry_after_restoration_reformats_yaml() {
-    let context = model_alias_edit_context(CURRENT, "my-alias", &[]).unwrap();
     let core = MockCore::new(CURRENT, Failure::YamlBeforeWrite);
     let updated = CURRENT.replace("my-alias", "renamed");
     assert!(
@@ -621,7 +644,6 @@ async fn alias_save_can_retry_after_restoration_reformats_yaml() {
             .contains("Original configuration was restored")
     );
     let restored = fetch_management_config_yaml(&core.config).await.unwrap();
-    validate_model_alias_revision(&restored, Some(&context.revision)).unwrap();
     let source = resolve_model_alias_edit_source(&restored, "my-alias", &[]).unwrap();
     let updated =
         edit_model_alias_in_yaml(&restored, "my-alias", &source, "renamed", "high", false).unwrap();
@@ -969,7 +991,7 @@ async fn desktop_update_and_template_preserve_core_access_and_rollback_failed_lo
                 }
                 let before = config_images(&paths).unwrap();
                 let core = MockCore::new(initial, Failure::None);
-                let result = commit_agent_with_core(&core.config, Some(&mappings), &models, || {
+                let result = commit_agent_with_core(&core.config, Some(mappings.clone()), &models, |mappings| {
                     if fail {
                         return Err("local write rejected".into());
                     }
@@ -984,7 +1006,7 @@ async fn desktop_update_and_template_preserve_core_access_and_rollback_failed_lo
                             codex_catalog: None,
                             oauth_configuration: false,
                             claude_code_model_mappings: None,
-                            claude_desktop_model_mappings: Some(&mappings),
+                            claude_desktop_model_mappings: mappings,
                         })
                     } else {
                         apply_agent_configuration_with_oauth(
@@ -998,7 +1020,7 @@ async fn desktop_update_and_template_preserve_core_access_and_rollback_failed_lo
                                 codex_catalog: None,
                                 oauth_configuration: false,
                                 claude_code_model_mappings: None,
-                                claude_desktop_model_mappings: Some(&mappings),
+                                claude_desktop_model_mappings: mappings,
                             },
                         )
                     }
@@ -1041,7 +1063,34 @@ async fn alias_transaction_checks_core_before_a_local_only_commit() {
         Ok(())
     })
     .await;
-    assert!(result.is_err());
-    assert!(!committed.load(Ordering::SeqCst));
+    result.unwrap();
+    assert!(committed.load(Ordering::SeqCst));
     assert_eq!(core.finish().0, yaml_json(&current));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn desktop_additional_api_channels_save_and_rollback_without_changing_credentials() {
+    for section in ["xai-api-key", "meta-api-key", "vertex-api-key", "interactions-api-key"] {
+        for fail in [false, true] {
+            let initial = format!("{section}:\n  - api-key: preserved-secret\n    base-url: https://provider.test\n    models: [{{name: model-a}}]\n");
+            let core = MockCore::new(&initial, Failure::None);
+            let result = commit_agent_with_core(
+                &core.config,
+                Some(ClaudeDesktopModelMappings::all("model-a")),
+                &super::support::test_agent_models(&["model-a"]),
+                |_| if fail { Err("local write rejected".into()) } else { Ok(()) },
+            ).await;
+            let (persisted, _) = core.finish();
+            if fail {
+                assert!(result.is_err());
+                assert_eq!(persisted, yaml_json(&initial));
+            } else {
+                result.unwrap();
+                assert_eq!(persisted[section][0]["api-key"], "preserved-secret");
+                assert_eq!(persisted[section][0]["base-url"], "https://provider.test");
+                assert!(persisted[section][0]["models"].as_array().unwrap().iter()
+                    .any(|entry| entry["alias"] == CLAUDE_DESKTOP_SONNET_MODEL_ID));
+            }
+        }
+    }
 }

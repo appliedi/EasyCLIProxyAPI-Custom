@@ -1,6 +1,7 @@
+import { Select } from '../components/Select';
 import { useEffect, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { open } from '@tauri-apps/plugin-dialog';
+import { invoke } from '../services/platform';
+import { open } from '../services/platform';
 import { Database, FolderOpen, HardDrive } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { templateText } from '../i18n/templateConfig';
@@ -77,7 +78,7 @@ export function DataStoragePanel() {
       {settings.lastResult && <p role="status">{settings.lastResult}</p>}
       {settings.pending && <div className="data-storage-pending" role="status"><strong>{st('pending')}</strong><code>{settings.pending.destination}</code><div className="data-storage-actions"><button className="primary-button" disabled={busy} onClick={() => void run(async () => { await invoke('restart_for_storage_operation'); })}>{st('restart')}</button><button className="secondary-button" disabled={busy} onClick={() => void run(async () => { await invoke('cancel_storage_operation'); setSettings(await invoke<DataStorageSettings>('get_data_storage_settings')); })}>{st('cancel')}</button></div></div>}
       <fieldset disabled={disabled}><legend>{st('location')}</legend>
-        <label>{st('location')}<select aria-label={st('location')} value={mode} onChange={e => setMode(e.currentTarget.value as StorageMode)}><option value="user">{st('user')}</option><option value="portable">{st('portable')}</option><option value="custom">{st('custom')}</option></select></label>
+        <label>{st('location')}<Select aria-label={st('location')} value={mode} onChange={e => setMode(e.currentTarget.value as StorageMode)}><option value="user">{st('user')}</option><option value="portable">{st('portable')}</option><option value="custom">{st('custom')}</option></Select></label>
         <label>{st('destination')}<input value={destination} readOnly={mode !== 'custom'} onChange={e => setCustom(e.currentTarget.value)} spellCheck={false} /></label>
         {mode === 'custom' && <button className="secondary-button compact-button" onClick={() => browse(setCustom, 'EasyCLIProxyAPI-data')}>{st('parent')}</button>}
         <p>{mode === 'portable' ? st('portableHint') : st('newFolder')}</p><p>{st('restartHint')}</p>

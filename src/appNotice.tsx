@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useId, useReducer, useRef, useState } from 'react';
 import { NoticePortal } from './components/NoticePortal';
-import { AlertCircle, CheckCircle2, Info, X } from 'lucide-react';
+import { Notice } from './components/Notice';
 import { useI18n } from './i18n';
+import { usePrivacyMask } from './privacy';
 import type { MessageKey } from './i18n/resources';
 import {
   appNoticeReducer,
@@ -54,44 +55,29 @@ export function InlineNotice({
   className = '',
 }: InlineNoticeProps) {
   const { t } = useI18n();
+  const privacy = usePrivacyMask();
 
-  const message = notice
+  // Notices often echo credential names or backend errors that contain them.
+  const message = privacy.text(notice
     ? typeof notice.message === 'string' ? notice.message : t(notice.message.key, notice.message.variables)
-    : '';
+    : '');
 
   if (!notice || !message.trim()) {
     return null;
   }
 
-  const Icon = notice.tone === 'error' ? AlertCircle : notice.tone === 'success' ? CheckCircle2 : Info;
-  const isError = notice.tone === 'error';
-
   return (
-    <div
+    <Notice
+      tone={notice.tone}
       className={('action-feedback inline-notice ' + notice.tone + (className ? ' ' + className : '')).trim()}
-      role={isError ? 'alert' : 'status'}
-      aria-live={isError ? 'assertive' : 'polite'}
-      aria-atomic="true"
+      bodyClassName="action-feedback-text"
+      bodyTabIndex={0}
+      dismissClassName="action-feedback-dismiss"
+      onDismiss={onDismiss}
     >
-      <div className="action-feedback-main">
-        <Icon size={16} className="action-feedback-icon" aria-hidden="true" />
-        <div className="action-feedback-text" tabIndex={0}>
-          {notice.source ? <strong className="action-feedback-source">{t(notice.source)}: </strong> : null}
-          <span className="action-feedback-message">{message}</span>
-        </div>
-      </div>
-      {onDismiss ? (
-        <button
-          type="button"
-          className="action-feedback-dismiss"
-          onClick={onDismiss}
-          aria-label={t('app.notice.dismiss')}
-          title={t('app.notice.dismiss')}
-        >
-          <X size={14} aria-hidden="true" />
-        </button>
-      ) : null}
-    </div>
+      {notice.source ? <strong className="action-feedback-source">{t(notice.source)}: </strong> : null}
+      <span className="action-feedback-message">{message}</span>
+    </Notice>
   );
 }
 
@@ -106,13 +92,14 @@ export function FloatingNotice(props: InlineNoticeProps) {
 
 function FloatingNoticeInstance({ notice, onDismiss, className }: InlineNoticeProps & { notice: AppNotice }) {
   const [dismissed, setDismissed] = useState(false);
+  const [closing, setClosing] = useState(false);
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
   const entryRef = useRef<HTMLDivElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const dismissRef = useRef(onDismiss);
   useEffect(() => { dismissRef.current = onDismiss; }, [onDismiss]);
-  const dismiss = useCallback(() => {
+  const finishDismiss = useCallback(() => {
     const entry = entryRef.current;
     if (entry?.contains(document.activeElement)) {
       const dialog = entry.closest('dialog, [role="dialog"], [role="alertdialog"]');
@@ -127,14 +114,23 @@ function FloatingNoticeInstance({ notice, onDismiss, className }: InlineNoticePr
     setDismissed(true);
     dismissRef.current?.();
   }, []);
+  const dismiss = useCallback(() => {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) finishDismiss();
+    else setClosing(true);
+  }, [finishDismiss]);
   useEffect(() => {
-    if (dismissed || hovered || focused || notice.tone !== 'success') return;
+    if (!closing) return;
+    const timer = window.setTimeout(finishDismiss, 160);
+    return () => window.clearTimeout(timer);
+  }, [closing, finishDismiss]);
+  useEffect(() => {
+    if (dismissed || closing || hovered || focused || notice.tone !== 'success') return;
     const timer = window.setTimeout(dismiss, 6_000);
     return () => window.clearTimeout(timer);
-  }, [dismissed, hovered, focused, notice.tone, dismiss]);
+  }, [dismissed, closing, hovered, focused, notice.tone, dismiss]);
   if (dismissed) return null;
   return <NoticePortal>
-    <div ref={entryRef} className="app-notice-entry"
+    <div ref={entryRef} className="app-notice-entry" data-closing={closing || undefined}
       onPointerEnter={() => setHovered(true)} onPointerLeave={() => setHovered(false)}
       onFocusCapture={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) {

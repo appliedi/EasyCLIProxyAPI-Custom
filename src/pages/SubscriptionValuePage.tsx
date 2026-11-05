@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../services/platform';
 import { RefreshCw, SlidersHorizontal } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { managementApi } from '../services/managementApi';
@@ -111,7 +111,7 @@ export function SubscriptionValuePage() {
       {!accounts.length ? <p className="panel sv-empty">{t('subscriptionValue.empty')}</p> : <>
         <div className="sv-section-heading"><h2>{t('subscriptionValue.accounts')}</h2><small>{t('subscriptionValue.select')}</small></div>
         <div className="sv-ledger"><div className="sv-ledger-head" aria-hidden="true"><span>{t('subscriptionValue.account')}</span><span>{t('subscriptionValue.estimate')}</span><span>{t('subscriptionValue.fee')}</span><span>{t('subscriptionValue.valueFee')}</span></div>
-          {accounts.map(a => <button type="button" key={a.id} className="sv-account" aria-label={name(a)} aria-pressed={selected === a.id} onClick={() => setSelected(id => id === a.id ? null : a.id)}>
+          {accounts.map(a => <button type="button" key={a.id} className="secondary-button sv-account" aria-label={name(a)} aria-pressed={selected === a.id} onClick={() => setSelected(id => id === a.id ? null : a.id)}>
             <span className="sv-identity"><strong>{usageProviderDetails(a.provider).name}</strong><small>{a.label}</small>{!a.current && <small>{t('subscriptionValue.historical')}</small>}</span>
             <span className="sv-amount"><small className="sv-mobile-label">{t('subscriptionValue.estimate')}</small><b>{a.pricedRequests ? money(a.estimatedCost) : a.requests ? '—' : money(0)}</b><span className="sv-share" aria-hidden="true"><span style={{ width: `${summary.cost ? a.estimatedCost / summary.cost * 100 : 0}%` }} /></span>{a.pricedRequests < a.requests && <small>{t('subscriptionValue.partial')}</small>}</span>
             <span className="sv-fee"><small className="sv-mobile-label">{t('subscriptionValue.fee')}</small>{a.monthlyFeeCents === null ? t('subscriptionValue.notSet') : money(a.monthlyFeeCents / 100)}</span>

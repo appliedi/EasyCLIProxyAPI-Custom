@@ -1,12 +1,6 @@
-.plugin-oauth-provider-status {
-  grid-column: 1 / -1;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-  color: var(--text-secondary);
-}
+@layer components {
+.plugin-oauth-provider-status { grid-column: 1 / -1; }
+.plugin-oauth-provider-status button { display: inline-flex; align-items: center; gap: 8px; }
+.plugin-oauth-provider-status { gap: 12px; padding: 14px 16px; }
 
-.plugin-oauth-provider-status > span {
-  flex: 1 1 240px;
 }

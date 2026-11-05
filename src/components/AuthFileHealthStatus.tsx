@@ -1,6 +1,9 @@
+import { pollWhileActive } from '../services/windowActivity';
 import { useMemo, useSyncExternalStore } from 'react';
 import { ChevronDown, CircleHelp, Clock3, Info, LoaderCircle, PauseCircle, RotateCcw, ShieldAlert } from 'lucide-react';
 import { useI18n } from '../i18n';
+import { usePrivacyMask } from '../privacy';
+import { authFileIdentities } from '../services/authFiles';
 import {
   authFileHealth,
   cooldownReasonKey,
@@ -11,14 +14,14 @@ import {
 import './AuthFileHealthStatus.css';
 
 let clockNow = Date.now();
-let timer: ReturnType<typeof setInterval> | undefined;
+let stopClock: (() => void) | undefined;
 const listeners = new Set<() => void>();
 const getClockSnapshot = () => clockNow;
 const subscribeClock = (listener: () => void) => {
   listeners.add(listener);
-  if (!timer) {
+  if (!stopClock) {
     clockNow = Date.now();
-    timer = setInterval(() => {
+    stopClock = pollWhileActive(() => {
       clockNow = Date.now();
       listeners.forEach((notify) => notify());
     }, 1000);
@@ -26,8 +29,8 @@ const subscribeClock = (listener: () => void) => {
   return () => {
     listeners.delete(listener);
     if (!listeners.size) {
-      clearInterval(timer);
-      timer = undefined;
+      stopClock?.();
+      stopClock = undefined;
     }
   };
 };
@@ -61,7 +64,10 @@ function TimedHealthStatus(props: HealthProps) {
 
 function HealthStatus({ file, snapshot, nowMs, resetting = false, resetDisabled = false, onReset, compact = false }: HealthProps & { nowMs: number }) {
   const { t, formatNumber, formatDate } = useI18n();
-  const health = authFileHealth(file);
+  const privacy = usePrivacyMask();
+  const rawHealth = authFileHealth(file);
+  // Core status messages can quote the account that the upstream rejected.
+  const health = { ...rawHealth, message: rawHealth.message && privacy.text(rawHealth.message, authFileIdentities(file)) };
   const cooldown = summarizeAuthFileCooldowns(snapshot, nowMs);
   const hasTimers = cooldown.rows.length > 0;
   const healthy = health.label === 'authFiles.health.active';
@@ -85,9 +91,9 @@ function HealthStatus({ file, snapshot, nowMs, resetting = false, resetDisabled 
     : seconds < 3600 ? t('authFiles.health.minutes', { count: formatNumber(Math.ceil(seconds / 60)) })
       : t('authFiles.health.hours', { count: formatNumber(Math.ceil(seconds / 3600)) });
   const scope = cooldown.credentialWide
-    ? cooldown.modelCount ? t('authFiles.health.credentialModels', { count: cooldown.modelCount })
+    ? cooldown.modelCount ? t(cooldown.modelCount === 1 ? 'authFiles.health.credentialModelsOne' : 'authFiles.health.credentialModels', { count: cooldown.modelCount })
       : t('authFiles.health.credential')
-    : cooldown.modelCount ? t('authFiles.health.models', { count: cooldown.modelCount }) : '';
+    : cooldown.modelCount ? t(cooldown.modelCount === 1 ? 'authFiles.health.modelsOne' : 'authFiles.health.models', { count: cooldown.modelCount }) : '';
   const title = compact && snapshot?.records === null ? t('authFiles.health.unknownCooldown')
     : health.disabled && !compact ? t(health.label)
     : cooldown.elapsed ? t('authFiles.health.elapsed')
@@ -144,7 +150,7 @@ function HealthStatus({ file, snapshot, nowMs, resetting = false, resetDisabled 
       </details> : <div className="auth-health-summary">{summary}</div>}
       {hasTimers && onReset ? <div className="auth-health-actions">
         <span className="auth-health-hint">{t('authFiles.cooldown.resetHint')}</span>
-        <button type="button" className="secondary-button compact-button auth-health-reset"
+        <button type="button" className="secondary-button small-button auth-health-reset"
           onClick={onReset} disabled={resetDisabled || resetting} aria-busy={resetting}
           title={t('authFiles.cooldown.resetHint')}>
           {resetting ? <LoaderCircle size={14} className="spin" aria-hidden="true" /> : <RotateCcw size={14} aria-hidden="true" />}

@@ -6,6 +6,15 @@ Every functional change must update **Unreleased** in the same commit or pull re
 
 ## Unreleased
 
+### Upstream integration — v0.3.76
+
+- Merged upstream desktop **v0.3.76**, commit `027cdb94d228907a3922d807d5790b52d0d08600`, from the previous v0.3.22 base. The pinned official CLIProxyAPI core advances from **8.0.15** to **8.0.52**. Custom desktop version remains the unreleased **0.4.2**.
+- Incorporated upstream quota/provider improvements, agent discovery performance fixes, client configuration updates, Agent usage history, routing, MCP/skills management, themes, reverse proxy, and updater/runtime fixes.
+- Retained separate Subscription Usage and Subscription Value pages, priority and affinity controls, effective-dated fees, pricing/attribution semantics, persistent storage/profile locks, graceful restarts, and the Windows installer. Adapted custom controls to upstream shared components and theme layers.
+- Extended verified storage snapshots to include agent usage, MCP servers, skill state, theme/custom-theme settings, usage-view preferences, and privacy settings. Agent SQLite snapshots use the backup API to retain committed WAL data without copying live WAL/SHM files.
+- Resolved 18 conflicted files by combining custom features with upstream dependencies/runtime commands, retaining fail-closed storage startup and our independent version. Desktop stable/preview update URLs and catalogs stay on appliedi/EasyCLIProxyAPI-Custom; core downloads stay official. Windows x64/ARM64 ZIP and Setup packaging remain. Disabled upstream PR retargeting in this fork, removed automatic core-version drift in release CI, and protected published stable releases from retagging/republication.
+- Validation and known upstream test failures are recorded in [the integration report](docs/upstream-0.3.76-validation.md). No release tag or installer deployment is part of this integration.
+
 ### Windows installer
 
 - Prepared version **0.4.2** with a standard per-user NSIS **Setup.exe** alongside portable ZIPs. Setup creates Start Menu/optional desktop shortcuts and a Windows Installed Apps entry, includes the proxy archive, and installs WebView2 when needed.

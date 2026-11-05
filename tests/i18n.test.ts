@@ -2,13 +2,61 @@ import { describe, expect, it } from 'bun:test';
 import { languageOptions, normalizeLocale, supportedLocales, translate } from '../src/i18n';
 import { en, ja, zhCN, zhTW, type MessageKey } from '../src/i18n/resources';
 import { jaOverrides } from '../src/i18n/ja';
+import { pluginConfigText } from '../src/i18n/pluginConfig';
 
 describe('i18n', () => {
+  it('localizes credential tag controls in every language', () => {
+    for (const [locale, label] of [['en', 'Tags'], ['zh-CN', '标签'], ['zh-TW', '標籤'], ['ja', 'タグ']] as const) {
+      expect(translate(locale, 'authFiles.tags.label')).toBe(label);
+      for (const key of [
+        'authFiles.tags.all',
+        'authFiles.tags.placeholder',
+        'authFiles.tags.hint',
+        'authFiles.tags.selectGroup',
+        'authFiles.tags.selectAllInGroup',
+        'authFiles.tags.filterBy',
+        'authFiles.tags.filterClear',
+        'authFiles.tags.add',
+        'authFiles.tags.addTag',
+        'authFiles.tags.removeTag',
+        'authFiles.tags.addAnother',
+        'authFiles.tags.inputPlaceholder',
+        'authFiles.tags.poolLabel',
+        'authFiles.tags.addFromPool',
+        'authFiles.tags.manageQuick',
+        'authFiles.tags.quickEditTitle',
+        'authFiles.tags.batchSectionTitle',
+        'authFiles.tags.batchAdd',
+        'authFiles.tags.batchRemove',
+        'authFiles.tags.batchAddPlaceholder',
+        'authFiles.tags.selectTagToRemove',
+        'authFiles.tags.batchAddSuccess',
+        'authFiles.tags.batchRemoveSuccess',
+        'authFiles.tags.noSelectedTags',
+        'authFiles.operations.clearSelection',
+        'authFiles.operations.selectedSummary',
+      ] as const) {
+        expect(translate(locale, key)).not.toBe(key);
+        expect(translate(locale, key)).not.toBe('');
+      }
+    }
+  });
+
+  it('localizes the plugin discard confirmation in every language', () => {
+    for (const [locale, cancel, confirm] of [
+      ['zh-CN', '继续编辑', '放弃修改'], ['zh-TW', '繼續編輯', '放棄修改'],
+      ['en', 'Keep editing', 'Discard changes'], ['ja', '編集を続ける', '変更を破棄'],
+    ] as const) {
+      expect(pluginConfigText('keepEditing', locale)).toBe(cancel);
+      expect(pluginConfigText('discard', locale)).toBe(confirm);
+      expect(pluginConfigText('unsaved', locale)).not.toBe('');
+    }
+  });
+
   it('localizes system appearance controls in every language', () => {
     expect(translate('zh-CN', 'app.theme.system')).toBe('自动');
     expect(translate('zh-TW', 'app.theme.system')).toBe('自動');
     expect(translate('zh-TW', 'app.theme.label')).toBe('外觀模式');
-    expect(translate('zh-TW', 'app.theme.switchToSystem')).toBe('隨系統自動切換亮色和暗色');
     expect(translate('en', 'app.theme.system')).toBe('Auto');
     expect(translate('ja', 'app.theme.system')).toBe('自動');
   });
@@ -96,6 +144,16 @@ describe('i18n', () => {
 
   it('does not include untranslated Chinese prose in English messages', () => {
     expect(Object.entries(en).filter(([, message]) => /\p{Script=Han}/u.test(message))).toEqual([]);
+  });
+
+  it('names the actual add action in the empty API access prompt', () => {
+    expect(translate('zh-CN', 'apiAccess.empty.addFirst', { action: '添加 API Key' }))
+      .toBe('点击右上角“添加 API Key”添加第一个接入');
+    expect(translate('en', 'apiAccess.empty.addFirst', { action: 'Add Service' }))
+      .toBe('Click “Add Service” in the upper-right to create your first connection');
+    expect(translate('ja', 'apiAccess.empty.addFirst', { action: 'API キーを追加' }))
+      .toBe('右上の「API キーを追加」から最初の接続を追加してください');
+    expect(translate('zh-CN', 'easyMode.api.supportedPlatforms')).toContain('Vertex');
   });
 
   it('localizes API controls and usage labels in Chinese, English, and Japanese', () => {

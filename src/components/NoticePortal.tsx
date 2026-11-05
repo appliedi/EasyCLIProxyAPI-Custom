@@ -12,11 +12,9 @@ function acquireHost(doc: Document) {
     let observedDialog: Element | undefined;
     const resizeObserver = new ResizeObserver(() => placeHost());
     const placeHost = () => {
-      const nativeDialogs = doc.querySelectorAll('dialog:modal');
-      const nativeDialog = nativeDialogs[nativeDialogs.length - 1];
-      const dialogs = Array.from((nativeDialog ?? doc).querySelectorAll('dialog[open], [role="dialog"], [role="alertdialog"]'))
+      const dialogs = Array.from(doc.querySelectorAll('[role="dialog"], [role="alertdialog"]'))
         .filter(dialog => dialog.getBoundingClientRect().height > 0);
-      const dialog = dialogs[dialogs.length - 1] ?? nativeDialog;
+      const dialog = dialogs[dialogs.length - 1];
       const parent = dialog ?? doc.body;
       if (element.parentElement !== parent) parent.appendChild(element);
       if (dialog !== observedDialog) {
@@ -42,15 +40,20 @@ function acquireHost(doc: Document) {
         element.style.setProperty('--notice-bottom', value);
       }
     };
+    const onDialogAnimationEnd = (event: AnimationEvent) => {
+      if (event.target === observedDialog) placeHost();
+    };
     const observer = new MutationObserver(placeHost);
     placeHost();
     observer.observe(doc.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['open', 'class', 'hidden'] });
     resizeObserver.observe(element);
     doc.defaultView?.addEventListener('resize', placeHost);
+    doc.addEventListener('animationend', onDialogAnimationEnd, true);
     host = { element, users: 0, dispose() {
       observer.disconnect();
       resizeObserver.disconnect();
       doc.defaultView?.removeEventListener('resize', placeHost);
+      doc.removeEventListener('animationend', onDialogAnimationEnd, true);
       element.remove();
     } };
     hosts.set(doc, host);

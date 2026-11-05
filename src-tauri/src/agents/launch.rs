@@ -60,7 +60,7 @@ fn linux_terminal_definitions() -> &'static [(
             "GNOME Terminal",
         ),
         ("konsole", "konsole", &["-e"], "Konsole"),
-        ("xfce4-terminal", "xfce4-terminal", &["-e"], "Xfce Terminal"),
+        ("xfce4-terminal", "xfce4-terminal", &["-x"], "Xfce Terminal"),
         ("mate-terminal", "mate-terminal", &["--"], "MATE Terminal"),
         ("kitty", "kitty", &["-e"], "Kitty"),
         ("alacritty", "alacritty", &["-e"], "Alacritty"),
@@ -125,9 +125,19 @@ pub(crate) fn launch_agent(
     deepseek_process_state: tauri::State<'_, DeepSeekHarnessProcessState>,
     client: String,
     target: Option<String>,
+    executable_path: Option<String>,
+    desktop_executable_path: Option<String>,
     working_directory: Option<String>,
     deepseek_harness_options: Option<DeepSeekHarnessLaunchOptions>,
+    custom_arguments: Option<String>,
 ) -> Result<(), String> {
+    let custom_arguments = parse_custom_launch_arguments(custom_arguments.as_deref())?;
+    if target.as_deref() == Some("app") && !custom_arguments.is_empty() {
+        return Err("Custom startup arguments are only supported for CLI launches".into());
+    }
+    if client.trim().eq_ignore_ascii_case("deepseek-harness") {
+        validate_deepseek_custom_arguments(&custom_arguments)?;
+    }
     let home = app
         .path()
         .home_dir()
@@ -147,18 +157,20 @@ pub(crate) fn launch_agent(
         if requested_target.is_some_and(|value| value != "cli") {
             return Err("Pi supports only CLI launch mode".to_string());
         }
-        let status =
-            inspect_pi_provider_status(&home, config.port, effective_agent_api_key(&config));
+        let executable_override = executable_path.as_deref().map(Path::new);
+        let status = inspect_pi_provider_status_with_executable(&home, config.port, effective_agent_api_key(&config), executable_override);
         if !status.installed {
             return Err("Pi CLI was not detected. Install Pi and detect it again".to_string());
         }
-        let executable =
-            find_pi_executable(&home).ok_or_else(|| "Pi CLI executable not found".to_string())?;
+        let executable = executable_override.filter(|path| path.is_file()).map(Path::to_path_buf)
+            .or_else(|| find_pi_executable(&home))
+            .ok_or_else(|| "Pi CLI executable not found".to_string())?;
         let launch_directory = resolve_launch_directory(working_directory.as_deref(), &home)?;
         return launch_cli_agent(
             &executable,
             PI_AGENT_NAME,
             &launch_directory,
+            &custom_arguments,
             &[],
             &[],
             &terminal,
@@ -169,7 +181,9 @@ pub(crate) fn launch_agent(
     if !client.supported_platform() {
         return Err(format!("The current platform does not support launching {}", client.name()));
     }
-    let status = inspect_agent_config(client, &home, config.port, effective_agent_api_key(&config));
+    let executable_override = executable_path.as_deref().map(Path::new);
+    let desktop_override = desktop_executable_path.as_deref().map(Path::new);
+    let status = inspect_agent_config_with_executables(client, &home, config.port, effective_agent_api_key(&config), executable_override, desktop_override);
     if !status.installed {
         return Err(format!("{} was not detected. Install it and detect it again", client.name()));
     }
@@ -179,31 +193,58 @@ pub(crate) fn launch_agent(
         .map(|target| target.id.as_str())
         .unwrap_or("cli");
     let requested_target = requested_target.unwrap_or(default_target);
+    if requested_target != "cli" && !custom_arguments.is_empty() {
+        return Err("Custom startup arguments are only supported for CLI launches".into());
+    }
     match (client, requested_target) {
-        (AgentClient::ClaudeDesktop, "app") => launch_claude_desktop(&home),
+        (AgentClient::ClaudeDesktop, "app") => launch_claude_desktop(&home, executable_override),
         (AgentClient::AntigravityCli, "cli")
             if antigravity_has_marker(client, &agent_config_paths(client, &home))? => {
+            validate_managed_antigravity_arguments(&custom_arguments)?;
             if !status.configured {
                 return Err("Antigravity CLI configuration does not match CPA. Apply the configuration again".into());
             }
             let executable = env::current_exe().map_err(|_| "Unable to locate CPA launch adapter")?;
             let directory = resolve_launch_directory(working_directory.as_deref(), &home)?;
-            launch_cli_agent(&executable, client.name(), &directory, &antigravity_cli_helper_arguments(&home), &[], &terminal)
+            let mut arguments = antigravity_cli_helper_arguments(&home);
+            arguments.extend(custom_arguments);
+            launch_cli_agent(&executable, client.name(), &directory, &arguments, &[], &[], &terminal)
+        }
+        (AgentClient::CopilotCli, "cli") if copilot_has_marker(client, &agent_config_paths(client, &home))? => {
+            if !status.configured { return Err("Copilot CLI configuration does not match CPA. Apply it again".into()); }
+            let executable = executable_override.filter(|p| p.is_file()).map(Path::to_path_buf)
+                .or_else(|| find_agent_executable(client, &home)).ok_or("Copilot CLI not found")?;
+            let adapter = env::current_exe().map_err(|_| "Unable to locate CPA launch adapter")?;
+            let directory = resolve_launch_directory(working_directory.as_deref(), &home)?;
+            let mut args = vec!["--cpa-copilot-cli".into(), path_to_string(&agent_config_paths(client, &home)[0]), path_to_string(&executable)];
+            args.extend(custom_arguments);
+            launch_cli_agent(&adapter, client.name(), &directory, &args, &[], &[], &terminal)
+        }
+        (AgentClient::VscodeCopilot, "app") => {
+            let executable = executable_override.filter(|p| p.is_file()).map(Path::to_path_buf)
+                .or_else(|| find_agent_executable(client, &home)).ok_or("VS Code not found")?;
+            let directory = resolve_launch_directory(working_directory.as_deref(), &home)?;
+            launch_vscode_directory(&executable, &directory)
         }
         (AgentClient::WorkBuddy, "app") => {
-            let executable = find_workbuddy_desktop_executable(&home)
+            let executable = manual_desktop_path(executable_override).map(Path::to_path_buf)
+                .or_else(|| find_workbuddy_desktop_executable(&home))
                 .ok_or_else(|| "WorkBuddy application not found".to_string())?;
             launch_desktop_agent(&executable, client.name())
         }
         (AgentClient::ZCode, "app") => {
-            let executable = find_zcode_desktop_executable(&home)
+            let executable = manual_desktop_path(executable_override).map(Path::to_path_buf)
+                .or_else(|| find_zcode_desktop_executable(&home))
                 .ok_or_else(|| "ZCode application not found".to_string())?;
             launch_desktop_agent(&executable, client.name())
         }
-        (AgentClient::Codex, "app") => launch_codex_desktop(&home),
-        (AgentClient::OpenCode, "app") => launch_opencode_desktop(&home),
+        (AgentClient::Codex, "app") => {
+            launch_codex_desktop(&home, desktop_override)
+        }
+        (AgentClient::OpenCode, "app") => launch_opencode_desktop(&home, desktop_override),
         (AgentClient::DeepSeekHarness, "app") => {
-            let executable = find_deepseek_harness_desktop_application(&home)
+            let executable = manual_desktop_path(desktop_override).map(Path::to_path_buf)
+                .or_else(|| find_deepseek_harness_desktop_application(&home))
                 .ok_or_else(|| "DeepSeek Harness Desktop application not found".to_string())?;
             launch_desktop_agent(&executable, "DeepSeek Harness Desktop")
         }
@@ -211,13 +252,15 @@ pub(crate) fn launch_agent(
             Err(format!("{} does not support CLI launch mode", client.name()))
         }
         (_, "cli") => {
-            let executable = find_agent_executable(client, &home)
+            let executable = executable_override.filter(|path| path.is_file()).map(Path::to_path_buf)
+                .or_else(|| find_agent_executable(client, &home))
                 .ok_or_else(|| format!("Executable for {} not found", client.name()))?;
             let launch_directory = resolve_launch_directory(working_directory.as_deref(), &home)?;
             if client == AgentClient::DeepSeekHarness {
                 let mode = deepseek_harness_launch_mode(deepseek_harness_options.as_ref())?;
-                let arguments =
-                    agent_cli_launch_arguments(client, deepseek_harness_options.as_ref())?;
+                let arguments = deepseek_harness_arguments_with_custom(
+                    deepseek_harness_options.as_ref(), &custom_arguments,
+                )?;
                 return launch_managed_deepseek_harness(
                     deepseek_process_state.inner(),
                     &executable,
@@ -232,19 +275,54 @@ pub(crate) fn launch_agent(
             } else {
                 &[]
             };
-            let arguments = agent_cli_launch_arguments(client, deepseek_harness_options.as_ref())?;
+            let mut arguments = agent_cli_launch_arguments(client, deepseek_harness_options.as_ref())?;
+            arguments.extend(custom_arguments);
             launch_cli_agent(
                 &executable,
                 client.name(),
                 &launch_directory,
                 &arguments,
                 environment_to_remove,
+                &[],
                 &terminal,
             )
         }
         (_, "app") => Err(format!("{} does not support desktop App launch mode", client.name())),
         _ => Err("Unsupported agent launch mode".to_string()),
     }
+}
+
+
+fn parse_custom_launch_arguments(source: Option<&str>) -> Result<Vec<String>, String> {
+    let source = source.unwrap_or_default();
+    if source.chars().any(|character| character.is_ascii_control() && character != '\t') {
+        return Err("Startup arguments cannot contain newlines or control characters".into());
+    }
+    shlex::split(source).ok_or_else(|| "Startup arguments contain an unclosed quote or trailing escape".into())
+}
+
+fn validate_deepseek_custom_arguments(arguments: &[String]) -> Result<(), String> {
+    if arguments.iter().any(|argument| matches!(argument.split('=').next().unwrap_or_default(),
+        "--profile" | "--patch" | "--host" | "--port" | "--trusted-host" | "--no-open" | "--open")) {
+        return Err("Use the structured DeepSeek Harness controls for profile, patch, host, port, trusted-host and browser options".into());
+    }
+    Ok(())
+}
+
+fn deepseek_harness_arguments_with_custom(
+    options: Option<&DeepSeekHarnessLaunchOptions>,
+    custom_arguments: &[String],
+) -> Result<Vec<String>, String> {
+    validate_deepseek_custom_arguments(custom_arguments)?;
+    let mut arguments = build_deepseek_harness_launch_arguments(options)?;
+    let task = if deepseek_harness_launch_mode(options)? == "headless" {
+        arguments.pop()
+    } else {
+        None
+    };
+    arguments.extend_from_slice(custom_arguments);
+    arguments.extend(task);
+    Ok(arguments)
 }
 
 fn deepseek_harness_launch_mode(
@@ -533,9 +611,8 @@ fn spawn_managed_deepseek_harness(
 
         const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        let mut command = windows_command_for_executable(executable, false);
+        let mut command = windows_literal_cli_command(executable, arguments)?;
         command
-            .args(arguments)
             .current_dir(working_directory)
             .creation_flags(
                 (if cfg!(test) {
@@ -697,21 +774,26 @@ fn validate_deepseek_harness_argument(value: &str, label: &str) -> Result<String
 
 #[tauri::command]
 pub(crate) async fn restart_codex_app(app: tauri::AppHandle) -> Result<(), String> {
-    restart_agent_app(app, "codex".to_string()).await
+    restart_agent_app(app, "codex".to_string(), None).await
 }
 
 #[tauri::command]
 pub(crate) async fn restart_opencode_app(app: tauri::AppHandle) -> Result<(), String> {
-    restart_agent_app(app, "opencode".to_string()).await
+    restart_agent_app(app, "opencode".to_string(), None).await
 }
 
 #[tauri::command]
-pub(crate) async fn restart_agent_app(app: tauri::AppHandle, client: String) -> Result<(), String> {
+pub(crate) async fn restart_agent_app(
+    app: tauri::AppHandle,
+    client: String,
+    executable_path: Option<String>,
+) -> Result<(), String> {
     let client = AgentClient::parse(&client)?;
     if !matches!(
         client,
         AgentClient::Codex
             | AgentClient::OpenCode
+            | AgentClient::DeepSeekHarness
             | AgentClient::ClaudeDesktop
             | AgentClient::ZCode
             | AgentClient::WorkBuddy
@@ -723,14 +805,18 @@ pub(crate) async fn restart_agent_app(app: tauri::AppHandle, client: String) -> 
         .home_dir()
         .map_err(|error| format!("Failed to get user directory: {error}"))?;
     tauri::async_runtime::spawn_blocking(move || {
-        let target = find_desktop_restart_target(client, &home)?;
+        let executable_override = executable_path.as_deref().map(Path::new);
+        let target = find_desktop_restart_target(client, &home, executable_override)?;
         match client {
             AgentClient::Codex => stop_codex_desktop(&target)?,
             AgentClient::OpenCode => {
-                let DesktopAppTarget::Application(path) = &target else {
-                    return Err("Invalid OpenCode desktop installation type".to_string());
-                };
-                stop_opencode_desktop(path)?;
+                match &target {
+                    DesktopAppTarget::Application(path) => stop_opencode_desktop(path)?,
+                    #[cfg(target_os = "windows")]
+                    DesktopAppTarget::WindowsAppId(_) => {
+                        return Err("Invalid OpenCode desktop installation type".to_string());
+                    }
+                }
             }
             _ => stop_other_desktop(&target, client.name())?,
         }
@@ -746,14 +832,152 @@ pub(crate) async fn restart_agent_app(app: tauri::AppHandle, client: String) -> 
     .map_err(|error| format!("Desktop application restart task failed: {error}"))?
 }
 
+#[tauri::command]
+pub(crate) async fn get_codex_cli_daemon_running(
+    app: tauri::AppHandle,
+    executable_path: Option<String>,
+) -> Result<bool, String> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|error| format!("Failed to get user directory: {error}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        codex_cli_daemon_running(&home, executable_path.as_deref().map(Path::new))
+    })
+    .await
+    .map_err(|error| format!("Codex CLI background service check task failed: {error}"))?
+}
+
+static CODEX_CLI_DAEMON_RESTARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+struct CodexCliDaemonRestartGuard;
+
+impl Drop for CodexCliDaemonRestartGuard {
+    fn drop(&mut self) {
+        CODEX_CLI_DAEMON_RESTARTING.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+// A second `daemon restart` issued while Codex is still draining the first would restart the
+// replacement daemon as well, so only one restart may run at a time across all windows.
+fn begin_codex_cli_daemon_restart() -> Option<CodexCliDaemonRestartGuard> {
+    CODEX_CLI_DAEMON_RESTARTING
+        .compare_exchange(false, true, std::sync::atomic::Ordering::Acquire, std::sync::atomic::Ordering::Relaxed)
+        .ok()
+        .map(|_| CodexCliDaemonRestartGuard)
+}
+
+#[tauri::command]
+pub(crate) async fn restart_codex_cli_daemon(
+    app: tauri::AppHandle,
+    executable_path: Option<String>,
+) -> Result<(), String> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|error| format!("Failed to get user directory: {error}"))?;
+    let guard = begin_codex_cli_daemon_restart()
+        .ok_or_else(|| "A Codex CLI background service restart is already in progress".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard;
+        restart_codex_cli_daemon_process(&home, executable_path.as_deref().map(Path::new))
+    })
+    .await
+    .map_err(|error| format!("Codex CLI background service restart task failed: {error}"))?
+}
+
+fn codex_cli_daemon_running(home: &Path, executable_override: Option<&Path>) -> Result<bool, String> {
+    let mut command = codex_cli_daemon_command(home, executable_override, "version")?;
+    let output = command_output_with_timeout(&mut command, Duration::from_secs(10))
+        .map_err(|error| format!("Failed to check the Codex CLI background service: {error}"))?
+        .ok_or_else(|| "Checking the Codex CLI background service timed out".to_string())?;
+    parse_codex_cli_daemon_status(output.status.success(), &output.stdout, &output.stderr)
+}
+
+fn parse_codex_cli_daemon_status(
+    success: bool,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<bool, String> {
+    if !success {
+        let detail = String::from_utf8_lossy(stderr).trim().to_string();
+        // A stopped daemon leaves no listener on the control socket: ENOENT, or connection
+        // refused on macOS (61), Linux (111) and Windows (10061).
+        if detail.contains("failed to connect to ")
+            && detail.contains("app-server-control.sock")
+            && [2, 61, 111, 10061]
+                .iter()
+                .any(|code| detail.contains(&format!("(os error {code})")))
+        {
+            return Ok(false);
+        }
+        let detail = if detail.is_empty() {
+            String::from_utf8_lossy(stdout).trim().to_string()
+        } else {
+            detail
+        };
+        return Err(format!(
+            "Failed to check the Codex CLI background service{}",
+            if detail.is_empty() { String::new() } else { format!(": {detail}") }
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_slice(stdout).map_err(|error| {
+        format!("Invalid Codex CLI background service status response: {error}")
+    })?;
+    match value.get("status").and_then(serde_json::Value::as_str) {
+        Some("running") => Ok(true),
+        _ => Err("Unexpected Codex CLI background service status response".to_string()),
+    }
+}
+
+fn restart_codex_cli_daemon_process(home: &Path, executable_override: Option<&Path>) -> Result<(), String> {
+    let mut command = codex_cli_daemon_command(home, executable_override, "restart")?;
+    // Codex drains running turns before it force-stops the old daemon, which alone can take about a
+    // minute, so a shorter limit reports a timeout while the restart is still in progress.
+    let output = command_output_with_timeout(&mut command, Duration::from_secs(150))
+        .map_err(|error| format!("Failed to restart the Codex CLI background service: {error}"))?
+        .ok_or_else(|| "Restarting the Codex CLI background service timed out".to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(format!(
+        "Failed to restart the Codex CLI background service{}",
+        if detail.is_empty() { String::new() } else { format!(": {detail}") }
+    ))
+}
+
+fn codex_cli_daemon_command(
+    home: &Path,
+    executable_override: Option<&Path>,
+    action: &str,
+) -> Result<Command, String> {
+    let executable = executable_override.filter(|path| path.is_file()).map(Path::to_path_buf)
+        .or_else(|| find_agent_executable(AgentClient::Codex, home))
+        .ok_or_else(|| "Executable for Codex not found".to_string())?;
+    #[cfg(target_os = "windows")]
+    let mut command = windows_command_for_executable(&executable, false);
+    #[cfg(not(target_os = "windows"))]
+    let mut command = Command::new(&executable);
+    command.args(["app-server", "daemon", action]);
+    configure_background_command(&mut command);
+    configure_agent_command_environment(&mut command, home, &executable)?;
+    Ok(command)
+}
+
 fn find_desktop_restart_target(
     client: AgentClient,
     home: &Path,
+    executable_override: Option<&Path>,
 ) -> Result<DesktopAppTarget, String> {
+    if let Some(path) = manual_desktop_path(executable_override) {
+        return Ok(DesktopAppTarget::Application(path.to_path_buf()));
+    }
     let target = match client {
         AgentClient::Codex => find_codex_app_installation(home),
-        AgentClient::OpenCode => {
-            find_opencode_desktop_application(home).map(DesktopAppTarget::Application)
+        AgentClient::OpenCode => find_opencode_desktop_application(home).map(DesktopAppTarget::Application),
+        AgentClient::DeepSeekHarness => {
+            find_deepseek_harness_desktop_application(home).map(DesktopAppTarget::Application)
         }
         AgentClient::ZCode => {
             find_zcode_desktop_executable(home).map(DesktopAppTarget::Application)
@@ -762,8 +986,7 @@ fn find_desktop_restart_target(
             find_workbuddy_desktop_executable(home).map(DesktopAppTarget::Application)
         }
         AgentClient::ClaudeDesktop => {
-            let executable =
-                find_claude_desktop_executable(home).map(DesktopAppTarget::Application);
+            let executable = find_claude_desktop_executable(home).map(DesktopAppTarget::Application);
             #[cfg(target_os = "windows")]
             {
                 executable
@@ -819,9 +1042,8 @@ fn resolve_launch_directory(value: Option<&str>, fallback: &Path) -> Result<Path
     Ok(path)
 }
 
-fn launch_codex_desktop(home: &Path) -> Result<(), String> {
-    let target = find_codex_app_installation(home)
-        .ok_or_else(|| "Codex desktop application was not detected. Detect it again or use Codex CLI".to_string())?;
+fn launch_codex_desktop(home: &Path, executable_override: Option<&Path>) -> Result<(), String> {
+    let target = find_desktop_restart_target(AgentClient::Codex, home, executable_override)?;
     launch_codex_target(&target)
 }
 
@@ -1099,8 +1321,10 @@ fn stop_opencode_desktop(_application: &Path) -> Result<(), String> {
     Err("The current platform does not support restarting OpenCode Desktop".to_string())
 }
 
-fn launch_claude_desktop(home: &Path) -> Result<(), String> {
-    if let Some(executable) = find_claude_desktop_executable(home) {
+fn launch_claude_desktop(home: &Path, executable_override: Option<&Path>) -> Result<(), String> {
+    let executable = manual_desktop_path(executable_override).map(Path::to_path_buf)
+        .or_else(|| find_claude_desktop_executable(home));
+    if let Some(executable) = executable {
         return launch_desktop_agent(&executable, "Claude Desktop");
     }
     #[cfg(target_os = "windows")]
@@ -1111,10 +1335,46 @@ fn launch_claude_desktop(home: &Path) -> Result<(), String> {
     Err("Claude Desktop application was not detected. Install or detect it again".to_string())
 }
 
-fn launch_opencode_desktop(home: &Path) -> Result<(), String> {
-    let application = find_opencode_desktop_application(home)
+fn launch_opencode_desktop(home: &Path, executable_override: Option<&Path>) -> Result<(), String> {
+    let application = manual_desktop_path(executable_override).map(Path::to_path_buf)
+        .or_else(|| find_opencode_desktop_application(home))
         .ok_or_else(|| "OpenCode Desktop application was not detected. Install or detect it again".to_string())?;
     launch_desktop_agent(&application, "OpenCode Desktop")
+}
+
+fn launch_vscode_directory(executable: &Path, directory: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        // Prefer the editor binary to its batch launcher so folder names are not
+        // interpreted by cmd.exe.
+        let editor = executable.parent().and_then(Path::parent)
+            .map(|root| root.join("Code.exe"))
+            .filter(|path| path.is_file());
+        match editor {
+            Some(editor) => Command::new(editor),
+            None => windows_command_for_executable(executable, false),
+        }
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        if let Some(application) = executable.ancestors()
+            .find(|path| path.extension().and_then(|value| value.to_str()) == Some("app"))
+        {
+            let mut command = Command::new("open");
+            command.arg("-a").arg(application);
+            command
+        } else {
+            Command::new(executable)
+        }
+    };
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let mut command = Command::new(executable);
+
+    command.arg(directory).current_dir(directory)
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    configure_background_command(&mut command);
+    command.spawn().map(|_| ())
+        .map_err(|error| format!("Failed to start VSCode Copilot: {error}"))
 }
 
 fn launch_desktop_agent(executable: &Path, label: &str) -> Result<(), String> {
@@ -1174,7 +1434,7 @@ fn launch_windows_claude_store_app() -> Result<(), String> {
     launch_windows_store_app(&app_id, "Claude Desktop")
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -1186,11 +1446,17 @@ fn launch_cli_agent(
     working_directory: &Path,
     arguments: &[String],
     environment_to_remove: &[&str],
+    environment_to_set: &[(&str, &str)],
     terminal: &str,
 ) -> Result<(), String> {
     let removals = environment_to_remove
         .iter()
         .map(|key| format!("-u {}", shell_single_quote(key)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let assignments = environment_to_set
+        .iter()
+        .map(|(key, value)| format!("{}={}", shell_single_quote(key), shell_single_quote(value)))
         .collect::<Vec<_>>()
         .join(" ");
     let invocation = std::iter::once(shell_single_quote(&path_to_string(executable)))
@@ -1202,9 +1468,10 @@ fn launch_cli_agent(
         .collect::<Vec<_>>()
         .join(" ");
     let command_line = format!(
-        "cd {} && exec env {} {}",
+        "cd {} && exec env {} {} {}",
         shell_single_quote(&path_to_string(working_directory)),
         removals,
+        assignments,
         invocation,
     );
     let script = if terminal == "iterm2" {
@@ -1239,12 +1506,36 @@ fn launch_cli_agent(
 }
 
 #[cfg(target_os = "linux")]
+fn linux_cli_terminal_command(
+    program: &Path,
+    terminal_arguments: &[&str],
+    executable: &Path,
+    working_directory: &Path,
+    arguments: &[String],
+    environment_to_remove: &[&str],
+    environment_to_set: &[(&str, &str)],
+) -> Command {
+    let mut command = Command::new(program);
+    command.args(terminal_arguments).arg(executable).args(arguments)
+        .current_dir(working_directory).stdin(Stdio::null())
+        .stdout(Stdio::null()).stderr(Stdio::null());
+    for key in environment_to_remove {
+        command.env_remove(key);
+    }
+    for (key, value) in environment_to_set {
+        command.env(key, value);
+    }
+    command
+}
+
+#[cfg(target_os = "linux")]
 fn launch_cli_agent(
     executable: &Path,
     label: &str,
     working_directory: &Path,
     command_arguments: &[String],
     environment_to_remove: &[&str],
+    environment_to_set: &[(&str, &str)],
     terminal: &str,
 ) -> Result<(), String> {
     let definitions = linux_terminal_definitions();
@@ -1257,18 +1548,10 @@ fn launch_cli_agent(
         if program_on_path(program).is_none() {
             continue;
         }
-        let mut command = Command::new(program);
-        command
-            .args(arguments)
-            .arg(executable)
-            .args(command_arguments)
-            .current_dir(working_directory)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        for key in environment_to_remove {
-            command.env_remove(key);
-        }
+        let mut command = linux_cli_terminal_command(
+            Path::new(program), arguments, executable, working_directory,
+            command_arguments, environment_to_remove, environment_to_set,
+        );
         match command.spawn() {
             Ok(_) => return Ok(()),
             Err(error) => last_error = Some(error.to_string()),
@@ -1283,17 +1566,23 @@ fn launch_cli_agent(
     })
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
+fn windows_powershell_script_invocation(executable: &Path, arguments: &[String]) -> String {
+    let arguments = arguments.iter().map(|argument| windows_powershell_single_quoted_literal(argument)).collect::<Vec<_>>().join(", ");
+    format!("$cpaLaunchArguments = @({arguments}); & {} @cpaLaunchArguments", windows_powershell_single_quoted_literal(&path_to_string(executable)))
+}
+
+#[cfg(any(target_os = "windows", test))]
 fn windows_powershell_cli_script(
     executable: &Path,
     working_directory: &Path,
     arguments: &[String],
 ) -> String {
     let directory = windows_powershell_single_quoted_literal(&path_to_string(working_directory));
+    if executable.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("ps1")) {
+        return format!("Set-Location -LiteralPath {directory}; {}", windows_powershell_script_invocation(executable, arguments));
+    }
     let executable = windows_powershell_single_quoted_literal(&path_to_string(executable));
-    if arguments
-        .first()
-        .is_some_and(|arg| arg == "--cpa-antigravity-cli")
     {
         let arguments = arguments
             .iter()
@@ -1332,42 +1621,118 @@ fn windows_powershell_cli_script(
             windows_powershell_single_quoted_literal(&arguments),
         );
     }
-    let arguments = arguments
-        .iter()
-        .map(|argument| windows_powershell_single_quoted_literal(argument))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!("Set-Location -LiteralPath {directory}; & {executable} {arguments}")
+}
+
+#[cfg(any(windows, test))]
+fn windows_literal_cli_invocation(executable: &Path, arguments: &[String]) -> Result<(PathBuf, Vec<String>), String> {
+    let extension = executable.extension().and_then(|value| value.to_str()).unwrap_or_default();
+    if ["js", "mjs", "cjs"].iter().any(|value| extension.eq_ignore_ascii_case(value)) {
+        let node = program_on_path("node.exe").ok_or("Node.js executable was not found")?;
+        let mut forwarded = vec![path_to_string(executable)];
+        forwarded.extend_from_slice(arguments);
+        return Ok((node, forwarded));
+    }
+    if extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat") {
+        let source = fs::read_to_string(executable).map_err(|_| "Unable to read CLI startup wrapper")?;
+        let pattern = regex::Regex::new(r#"(?i)"%dp0%[\\/]([^"\r\n]+\.(?:js|mjs|cjs))""#).unwrap();
+        let script = pattern.captures(&source).and_then(|capture| capture.get(1))
+            .filter(|_| source.to_ascii_lowercase().contains("node"))
+            .ok_or("This batch wrapper cannot safely forward literal arguments. Select the CLI executable or its JavaScript entry point instead")?;
+        let directory = executable.parent().ok_or("CLI wrapper directory is missing")?;
+        let script = directory.join(script.as_str());
+        if !script.is_file() { return Err("CLI wrapper entry point was not found".into()); }
+        let node = directory.join("node.exe");
+        let node = if node.is_file() { node } else { program_on_path("node.exe").ok_or("Node.js executable was not found")? };
+        let mut forwarded = vec![path_to_string(&script)];
+        forwarded.extend_from_slice(arguments);
+        return Ok((node, forwarded));
+    }
+    Ok((executable.to_path_buf(), arguments.to_vec()))
+}
+
+#[cfg(any(windows, test))]
+fn windows_encoded_script(script: &str) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(script.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>())
+}
+
+#[cfg(any(windows, test))]
+fn windows_encoded_cli_launch_arguments(
+    executable: &Path,
+    working_directory: &Path,
+    arguments: &[String],
+    terminal: &str,
+) -> Vec<String> {
+    let script = windows_powershell_cli_script(executable, working_directory, arguments);
+    let mut shell_arguments = vec!["-NoLogo".into(), "-NoProfile".into()];
+    if terminal != "cmd" {
+        shell_arguments.push("-NoExit".into());
+    }
+    if executable.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("ps1")) {
+        shell_arguments.extend(["-ExecutionPolicy".into(), "Bypass".into()]);
+    }
+    shell_arguments.extend(["-EncodedCommand".into(), windows_encoded_script(&script)]);
+    shell_arguments
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_literal_cli_command(executable: &Path, arguments: &[String]) -> Result<Command, String> {
+    let (executable, arguments) = windows_literal_cli_invocation(executable, arguments)?;
+    if executable.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("ps1")) {
+        let mut command = Command::new(windows_powershell_executable());
+        command.args(["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", &windows_encoded_script(&windows_powershell_script_invocation(&executable, &arguments))]);
+        return Ok(command);
+    }
+    let mut command = Command::new(executable);
+    command.args(arguments);
+    Ok(command)
 }
 
 #[cfg(target_os = "windows")]
-fn launch_cli_agent(
+fn windows_cli_launch_command(
     executable: &Path,
     label: &str,
     working_directory: &Path,
     arguments: &[String],
-    environment_to_remove: &[&str],
     terminal: &str,
-) -> Result<(), String> {
+) -> Result<Command, String> {
     use std::os::windows::process::CommandExt;
 
     const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    if !arguments.is_empty() {
+        let (literal_executable, literal_arguments) = windows_literal_cli_invocation(executable, arguments)?;
+        let mut command = if terminal == "windows-terminal" {
+            let mut command = Command::new(program_on_path("wt.exe").ok_or("Windows Terminal not found")?);
+            command.args(["-d", &path_to_string(working_directory), "--"]).arg(windows_powershell_executable());
+            command
+        } else if terminal == "cmd" {
+            let mut command = Command::new(windows_command_processor());
+            command.args(["/D", "/K"]);
+            command.arg(windows_powershell_executable());
+            command
+        } else if matches!(terminal, "auto" | "powershell") {
+            Command::new(windows_powershell_executable())
+        } else {
+            return Err(format!("Failed to start {label}: selected terminal is unsupported"));
+        };
+        command.args(windows_encoded_cli_launch_arguments(
+            &literal_executable, working_directory, &literal_arguments, terminal,
+        ));
+        if terminal != "windows-terminal" { command.creation_flags(CREATE_NEW_CONSOLE); }
+        return Ok(command);
+    }
     let is_batch_script = executable
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
             extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
         });
+    let is_powershell_script = executable
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ps1"));
 
-    let mut command = match terminal {
-        "auto" => {
-            let mut command = windows_command_for_executable(executable, true);
-            command
-                .args(arguments)
-                .current_dir(working_directory)
-                .creation_flags(CREATE_NEW_CONSOLE);
-            command
-        }
+    let command = match terminal {
         "windows-terminal" => {
             let terminal_executable = program_on_path("wt.exe")
                 .ok_or_else(|| format!("Failed to start {label}: Windows Terminal not found"))?;
@@ -1385,10 +1750,32 @@ fn launch_cli_agent(
             }
             command
         }
-        "powershell" => {
-            let mut command = Command::new(windows_powershell_executable());
-            let script = windows_powershell_cli_script(executable, working_directory, arguments);
-            command.args(["-NoLogo", "-NoProfile", "-NoExit", "-Command", &script]);
+        // A native CLI launched directly by the GUI owns the console lifetime.
+        // Use an interactive shell, as with a manual launch, so terminal setup
+        // and the window lifetime do not depend on the CLI (notably on Win10).
+        "auto" | "powershell" => {
+            let mut command = if is_batch_script {
+                let mut command = windows_command_for_executable(executable, true);
+                command.args(arguments);
+                command
+            } else if is_powershell_script {
+                let mut command = Command::new(windows_powershell_executable());
+                command.args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NoExit",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                ]);
+                command.arg(executable).args(arguments);
+                command
+            } else {
+                let mut command = Command::new(windows_powershell_executable());
+                let script = windows_powershell_cli_script(executable, working_directory, arguments);
+                command.args(["-NoLogo", "-NoProfile", "-NoExit", "-Command", &script]);
+                command
+            };
             command.creation_flags(CREATE_NEW_CONSOLE);
             command
         }
@@ -1410,8 +1797,28 @@ fn launch_cli_agent(
         }
         _ => return Err(format!("Failed to start {label}: selected terminal is unsupported")),
     };
+    Ok(command)
+}
+
+#[cfg(target_os = "windows")]
+fn launch_cli_agent(
+    executable: &Path,
+    label: &str,
+    working_directory: &Path,
+    arguments: &[String],
+    environment_to_remove: &[&str],
+    environment_to_set: &[(&str, &str)],
+    terminal: &str,
+) -> Result<(), String> {
+    let mut command = windows_cli_launch_command(
+        executable, label, working_directory, arguments, terminal,
+    )?;
+    command.current_dir(working_directory);
     for key in environment_to_remove {
         command.env_remove(key);
+    }
+    for (key, value) in environment_to_set {
+        command.env(key, value);
     }
     command
         .spawn()
@@ -1426,6 +1833,7 @@ fn launch_cli_agent(
     _working_directory: &Path,
     _arguments: &[String],
     _environment_to_remove: &[&str],
+    _environment_to_set: &[(&str, &str)],
     _terminal: &str,
 ) -> Result<(), String> {
     Err(format!("The current platform does not support launching {label}"))
@@ -1434,6 +1842,330 @@ fn launch_cli_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    struct ArgumentRecorder(PathBuf);
+
+    #[cfg(target_os = "linux")]
+    impl ArgumentRecorder {
+        fn new() -> Self {
+            let directory = env::temp_dir().join(format!("cpa-argv-{}-{}", std::process::id(),
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+            fs::create_dir_all(&directory).unwrap();
+            Self(directory)
+        }
+
+        fn script(&self, name: &str, body: &str) -> PathBuf {
+            use std::os::unix::fs::PermissionsExt;
+            let path = self.0.join(name);
+            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        }
+
+        fn read(&self, name: &str) -> Vec<String> {
+            let bytes = fs::read(self.0.join(name)).unwrap();
+            bytes.strip_suffix(&[0]).unwrap().split(|byte| *byte == 0)
+                .map(|value| String::from_utf8(value.to_vec()).unwrap()).collect()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for ArgumentRecorder {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn custom_arguments_linux_shared_terminal_records_generic_and_pi_argv() {
+        let recorder = ArgumentRecorder::new();
+        let terminal = recorder.script("terminal", "printf '%s\\0' \"$1\" > prefix; shift; exec \"$@\"");
+        let executable = recorder.script("cli recorder", "printf '%s\\0' \"$@\" > argv; printf '%s\\0' \"$PWD\" \"${ANTHROPIC_API_KEY-unset}\" \"$CPA_ARGV_TEST\" > context");
+        let custom = parse_custom_launch_arguments(Some("'' 'two words' 'a\"b' \"it's literal\" 'C:\\Work files\\' '日本語' --verbose --verbose '$(exit 91); & | %PATH% !bang! ^' --cpa-copilot-cli")).unwrap();
+        for client in [None, Some(AgentClient::Codex), Some(AgentClient::ClaudeCode)] {
+            let mut arguments = client.map(|client| agent_cli_launch_arguments(client, None).unwrap()).unwrap_or_default();
+            arguments.extend_from_slice(&custom);
+            for (_, _, prefix, _) in linux_terminal_definitions() {
+                let removals = if client == Some(AgentClient::ClaudeCode) { &["ANTHROPIC_API_KEY"][..] } else { &[] };
+                let mut command = linux_cli_terminal_command(&terminal, prefix, &executable, &recorder.0,
+                    &arguments, removals, &[("CPA_ARGV_TEST", "literal value")]);
+                if removals.is_empty() { command.env("ANTHROPIC_API_KEY", "inherited fixture"); }
+                assert!(command.status().unwrap().success());
+                assert_eq!(recorder.read("prefix"), *prefix);
+                assert_eq!(recorder.read("argv"), arguments);
+                assert_eq!(recorder.read("context"), [path_to_string(&recorder.0),
+                    if removals.is_empty() { "inherited fixture".into() } else { "unset".into() }, "literal value".into()]);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn custom_arguments_linux_managed_initial_and_restart_record_exact_argv() {
+        struct ProcessFixture(DeepSeekHarnessProcessState);
+        impl Drop for ProcessFixture {
+            fn drop(&mut self) {
+                if let Ok(mut process) = self.0.process.lock() {
+                    if let Some(process) = process.as_mut() {
+                        let _ = process.child.kill();
+                        let _ = process.child.wait();
+                    }
+                }
+            }
+        }
+        let recorder = ArgumentRecorder::new();
+        let executable = recorder.script("harness recorder", "printf '%s\\0' \"$@\" > argv; printf '%s\\0' \"$PWD\" > context; exec /bin/sleep 60");
+        let custom = parse_custom_launch_arguments(Some("'' 'two words' 'a\"b' '日本語' 'C:\\Work\\' --verbose --verbose '$(exit 91); & | %PATH% !bang!'")).unwrap();
+        let stop = |child: &mut Child| -> Result<(), String> {
+            child.kill().map_err(|error| error.to_string())?;
+            child.wait().map_err(|error| error.to_string())?;
+            Ok(())
+        };
+        for mode in ["web", "acp", "sdk", "sdk-minimal", "headless", "custom"] {
+            let mut options = deepseek_harness_options(mode);
+            options.web_port = Some(0);
+            options.task = Some("review repository".into());
+            options.profile = Some("tui-dev".into());
+            let arguments = deepseek_harness_arguments_with_custom(Some(&options), &custom).unwrap();
+            let fixture = ProcessFixture(DeepSeekHarnessProcessState::default());
+            let state = &fixture.0;
+            launch_managed_deepseek_harness(state, &executable, &recorder.0, &arguments, mode, Some(&options)).unwrap();
+            let verify = || {
+                for _ in 0..100 {
+                    if fs::read(recorder.0.join("context")).is_ok() { break; }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                let received = recorder.read("argv");
+                assert_eq!(received, arguments, "{mode}");
+                assert_eq!(received.windows(custom.len()).filter(|window| *window == custom.as_slice()).count(), 1);
+                assert_eq!(recorder.read("context"), [path_to_string(&recorder.0)]);
+                fs::remove_file(recorder.0.join("context")).unwrap();
+            };
+            verify();
+            if mode == "web" {
+                restart_managed_deepseek_harness_with(state, stop, spawn_managed_deepseek_harness).unwrap();
+                verify();
+            }
+            let mut process = state.process.lock().unwrap().take().unwrap();
+            stop(&mut process.child).unwrap();
+        }
+    }
+
+    #[test]
+    fn custom_arguments_shared_parsing_cases() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!("../../../tests/fixtures/cli-arguments.json")).unwrap();
+        for fixture in cases.as_array().unwrap() {
+            let result = parse_custom_launch_arguments(fixture["source"].as_str());
+            if fixture["expected"].is_null() { assert!(result.is_err()); }
+            else { assert_eq!(serde_json::json!(result.unwrap()), fixture["expected"]); }
+        }
+        assert!(parse_custom_launch_arguments(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn custom_arguments_deepseek_order_and_conflicts() {
+        for mode in ["web", "acp", "sdk", "sdk-minimal", "headless", "custom"] {
+            let mut options = deepseek_harness_options(mode);
+            options.task = Some("review repository".into());
+            options.profile = Some("tui-dev".into());
+            let generated = build_deepseek_harness_launch_arguments(Some(&options)).unwrap();
+            let custom = parse_custom_launch_arguments(Some("--verbose --verbose 'two words' ''")).unwrap();
+            validate_deepseek_custom_arguments(&custom).unwrap();
+            let combined = deepseek_harness_arguments_with_custom(Some(&options), &custom).unwrap();
+            let prefix = generated.len() - usize::from(mode == "headless");
+            assert_eq!(&combined[..prefix], &generated[..prefix]);
+            assert_eq!(&combined[prefix..prefix + custom.len()], &custom);
+            if mode == "headless" { assert_eq!(combined.last(), generated.last()); }
+        }
+        for option in ["--profile", "--patch", "--host", "--port", "--trusted-host", "--no-open", "--open"] {
+            assert!(validate_deepseek_custom_arguments(&[option.into()]).is_err());
+            assert!(validate_deepseek_custom_arguments(&[format!("{option}=value")]).is_err());
+        }
+    }
+
+    #[test]
+    fn custom_arguments_windows_encoded_launch_preserves_script_execution_policy() {
+        use base64::Engine;
+        let directory = Path::new(r"C:\Users\Test User\project's [work]");
+        let custom = vec!["two words".into(), String::new(), "$(x); & | 'quoted'".into()];
+        for executable in ["client.ps1", "client.PS1", "client.exe"] {
+            let (program, forwarded) = windows_literal_cli_invocation(Path::new(executable), &custom).unwrap();
+            for terminal in ["auto", "powershell", "cmd", "windows-terminal"] {
+                let values = windows_encoded_cli_launch_arguments(&program, directory, &forwarded, terminal);
+                let mut expected = vec!["-NoLogo", "-NoProfile"];
+                if terminal != "cmd" {
+                    expected.push("-NoExit");
+                }
+                if executable != "client.exe" {
+                    expected.extend(["-ExecutionPolicy", "Bypass"]);
+                }
+                expected.push("-EncodedCommand");
+                assert_eq!(&values[..values.len() - 1], &expected, "{terminal}: {executable}");
+                let bytes = base64::engine::general_purpose::STANDARD.decode(values.last().unwrap()).unwrap();
+                let script = String::from_utf16(&bytes.chunks_exact(2).map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]])).collect::<Vec<_>>()).unwrap();
+                assert_eq!(script, windows_powershell_cli_script(&program, directory, &custom));
+                assert_eq!(script.contains("$cpaLaunchArguments = @("), executable != "client.exe");
+                assert!(!script.contains("Set-ExecutionPolicy"));
+            }
+        }
+    }
+
+    #[test]
+    fn custom_arguments_windows_wrappers_encode_shell_data() {
+        use base64::Engine;
+        let directory = env::temp_dir().join(format!("cpa-literal-wrapper-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let unknown = directory.join("unknown.cmd");
+        fs::write(&unknown, "@echo off\r\necho %*\r\n").unwrap();
+        assert!(windows_literal_cli_invocation(&unknown, &["%PATH%".into()]).is_err());
+        let shim = directory.join("known.cmd");
+        fs::write(&shim, "@echo off\r\n\"%dp0%\\node.exe\" \"%dp0%\\entry.js\" %*\r\n").unwrap();
+        fs::write(directory.join("node.exe"), []).unwrap();
+        fs::write(directory.join("entry.js"), []).unwrap();
+        let arguments = vec!["%PATH% !bang! $(x); & | `x`".into(), String::new(), "a\"b".into(), "C:\\path with spaces\\".into()];
+        let (program, forwarded) = windows_literal_cli_invocation(&shim, &arguments).unwrap();
+        assert_eq!(program, directory.join("node.exe"));
+        assert_eq!(&forwarded[1..], &arguments);
+        let script = windows_powershell_cli_script(&program, &directory, &arguments);
+        let encoded = windows_encoded_script(&script);
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
+        assert_eq!(String::from_utf16(&bytes.chunks_exact(2).map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]])).collect::<Vec<_>>()).unwrap(), script);
+        assert!(script.contains("ProcessStartInfo"));
+        assert!(script.contains("UseShellExecute = $false"));
+        assert!(script.contains(r#"\"a\"b\""#.trim_matches('\\')) == false);
+        assert!(script.contains(r#""" "a\"b" "C:\path with spaces\\""#));
+        let script = windows_powershell_cli_script(&directory.join("client.ps1"), &directory, &arguments);
+        assert!(script.contains("$cpaLaunchArguments = @("));
+        assert!(script.contains(", '', 'a\"b', 'C:\\path with spaces\\'"));
+        assert!(!script.contains(" -File "));
+        #[cfg(windows)]
+        for terminal in ["auto", "powershell", "cmd"] {
+            let command = windows_cli_launch_command(&shim, "fixture", &directory, &arguments, terminal).unwrap();
+            let values = command.get_args().map(|value| value.to_string_lossy().into_owned()).collect::<Vec<_>>();
+            let encoded = values.last().unwrap();
+            let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
+            let script = String::from_utf16(&bytes.chunks_exact(2).map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]])).collect::<Vec<_>>()).unwrap();
+            assert!(script.contains("ProcessStartInfo"));
+            assert!(script.contains("UseShellExecute = $false"));
+            assert!(!values[..values.len() - 1].iter().any(|value| value.contains("%PATH%")));
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn custom_arguments_shell_transport_is_literal() {
+        let arguments = parse_custom_launch_arguments(Some("'$(exit 91)' '`exit 92`' ';' '&' '|' '日本語' '' 'a\"b' \"it's literal\" 'C:\\Program Files\\' '%PATH%' '!test!'")).unwrap();
+        let source = format!("printf '%s\\0' {}", arguments.iter().map(|value| shell_single_quote(value)).collect::<Vec<_>>().join(" "));
+        let output = Command::new("sh").args(["-c", &source]).output().unwrap();
+        assert!(output.status.success());
+        let received = output.stdout.split(|value| *value == 0).collect::<Vec<_>>();
+        assert_eq!(&received[..received.len() - 1], arguments.iter().map(|value| value.as_bytes()).collect::<Vec<_>>());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_cli_daemon_command_preserves_executable_arguments_and_path() {
+        let root = env::temp_dir().join(format!("cpa-daemon-command-{}-{}", std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("codex fixture");
+        fs::write(&executable, b"command construction fixture").unwrap();
+        for action in ["version", "restart"] {
+            let command = codex_cli_daemon_command(&root, Some(&executable), action).unwrap();
+            assert_eq!(command.get_program(), executable.as_os_str());
+            let arguments = command.get_args().map(|arg| arg.to_str().unwrap()).collect::<Vec<_>>();
+            assert_eq!(arguments, ["app-server", "daemon", action]);
+            let path = command.get_envs().find(|(key, _)| *key == "PATH").unwrap().1.unwrap();
+            assert_eq!(env::split_paths(path).next().unwrap(), root);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_cli_daemon_restart_allows_one_restart_at_a_time() {
+        let guard = begin_codex_cli_daemon_restart().unwrap();
+        assert!(begin_codex_cli_daemon_restart().is_none());
+        drop(guard);
+        assert!(begin_codex_cli_daemon_restart().is_some());
+    }
+
+    #[test]
+    fn codex_cli_daemon_status_requires_valid_running_response() {
+        assert!(parse_codex_cli_daemon_status(true, br#"{"status":"running"}"#, b"").unwrap());
+        for response in [
+            b"not JSON".as_slice(),
+            br#"{}"#,
+            br#"{"status":"unknown"}"#,
+            br#"{"status":"stopped"}"#,
+        ] {
+            assert!(parse_codex_cli_daemon_status(true, response, b"").is_err());
+        }
+    }
+
+    #[test]
+    fn codex_cli_daemon_status_recognizes_only_stopped_socket_errors() {
+        for code in [2, 61, 111, 10061] {
+            let detail = format!("Error: failed to connect to fixture/app-server-control.sock\n\nCaused by:\n    localized OS message (os error {code})");
+            assert!(!parse_codex_cli_daemon_status(false, b"", detail.as_bytes()).unwrap());
+            let unrelated = format!("failed to read config.toml (os error {code})");
+            assert!(parse_codex_cli_daemon_status(false, b"", unrelated.as_bytes()).is_err());
+        }
+    }
+
+    #[test]
+    fn codex_cli_daemon_status_preserves_unsupported_and_runtime_errors() {
+        for detail in [
+            "error: unrecognized subcommand 'daemon'",
+            "Error: daemon management is not supported on this platform",
+            "Error: failed to connect to fixture/app-server-control.sock: permission denied (os error 13)",
+            "Error: failed to connect to fixture/app-server-control.sock: network subsystem failed (os error 10050)",
+        ] {
+            let error = parse_codex_cli_daemon_status(false, b"", detail.as_bytes()).unwrap_err();
+            assert!(error.contains(detail));
+        }
+        let error = parse_codex_cli_daemon_status(false, b"stdout-only diagnostic", b"").unwrap_err();
+        assert!(error.contains("stdout-only diagnostic"));
+    }
+
+    #[test]
+    fn manual_desktop_paths_drive_detection_and_restart_without_replacing_cli_paths() {
+        let root = env::temp_dir().join(format!("cpa-manual-desktop-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&root).unwrap();
+        let desktop = root.join("Custom Desktop.exe");
+        let cli = root.join("custom-cli.exe");
+        fs::write(&desktop, b"desktop fixture").unwrap();
+        fs::write(&cli, b"cli fixture").unwrap();
+        for client in [AgentClient::Codex, AgentClient::OpenCode, AgentClient::DeepSeekHarness] {
+            let status = inspect_agent_config_with_executables(client, &root, 8317, "test-key", Some(&cli), Some(&desktop));
+            assert!(status.installed, "{}", client.name());
+            assert!(status.launch_targets.iter().any(|target| target.id == "app"), "{}", client.name());
+            let cli_target = status.launch_targets.iter().find(|target| target.id == "cli").unwrap();
+            assert!(cli_target.detail.contains("custom-cli.exe"));
+            assert!(!cli_target.detail.contains("Custom Desktop.exe"));
+        }
+        for client in [AgentClient::ClaudeDesktop, AgentClient::ZCode, AgentClient::WorkBuddy] {
+            let status = inspect_agent_config_with_executables(client, &root, 8317, "test-key", Some(&desktop), None);
+            assert!(status.installed, "{}", client.name());
+            assert_eq!(status.launch_targets.len(), 1);
+            assert_eq!(status.launch_targets[0].id, "app");
+            assert_eq!(status.launch_targets[0].detail, path_to_string(&desktop));
+        }
+        for client in [AgentClient::Codex, AgentClient::OpenCode, AgentClient::ClaudeDesktop,
+            AgentClient::ZCode, AgentClient::WorkBuddy, AgentClient::DeepSeekHarness] {
+            match find_desktop_restart_target(client, &root, Some(&desktop)).unwrap() {
+                DesktopAppTarget::Application(path) => assert_eq!(path, desktop),
+                #[cfg(target_os = "windows")]
+                DesktopAppTarget::WindowsAppId(_) => panic!("manual path must take precedence"),
+            }
+        }
+        assert!(manual_desktop_path(Some(&root.join("missing.exe"))).is_none());
+        assert!(manual_desktop_path(Some(&root)).is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn deepseek_harness_options(mode: &str) -> DeepSeekHarnessLaunchOptions {
         DeepSeekHarnessLaunchOptions {
@@ -1459,7 +2191,83 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn antigravity_powershell_waits_for_gui_helper_and_preserves_arguments() {
+    fn windows_auto_cli_uses_a_persistent_shell_for_native_and_batch_clients() {
+        let directory = Path::new(r"C:\Users\Test User\project's [work]");
+        for executable in [
+            r"C:\Tools\Claude Code\claude.exe",
+            r"C:\Tools\Claude Code\claude.cmd",
+            r"C:\Tools\Claude Code\claude.BAT",
+            r"C:\Tools\Claude Code\claude.PS1",
+        ] {
+            for terminal in ["auto", "powershell"] {
+                let command = windows_cli_launch_command(
+                    Path::new(executable), "Claude Code", directory, &[], terminal,
+                ).unwrap();
+                let arguments = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+                if executable.ends_with(".cmd") || executable.ends_with(".BAT") {
+                    assert_eq!(command.get_program(), windows_command_processor().as_os_str());
+                    assert_eq!(&arguments[..3], ["/D", "/K", "call"]);
+                    assert_eq!(arguments[3], windows_batch_executable_argument(Path::new(executable)));
+                    continue;
+                }
+                assert_eq!(command.get_program(), windows_powershell_executable().as_os_str());
+                if executable.ends_with(".PS1") {
+                    assert_eq!(arguments, ["-NoLogo", "-NoProfile", "-NoExit", "-ExecutionPolicy", "Bypass", "-File", executable]);
+                    continue;
+                }
+                assert_eq!(&arguments[..4], ["-NoLogo", "-NoProfile", "-NoExit", "-Command"]);
+                assert!(arguments[4].contains("Set-Location -LiteralPath 'C:\\Users\\Test User\\project''s [work]'"));
+                assert!(arguments[4].contains("System.Diagnostics.ProcessStartInfo"));
+                assert!(arguments[4].contains("WaitForExit()"));
+                assert!(!arguments[4].contains("Write-Host"));
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_auto_cli_preserves_directory_arguments_and_environment() {
+        let directory = env::temp_dir().join(format!(
+            "cpa-cli-launch-{}-{}", std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos(),
+        )).join("project's [work]");
+        fs::create_dir_all(&directory).unwrap();
+        let powershell = directory.join("test client.ps1");
+        fs::write(&powershell, "[Console]::WriteLine([Environment]::CurrentDirectory); [Console]::WriteLine($args[0]); [Console]::WriteLine($env:CPA_LAUNCH_TEST)").unwrap();
+        let native = windows_powershell_executable();
+        for (executable, arguments) in [
+            (powershell, vec!["two words".to_string()]),
+            (native, vec!["-NoProfile".into(), "-Command".into(),
+                "[Console]::WriteLine([Environment]::CurrentDirectory); [Console]::WriteLine('two words'); [Console]::WriteLine($env:CPA_LAUNCH_TEST)".into()]),
+        ] {
+            let interactive = windows_cli_launch_command(
+                &executable, "test client", &directory, &arguments, "auto",
+            ).unwrap();
+            // Run the same startup script without keeping a test shell open.
+            let mut command = if interactive.get_program() == windows_command_processor().as_os_str() {
+                let mut command = windows_command_for_executable(&executable, false);
+                command.args(&arguments);
+                command
+            } else {
+                let mut command = Command::new(interactive.get_program());
+                command.args(interactive.get_args().filter(|arg| *arg != "-NoExit"));
+                command
+            };
+            command.current_dir(&directory).env("CPA_LAUNCH_TEST", "launch-fixture");
+            configure_background_command(&mut command);
+            let output = command_output_with_timeout(&mut command, Duration::from_secs(20))
+                .unwrap().expect("launch fixture timed out");
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let lines = stdout.lines().collect::<Vec<_>>();
+            assert_eq!(lines, [path_to_string(&directory).as_str(), "two words", "launch-fixture"]);
+        }
+        fs::remove_dir_all(directory.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_waits_for_gui_helpers_and_preserves_arguments() {
         let directory = env::temp_dir()
             .join(format!(
                 "cpa-powershell-{}-{}",
@@ -1476,11 +2284,12 @@ mod tests {
         let source = r#"
 using System;
 using System.IO;
+using System.Text;
 using System.Threading;
 class GuiHelper {
     static void Main(string[] args) {
         Thread.Sleep(350);
-        File.WriteAllLines(Path.Combine(Environment.CurrentDirectory, "arguments.txt"), args);
+        File.WriteAllLines(Path.Combine(Environment.CurrentDirectory, "arguments.txt"), Array.ConvertAll(args, value => Convert.ToBase64String(Encoding.UTF8.GetBytes(value))));
         File.WriteAllText(Path.Combine(Environment.CurrentDirectory, "finished.txt"), "done");
     }
 }
@@ -1511,27 +2320,38 @@ class GuiHelper {
         };
         run(&script);
         fs::rename(compiled, &executable).unwrap();
-        let arguments = vec![
-            "--cpa-antigravity-cli".into(),
-            path_to_string(&directory),
-            "trailing slash \\".into(),
-            "quote \" and \\\"".into(),
-            "literal $value & [x] 'quoted'".into(),
-            String::new(),
-        ];
-        let script = format!(
-            "{}; if (![IO.File]::Exists({})) {{ throw 'GUI helper is still running' }}",
-            windows_powershell_cli_script(&executable, &directory, &arguments),
-            windows_powershell_single_quoted_literal(&path_to_string(
-                &directory.join("finished.txt")
-            )),
-        );
-        run(&script);
-        let received = fs::read_to_string(directory.join("arguments.txt")).unwrap();
-        assert_eq!(
-            received.lines().collect::<Vec<_>>(),
-            arguments.iter().map(String::as_str).collect::<Vec<_>>()
-        );
+        for helper_flag in ["--cpa-antigravity-cli", "--cpa-copilot-cli", "--user-option"] {
+            let mut arguments = vec![
+                helper_flag.into(),
+                path_to_string(&directory),
+                "trailing slash \\".into(),
+                "quote \" and \\\"".into(),
+                "literal $value & [x] 'quoted'".into(),
+                String::new(),
+            ];
+            let cases: serde_json::Value = serde_json::from_str(include_str!("../../../tests/fixtures/cli-arguments.json")).unwrap();
+            for fixture in cases.as_array().unwrap() {
+                if let Some(expected) = fixture["expected"].as_array() {
+                    arguments.extend(expected.iter().map(|value| value.as_str().unwrap().to_string()));
+                }
+            }
+            let script = format!(
+                "{}; if (![IO.File]::Exists({})) {{ throw 'GUI helper is still running' }}",
+                windows_powershell_cli_script(&executable, &directory, &arguments),
+                windows_powershell_single_quoted_literal(&path_to_string(
+                    &directory.join("finished.txt")
+                )),
+            );
+            run(&script);
+            let received = fs::read_to_string(directory.join("arguments.txt")).unwrap();
+            use base64::Engine;
+            let received = received.lines().map(|line| String::from_utf8(base64::engine::general_purpose::STANDARD.decode(line).unwrap()).unwrap()).collect::<Vec<_>>();
+            assert_eq!(
+                received,
+                arguments
+            );
+            fs::remove_file(directory.join("finished.txt")).unwrap();
+        }
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1697,6 +2517,8 @@ class GuiHelper {
                 "pwd >> launches.txt; sleep 60".to_string(),
             ],
         );
+        let mut arguments = arguments;
+        arguments.extend(parse_custom_launch_arguments(Some("'' 'two words' 'a\"b' 'C:\\workspace\\' '--verbose' '--verbose'")).unwrap());
         let mut options = deepseek_harness_options("web");
         options.web_port = Some(0);
         options.trusted_hosts = vec!["localhost".to_string()];

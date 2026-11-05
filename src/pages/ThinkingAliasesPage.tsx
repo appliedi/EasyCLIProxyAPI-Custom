@@ -1,3 +1,17 @@
+import { EmptyState } from '../components/EmptyState';
+import {
+  getThinkingAliases,
+  getModelAliasSources,
+  getThinkingAliasSources,
+  getSpeedAliases,
+  getSpeedAliasSources,
+  createThinkingAlias,
+  createSpeedAlias,
+  getModelAliasEditSource,
+  deleteThinkingAlias,
+  deleteSpeedAlias,
+} from '../services/modelAliases';
+import type { ThinkingAliasEntry, ThinkingAliasSource, SpeedAliasEntry, AliasListEntry } from '../services/modelAliases';
 import { MessageNotice } from '../appNotice';
 import { useConfirmation } from '../components/ConfirmationDialog';
 import {
@@ -8,7 +22,6 @@ import {
   useRef,
   useState,
 } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { usableModelAlias } from '../services/modelService';
 import {
   ArrowRight,
@@ -25,52 +38,13 @@ import {
 } from 'lucide-react';
 import { getCurrentLocale, translate, useI18n } from '../i18n';
 import { SettingsHelp } from '../components/SettingsHelp';
-import { useDialogFocusTrap } from '../components/useDialogFocusTrap';
+import { Dialog } from '../components/Dialog';
 
 type PresetThinkingEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
-
-type ThinkingAliasEntry = {
-  sourceModel: string;
-  alias: string;
-  effort: string | null;
-  provider: string;
-  kind: string;
-  oauthChannel?: string | null;
-};
-
-type SpeedAliasEntry = {
-  sourceModel: string;
-  alias: string;
-  serviceTier: string;
-  provider: string;
-  kind: string;
-  oauthChannel?: string | null;
-};
-
-type AliasListEntry = ThinkingAliasEntry & {
-  serviceTier: string | null;
-};
-
-type ThinkingAliasSource = {
-  id: string;
-  model: string;
-  displayName: string | null;
-  provider: string;
-  kind: string;
-  protocol: string;
-  reasoningLevels: string[];
-};
 
 type ModelAliasSource = ThinkingAliasSource & {
   supportsReasoning: boolean;
   supportsFast: boolean;
-};
-
-type ModelAliasEditContext = {
-  source: ThinkingAliasSource;
-  revision: string;
-  effort: string | null;
-  fast: boolean;
 };
 
 const effortOptions = [
@@ -86,13 +60,10 @@ export const combineModelAliasEntries = (
   speedEntries: SpeedAliasEntry[],
 ): AliasListEntry[] => {
   const entries = new Map<string, AliasListEntry>();
-  const entryKey = (
-    entry: Pick<ThinkingAliasEntry, 'kind' | 'provider' | 'sourceModel' | 'alias' | 'oauthChannel'>,
-  ) => (
-    [entry.oauthChannel ?? '', entry.kind, entry.provider, entry.sourceModel, entry.alias]
-      .map((value) => value.toLocaleLowerCase())
-      .join('\u0000')
-  );
+  const entryKey = (entry: ThinkingAliasEntry | SpeedAliasEntry) => JSON.stringify([
+    entry.position.section, entry.position.providerIndex, entry.oauthChannel,
+    entry.position.modelIndex,
+  ]);
 
   thinkingEntries.forEach((entry) => {
     entries.set(entryKey(entry), { ...entry, serviceTier: null });
@@ -133,12 +104,13 @@ export const defaultModelAlias = (
   model: string | null | undefined,
   effort: string,
   fast: boolean,
+  serviceTier: 'priority' | 'ultrafast' = 'priority',
 ) => {
   const normalizedModel = model?.trim() ?? '';
   const normalizedEffort = effort.trim().toLowerCase();
   if (!normalizedModel) return '';
   if (!normalizedEffort && !fast) return `${normalizedModel}-alias`;
-  return `${normalizedModel}${normalizedEffort ? `-${normalizedEffort}` : ''}${fast ? '-fast' : ''}`;
+  return `${normalizedModel}${normalizedEffort ? `-${normalizedEffort}` : ''}${fast ? serviceTier === 'ultrafast' ? '-ultrafast' : '-fast' : ''}`;
 };
 
 export const uniqueModelAlias = (
@@ -200,10 +172,10 @@ export function ThinkingAliasesPage({ embedded = false }: { embedded?: boolean }
   const [selectedSourceId, setSelectedSourceId] = useState('');
   const [effort, setEffort] = useState('');
   const [fastEnabled, setFastEnabled] = useState(false);
+  const [serviceTier, setServiceTier] = useState<'priority' | 'ultrafast'>('priority');
   const [alias, setAlias] = useState('');
   const [editingEntry, setEditingEntry] = useState<AliasListEntry | null>(null);
   const [editingSource, setEditingSource] = useState<ThinkingAliasSource | null>(null);
-  const [editingRevision, setEditingRevision] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [search, setSearch] = useState('');
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
@@ -228,11 +200,11 @@ export function ThinkingAliasesPage({ embedded = false }: { embedded?: boolean }
         nextSpeedEntries,
         nextSpeedSources,
       ] = await Promise.all([
-        invoke<ThinkingAliasEntry[]>('get_thinking_aliases'),
-        invoke<ThinkingAliasSource[]>('get_model_alias_sources'),
-        invoke<ThinkingAliasSource[]>('get_thinking_alias_sources'),
-        invoke<SpeedAliasEntry[]>('get_speed_aliases'),
-        invoke<ThinkingAliasSource[]>('get_speed_alias_sources'),
+        getThinkingAliases(),
+        getModelAliasSources(),
+        getThinkingAliasSources(),
+        getSpeedAliases(),
+        getSpeedAliasSources(),
       ]);
       setThinkingEntries(nextThinkingEntries);
       setSpeedEntries(nextSpeedEntries);
@@ -370,7 +342,7 @@ export function ThinkingAliasesPage({ embedded = false }: { embedded?: boolean }
   };
 
   const normalizedEffort = effort.trim().toLowerCase();
-  const defaultAlias = defaultModelAlias(selectedSource?.model, normalizedEffort, fastEnabled);
+  const defaultAlias = defaultModelAlias(selectedSource?.model, normalizedEffort, fastEnabled, serviceTier);
   const uniqueDefaultAlias = uniqueModelAlias(defaultAlias, sources.map((source) => source.model));
   const availableEfforts = selectedSource?.reasoningLevels ?? [];
   const visibleEffortOptions = availableEfforts.map((value) => {
@@ -422,31 +394,33 @@ export function ThinkingAliasesPage({ embedded = false }: { embedded?: boolean }
     setNotice('');
     try {
       if (editingEntry) {
-        await invoke('create_thinking_alias', {
+        await createThinkingAlias({
           sourceId: selectedSource.id, alias: normalizedAlias,
-          effort: normalizedEffort, fast: fastEnabled, originalAlias: editingEntry.alias,
-          expectedRevision: editingRevision,
+          effort: normalizedEffort, fast: fastEnabled, serviceTier: fastEnabled ? serviceTier : undefined, originalAlias: editingEntry.alias,
+          originalEntry: editingEntry,
         });
         setNotice(t('aliases.updated', { alias: normalizedAlias }));
       } else if (normalizedEffort) {
-        await invoke<ThinkingAliasEntry[]>('create_thinking_alias', {
+        await createThinkingAlias({
           sourceId: selectedSource.id,
           alias: normalizedAlias,
           effort: normalizedEffort,
           fast: fastEnabled,
+          serviceTier: fastEnabled ? serviceTier : undefined,
         });
-        setNotice(t(fastEnabled ? 'aliases.createdCombined' : 'aliases.created', {
+        setNotice(t(fastEnabled ? serviceTier === 'ultrafast' ? 'aliases.ultrafast.createdCombined' : 'aliases.createdCombined' : 'aliases.created', {
           alias: normalizedAlias,
           effort: normalizedEffort,
         }));
       } else if (fastEnabled) {
-        await invoke<SpeedAliasEntry[]>('create_speed_alias', {
+        await createSpeedAlias({
           sourceId: selectedSource.id,
           alias: normalizedAlias,
+          serviceTier,
         });
-        setNotice(t('speedAliases.created', { alias: normalizedAlias }));
+        setNotice(t(serviceTier === 'ultrafast' ? 'aliases.ultrafast.created' : 'speedAliases.created', { alias: normalizedAlias }));
       } else {
-        await invoke<ThinkingAliasEntry[]>('create_thinking_alias', {
+        await createThinkingAlias({
           sourceId: selectedSource.id,
           alias: normalizedAlias,
           effort: '',
@@ -469,10 +443,10 @@ export function ThinkingAliasesPage({ embedded = false }: { embedded?: boolean }
   const resetEditor = () => {
     setEditingEntry(null);
     setEditingSource(null);
-    setEditingRevision(null);
     setSelectedSourceId('');
     setEffort('');
     setFastEnabled(false);
+    setServiceTier('priority');
     setAlias('');
     setSearch('');
     setModelPickerOpen(false);
@@ -484,16 +458,6 @@ export function ThinkingAliasesPage({ embedded = false }: { embedded?: boolean }
     setEditorOpen(false);
     resetEditor();
   };
-
-  const editorRef = useDialogFocusTrap<HTMLElement>({
-    active: editorOpen,
-    initialFocusRef: modelSearchRef,
-    onEscape: busyAlias ? undefined : () => {
-      if (modelPickerOpen) setModelPickerOpen(false);
-      else closeEditor();
-    },
-    preventEscape: Boolean(busyAlias),
-  });
 
   const addAlias = () => {
     resetEditor();
@@ -508,14 +472,16 @@ export function ThinkingAliasesPage({ embedded = false }: { embedded?: boolean }
     setError('');
     setNotice('');
     try {
-      const context = await invoke<ModelAliasEditContext>('get_model_alias_edit_source', { alias: entry.alias });
+      const context = await getModelAliasEditSource({
+        alias: entry.alias, entry,
+      });
       const source = context.source;
       setEditingEntry(entry);
       setEditingSource(source);
-      setEditingRevision(context.revision);
       setSelectedSourceId(source.id);
       setEffort(context.effort ?? '');
-      setFastEnabled(context.fast);
+      setFastEnabled(context.fast || context.serviceTier === 'ultrafast');
+      setServiceTier(context.serviceTier === 'ultrafast' ? 'ultrafast' : 'priority');
       setAlias(entry.alias);
       generatedAliasRef.current = '';
       setModelPickerOpen(false);
@@ -537,14 +503,16 @@ export function ThinkingAliasesPage({ embedded = false }: { embedded?: boolean }
     setNotice('');
     try {
       if (entry.effort || !entry.serviceTier) {
-        await invoke<ThinkingAliasEntry[]>('delete_thinking_alias', {
+        await deleteThinkingAlias({
           alias: entry.alias,
           oauthChannel: entry.oauthChannel,
+          entry,
         });
       } else {
-        await invoke<SpeedAliasEntry[]>('delete_speed_alias', {
+        await deleteSpeedAlias({
           alias: entry.alias,
           oauthChannel: entry.oauthChannel,
+          entry,
         });
       }
       setNotice(t('aliases.deleted', { alias: entry.alias }));
@@ -585,254 +553,256 @@ export function ThinkingAliasesPage({ embedded = false }: { embedded?: boolean }
       </header>
 
       {editorOpen ? (
-        <div className="config-dialog-backdrop" onMouseDown={(event) => event.currentTarget === event.target && closeEditor()}>
-        <section
-          ref={editorRef}
+        <Dialog
           className="panel management-dialog thinking-alias-editor-panel thinking-alias-dialog"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="thinking-alias-editor-title"
+          labelledBy="thinking-alias-editor-title"
+          initialFocusRef={modelSearchRef}
+          onClose={() => {
+            if (modelPickerOpen) setModelPickerOpen(false);
+            else closeEditor();
+          }}
+          closeDisabled={Boolean(busyAlias)}
+          dismissOnBackdrop
         >
-            <div className="thinking-alias-panel-heading">
-              <span><GitFork size={18} /></span>
-              <div>
-                <h2 id="thinking-alias-editor-title">{t(editingEntry ? 'common.edit' : 'aliases.create.title')}</h2>
-              </div>
-              <button type="button" className="icon-button quiet" onClick={closeEditor} disabled={Boolean(busyAlias)} title={t('common.close')} aria-label={t('common.close')}>
-                <X size={18} />
-              </button>
+          <div className="thinking-alias-panel-heading">
+            <span><GitFork size={18} /></span>
+            <div>
+              <h2 id="thinking-alias-editor-title">{t(editingEntry ? 'common.edit' : 'aliases.create.title')}</h2>
             </div>
+            <button type="button" className="icon-button quiet" onClick={closeEditor} disabled={Boolean(busyAlias)} title={t('common.close')} aria-label={t('common.close')}>
+              <X size={18} />
+            </button>
+          </div>
 
-            <div className="thinking-alias-dialog-body">
+          <div className="thinking-alias-dialog-body">
 
-            <div className="thinking-alias-field thinking-model-field">
-            <div className="config-field-label"><label htmlFor="thinking-model-search">{t('aliases.originalModel')}</label><SettingsHelp label={t('aliases.originalModel')}>{t('aliases.sourceHint')}</SettingsHelp></div>
-            <div className="thinking-model-picker" ref={modelPickerRef}>
-              <div className="thinking-model-search">
-                {loading ? <LoaderCircle size={15} className="spin" /> : <Search size={15} />}
-                <input
-                  id="thinking-model-search"
-                  ref={modelSearchRef}
-                  role="combobox"
-                  autoFocus
-                  aria-autocomplete="list"
-                  aria-expanded={modelPickerOpen}
-                  aria-controls="thinking-model-options"
-                  aria-activedescendant={modelPickerOpen && filteredSources[activeSourceIndex]
-                    ? `thinking-model-option-${activeSourceIndex}`
-                    : undefined}
-                  value={modelPickerOpen ? search : selectedSource?.model ?? ''}
-                  onFocus={(event) => {
-                    setSearch(selectedSource?.model ?? '');
-                    setModelPickerOpen(true);
-                    event.currentTarget.select();
-                  }}
-                  onChange={(event) => {
-                    const nextSearch = event.currentTarget.value;
-                    setSearch(nextSearch);
-                    setModelPickerOpen(true);
-                    if (
-                      selectedSource
-                      && nextSearch.trim().toLowerCase() !== selectedSource.model.trim().toLowerCase()
-                    ) {
-                      setSelectedSourceId('');
-                      setEffort('');
-                      setFastEnabled(false);
-                      if (!editingEntry) setAlias('');
-                      generatedAliasRef.current = '';
-                    }
-                  }}
-                  onKeyDown={handleModelSearchKeyDown}
-                  placeholder={loading ? t('aliases.loadingModels') : t('aliases.searchModel')}
-                  autoComplete="off"
-                  spellCheck={false}
-                  disabled={loading || Boolean(busyAlias)}
-                />
-                {!modelPickerOpen && selectedSource ? (
-                  <span className="thinking-source-kind">
-                    {thinkingAliasSourceKindLabel(selectedSource.kind)}
-                  </span>
-                ) : null}
-              </div>
-              {modelPickerOpen ? (
-                <div
-                  className="thinking-model-list"
-                  id="thinking-model-options"
-                  role="listbox"
-                  aria-label={t('aliases.availableModels')}
-                >
-                  {filteredSources.length === 0 ? (
-                    <div className="thinking-model-empty">
-                      {sources.length ? t('aliases.noMatch') : t('aliases.noModels')}
-                    </div>
-                  ) : filteredSources.map((source, index) => {
-                    const selected = source.id === selectedSourceId;
-                    return (
-                      <button
-                        type="button"
-                        role="option"
-                        aria-selected={selected}
-                        id={`thinking-model-option-${index}`}
-                        className={`${selected ? 'selected ' : ''}${index === activeSourceIndex ? 'active' : ''}`.trim()}
-                        key={source.id}
-                        onMouseEnter={() => setActiveSourceIndex(index)}
-                        onClick={() => chooseSource(source)}
-                        disabled={Boolean(busyAlias)}
-                      >
-                        <span className="thinking-model-option-copy">
-                          <span>
-                            <strong title={source.model}>{source.model}</strong>
-                            {source.displayName && source.displayName !== source.model
-                              ? <small>{source.displayName}</small>
-                              : null}
-                          </span>
-                          <span className="thinking-model-source">
-                            <em>{thinkingAliasSourceKindLabel(source.kind)}</em>
-                            <small title={thinkingAliasSourceDetail(source)}>
-                              {thinkingAliasSourceDetail(source)}
-                            </small>
-                          </span>
-                        </span>
-                        {selected ? <Check size={15} /> : null}
-                      </button>
-                    );
-                  })}
-                </div>
+          <div className="thinking-alias-field thinking-model-field">
+          <div className="config-field-label"><label htmlFor="thinking-model-search">{t('aliases.originalModel')}</label><SettingsHelp label={t('aliases.originalModel')}>{t('aliases.sourceHint')}</SettingsHelp></div>
+          <div className="thinking-model-picker" ref={modelPickerRef}>
+            <div className="thinking-model-search search-control" data-size="default">
+              {loading ? <LoaderCircle size={15} className="spin" /> : <Search size={15} />}
+              <input
+                id="thinking-model-search"
+                ref={modelSearchRef}
+                role="combobox"
+                autoFocus
+                aria-autocomplete="list"
+                aria-expanded={modelPickerOpen}
+                aria-controls="thinking-model-options"
+                aria-activedescendant={modelPickerOpen && filteredSources[activeSourceIndex]
+                  ? `thinking-model-option-${activeSourceIndex}`
+                  : undefined}
+                value={modelPickerOpen ? search : selectedSource?.model ?? ''}
+                onFocus={(event) => {
+                  setSearch(selectedSource?.model ?? '');
+                  setModelPickerOpen(true);
+                  event.currentTarget.select();
+                }}
+                onChange={(event) => {
+                  const nextSearch = event.currentTarget.value;
+                  setSearch(nextSearch);
+                  setModelPickerOpen(true);
+                  if (
+                    selectedSource
+                    && nextSearch.trim().toLowerCase() !== selectedSource.model.trim().toLowerCase()
+                  ) {
+                    setSelectedSourceId('');
+                    setEffort('');
+                    setFastEnabled(false);
+                    if (!editingEntry) setAlias('');
+                    generatedAliasRef.current = '';
+                  }
+                }}
+                onKeyDown={handleModelSearchKeyDown}
+                placeholder={loading ? t('aliases.loadingModels') : t('aliases.searchModel')}
+                autoComplete="off"
+                spellCheck={false}
+                disabled={loading || Boolean(busyAlias)}
+              />
+              {!modelPickerOpen && selectedSource ? (
+                <span className="thinking-source-kind">
+                  {thinkingAliasSourceKindLabel(selectedSource.kind)}
+                </span>
               ) : null}
             </div>
-            {selectedSource ? (
-              <div className="thinking-model-selection">
-                <span>{thinkingAliasSourceKindLabel(selectedSource.kind)}</span>
-                <strong title={thinkingAliasSourceDetail(selectedSource)}>
-                  {t('aliases.sourceLabel', { source: thinkingAliasSourceDetail(selectedSource) })}
-                </strong>
+            {modelPickerOpen ? (
+              <div
+                className="thinking-model-list"
+                data-theme-surface="overlay"
+                id="thinking-model-options"
+                role="listbox"
+                aria-label={t('aliases.availableModels')}
+              >
+                {filteredSources.length === 0 ? (
+                  <EmptyState variant="compact" className="thinking-model-empty">
+                    {sources.length ? t('aliases.noMatch') : t('aliases.noModels')}
+                  </EmptyState>
+                ) : filteredSources.map((source, index) => {
+                  const selected = source.id === selectedSourceId;
+                  return (
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={selected}
+                      id={`thinking-model-option-${index}`}
+                      className={`${selected ? 'selected ' : ''}${index === activeSourceIndex ? 'active' : ''}`.trim()}
+                      key={source.id}
+                      onMouseEnter={() => setActiveSourceIndex(index)}
+                      onClick={() => chooseSource(source)}
+                      disabled={Boolean(busyAlias)}
+                    >
+                      <span className="thinking-model-option-copy">
+                        <span>
+                          <strong title={source.model}>{source.model}</strong>
+                          {source.displayName && source.displayName !== source.model
+                            ? <small>{source.displayName}</small>
+                            : null}
+                        </span>
+                        <span className="thinking-model-source">
+                          <em>{thinkingAliasSourceKindLabel(source.kind)}</em>
+                          <small title={thinkingAliasSourceDetail(source)}>
+                            {thinkingAliasSourceDetail(source)}
+                          </small>
+                        </span>
+                      </span>
+                      {selected ? <Check size={15} /> : null}
+                    </button>
+                  );
+                })}
               </div>
             ) : null}
+          </div>
+          {selectedSource ? (
+            <div className="thinking-model-selection">
+              <span>{thinkingAliasSourceKindLabel(selectedSource.kind)}</span>
+              <strong title={thinkingAliasSourceDetail(selectedSource)}>
+                {t('aliases.sourceLabel', { source: thinkingAliasSourceDetail(selectedSource) })}
+              </strong>
             </div>
+          ) : null}
+          </div>
 
-            <div className="thinking-alias-field">
-            <div className="thinking-field-heading">
-              <strong>{t('aliases.effort.title')}</strong>
-            </div>
-            <div className="thinking-effort-options">
+          <div className="thinking-alias-field">
+          <div className="thinking-field-heading">
+            <strong>{t('aliases.effort.title')}</strong>
+          </div>
+          <div className="thinking-effort-options">
+            <button
+              type="button"
+              className={!normalizedEffort ? 'active none' : 'none'}
+              onClick={() => {
+                chooseEffort('');
+              }}
+              disabled={Boolean(busyAlias)}
+              title={t('aliases.effort.noneHint')}
+            >
+              {t('aliases.effort.none')}
+            </button>
+            {visibleEffortOptions.map((option) => (
               <button
                 type="button"
-                className={!normalizedEffort ? 'active none' : 'none'}
+                className={effort.trim().toLowerCase() === option.value ? 'active' : ''}
+                key={option.value}
                 onClick={() => {
-                  chooseEffort('');
+                  chooseEffort(option.value);
                 }}
-                disabled={Boolean(busyAlias)}
-                title={t('aliases.effort.noneHint')}
+                disabled={Boolean(busyAlias) || Boolean(selectedSource && !selectedSource.supportsReasoning)}
+                title={option.title}
               >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          {selectedSource && !selectedSource.supportsReasoning ? (
+            <small className="thinking-model-hint">{t('aliases.effort.unsupported')}</small>
+          ) : null}
+          </div>
+
+          <div className="thinking-alias-field">
+            <div className="config-field-label">
+              <strong>{t('aliases.speed.title')}</strong>
+            </div>
+            <div className="thinking-effort-options thinking-speed-options" role="group" aria-label={t('aliases.speed.title')}>
+              <button type="button" className={!fastEnabled ? 'active' : ''} aria-pressed={!fastEnabled}
+                onClick={() => setFastEnabled(false)} disabled={Boolean(busyAlias)}>
                 {t('aliases.effort.none')}
               </button>
-              {visibleEffortOptions.map((option) => (
-                <button
-                  type="button"
-                  className={effort.trim().toLowerCase() === option.value ? 'active' : ''}
-                  key={option.value}
-                  onClick={() => {
-                    chooseEffort(option.value);
-                  }}
-                  disabled={Boolean(busyAlias) || Boolean(selectedSource && !selectedSource.supportsReasoning)}
-                  title={option.title}
-                >
-                  {option.label}
+              {(['priority', 'ultrafast'] as const).map((tier) => (
+                <button type="button" key={tier}
+                  className={fastEnabled && serviceTier === tier ? 'active' : ''}
+                  aria-pressed={fastEnabled && serviceTier === tier}
+                  onClick={() => { setServiceTier(tier); setFastEnabled(true); }}
+                  disabled={Boolean(busyAlias) || !fastAvailable}>
+                  <Zap size={14} aria-hidden="true" />
+                  {t(tier === 'ultrafast' ? 'aliases.ultrafast.title' : 'speedAliases.fast.title')}
                 </button>
               ))}
             </div>
-            {selectedSource && !selectedSource.supportsReasoning ? (
-              <small className="thinking-model-hint">{t('aliases.effort.unsupported')}</small>
+            {selectedSource && !selectedSource.supportsFast ? (
+              <small className="thinking-model-hint">{t('aliases.fast.unsupported')}</small>
             ) : null}
-            </div>
+          </div>
 
-            <div className="thinking-alias-field">
-              <div className="thinking-field-heading">
-                <strong>{t('aliases.fast.title')}</strong>
-              </div>
-              <label className={`thinking-fast-option${fastEnabled ? ' active' : ''}`}>
-                <span className="thinking-fast-option-copy">
-                  <span><Zap size={15} /> Fast</span>
-                </span>
-                <span className="switch-control thinking-fast-switch">
-                  <input
-                    type="checkbox"
-                    checked={fastEnabled}
-                    onChange={(event) => setFastEnabled(event.currentTarget.checked)}
-                    disabled={Boolean(busyAlias) || !fastAvailable}
-                    aria-label={t('aliases.fast.title')}
-                  />
-                  <span className="switch-track" />
-                </span>
-              </label>
-              {selectedSource && !selectedSource.supportsFast ? (
-                <small className="thinking-model-hint">{t('aliases.fast.unsupported')}</small>
-              ) : null}
-            </div>
+          <div className="thinking-alias-section-divider" aria-hidden="true" />
 
-            <div className="thinking-alias-section-divider" aria-hidden="true" />
+          <div className="thinking-alias-field">
+            <div className="thinking-field-heading">
+              <strong>{t('aliases.aliasName.title')}</strong>
+              <span>{t('aliases.aliasName.autoDescription')}</span>
+            </div>
+            <input
+              id="thinking-alias-name"
+              className="thinking-alias-input"
+              value={alias}
+              onChange={(event) => setAlias(event.currentTarget.value)}
+              placeholder={selectedSource
+                ? normalizedEffort
+                  ? t('aliases.aliasName.example', { model: selectedSource.model, effort: normalizedEffort })
+                  : fastEnabled
+                    ? t('speedAliases.aliasName.example', { model: selectedSource.model })
+                    : t('aliases.aliasName.example', { model: selectedSource.model, effort: 'alias' })
+                : t('aliases.aliasName.selectFirst')}
+              disabled={Boolean(busyAlias)}
+            />
+          </div>
 
-            <div className="thinking-alias-field">
-              <div className="thinking-field-heading">
-                <strong>{t('aliases.aliasName.title')}</strong>
-                <span>{t('aliases.aliasName.autoDescription')}</span>
-              </div>
-              <input
-                id="thinking-alias-name"
-                className="thinking-alias-input"
-                value={alias}
-                onChange={(event) => setAlias(event.currentTarget.value)}
-                placeholder={selectedSource
-                  ? normalizedEffort
-                    ? t('aliases.aliasName.example', { model: selectedSource.model, effort: normalizedEffort })
-                    : fastEnabled
-                      ? t('speedAliases.aliasName.example', { model: selectedSource.model })
-                      : t('aliases.aliasName.example', { model: selectedSource.model, effort: 'alias' })
-                  : t('aliases.aliasName.selectFirst')}
-                disabled={Boolean(busyAlias)}
-              />
+          <div className="thinking-alias-preview">
+            {fastEnabled && !normalizedEffort ? <Zap size={18} /> : <BrainCircuit size={18} />}
+            <div>
+              <span>{selectedSource?.model || t('aliases.notSelected')} <ArrowRight size={13} /> {alias || t('aliases.enterAlias')}</span>
             </div>
+          </div>
+          </div>
 
-            <div className="thinking-alias-preview">
-              {fastEnabled && !normalizedEffort ? <Zap size={18} /> : <BrainCircuit size={18} />}
-              <div>
-                <span>{selectedSource?.model || t('aliases.notSelected')} <ArrowRight size={13} /> {alias || t('aliases.enterAlias')}</span>
-              </div>
-            </div>
-            </div>
-
-            <div className="thinking-alias-dialog-actions">
-            <button type="button" className="secondary-button" disabled={Boolean(busyAlias)} onClick={closeEditor}>
-              {t('common.cancel')}
-            </button>
-            <button
-              type="button"
-              className="primary-button thinking-alias-create"
-              onClick={() => void createAlias()}
-              disabled={loading || Boolean(busyAlias)}
-            >
-              {busyAction === 'create'
-                ? <LoaderCircle size={16} className="spin" />
-                : fastEnabled && !normalizedEffort ? <Zap size={16} /> : <GitFork size={16} />}
-              {busyAction === 'create' ? t(editingEntry ? 'common.saving' : 'aliases.creating') : t(editingEntry ? 'common.save' : 'aliases.create')}
-            </button>
-            </div>
-        </section>
-        </div>
+          <div className="thinking-alias-dialog-actions">
+          <button type="button" className="secondary-button" disabled={Boolean(busyAlias)} onClick={closeEditor}>
+            {t('common.cancel')}
+          </button>
+          <button
+            type="button"
+            className="primary-button thinking-alias-create"
+            onClick={() => void createAlias()}
+            disabled={loading || Boolean(busyAlias)}
+          >
+            {busyAction === 'create'
+              ? <LoaderCircle size={16} className="spin" />
+              : fastEnabled && !normalizedEffort ? <Zap size={16} /> : <GitFork size={16} />}
+            {busyAction === 'create' ? t(editingEntry ? 'common.saving' : 'aliases.creating') : t(editingEntry ? 'common.save' : 'aliases.create')}
+          </button>
+          </div>
+        </Dialog>
       ) : null}
 
-        <section className="panel thinking-alias-list-panel">
+        <section className={`panel${embedded ? ' surface-bare' : ''} thinking-alias-list-panel`}>
           <div className="thinking-alias-list">
             {loading ? (
               <div className="management-loading"><LoaderCircle size={20} className="spin" />{t('aliases.loadingConfig')}</div>
             ) : entries.length === 0 ? (
-              <div className="management-empty">
-                <GitFork size={25} />
-                <strong>{t('aliases.empty.title')}</strong>
-                <span>{t('aliases.empty.description')}</span>
-              </div>
+              <EmptyState className="management-empty" icon={<GitFork size={25} />} title={t('aliases.empty.title')}>
+                {t('aliases.empty.description')}
+              </EmptyState>
             ) : entries.map((entry) => (
-              <article className="thinking-alias-row" key={`${entry.kind}:${entry.provider}:${entry.alias}`}>
+              <article className="thinking-alias-row" key={JSON.stringify([entry.position, entry.oauthChannel])}>
                 <div className="thinking-alias-route">
                   <div className="thinking-alias-route-source">
                     <span title={entry.sourceModel}>{entry.sourceModel}</span>
@@ -851,25 +821,27 @@ export function ThinkingAliasesPage({ embedded = false }: { embedded?: boolean }
                     <span className="thinking-effort-badge">{entry.effort}</span>
                   ) : null}
                   {entry.serviceTier ? (
-                    <span className="thinking-effort-badge fast">{t('speedAliases.fast.title')}</span>
+                    <span className="thinking-effort-badge fast">{entry.serviceTier === 'ultrafast' ? t('aliases.ultrafast.title') : entry.serviceTier === 'priority' || entry.serviceTier === 'fast' ? t('speedAliases.fast.title') : entry.serviceTier}</span>
                   ) : null}
-                <button type="button" className="icon-button quiet" disabled={loading || Boolean(busyAlias)}
-                  onClick={() => void editAlias(entry)} title={t('common.edit')} aria-label={t('common.edit')}>
-                  <Pencil size={15} />
-                </button>
                 </div>
-                <button
-                  type="button"
-                  className="icon-button quiet danger"
-                  onClick={() => void deleteAlias(entry)}
-                  disabled={Boolean(busyAlias)}
-                  title={t('aliases.delete', { alias: entry.alias })}
-                  aria-label={t('aliases.delete', { alias: entry.alias })}
-                >
-                  {busyAction === 'delete' && busyAlias === entry.alias
-                    ? <LoaderCircle size={15} className="spin" />
-                    : <Trash2 size={15} />}
-                </button>
+                <div className="thinking-alias-actions">
+                  <button type="button" className="icon-button quiet" disabled={loading || Boolean(busyAlias)}
+                    onClick={() => void editAlias(entry)} title={t('common.edit')} aria-label={t('common.edit')}>
+                    <Pencil size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-button quiet danger"
+                    onClick={() => void deleteAlias(entry)}
+                    disabled={Boolean(busyAlias)}
+                    title={t('aliases.delete', { alias: entry.alias })}
+                    aria-label={t('aliases.delete', { alias: entry.alias })}
+                  >
+                    {busyAction === 'delete' && busyAlias === entry.alias
+                      ? <LoaderCircle size={15} className="spin" />
+                      : <Trash2 size={15} />}
+                  </button>
+                </div>
               </article>
             ))}
           </div>

@@ -1,25 +1,18 @@
+import { EmptyState } from '../components/EmptyState';
+import { SegmentedControl } from '../components/SegmentedControl';
+import type { UsageAnalysis, UsageCategory } from '../services/usage';
 import { useState, type CSSProperties } from 'react';
 import { BarChart3, CheckCircle2, ChevronDown, ChevronUp } from 'lucide-react';
 import { useI18n } from '../i18n';
+import { usePrivacyMask } from '../privacy';
 import { formatUsageNumber } from '../services/usageNumber';
 import type { UsageTimelinePoint } from '../services/usageTrend';
 import { UsageActivityChart } from './UsageActivityChart';
 import './UsageAnalysisView.css';
 
-export type UsageCategory = {
-  key: string;
-  label: string;
-  requests: number;
-  failures: number;
-  tokens: number;
-};
+export type { UsageCategory } from '../services/usage';
 
-export type UsageAnalysis = {
-  models: UsageCategory[];
-  providers: UsageCategory[];
-  sources: UsageCategory[];
-  apiKeys: UsageCategory[];
-};
+export type { UsageAnalysis } from '../services/usage';
 
 type AnalysisOverview = {
   totalRequests: number;
@@ -40,9 +33,7 @@ export function UsageAnalysisView({ analysis, overview, range }: {
 }) {
   const { t } = useI18n();
   if (!overview?.totalRequests) {
-    return <div className="usage-analysis-grid usage-analysis-view usage-analysis-empty">
-      <BarChart3 size={32} aria-hidden="true" /><p>{t('usage.empty')}</p>
-    </div>;
+    return <EmptyState className="usage-analysis-empty" icon={<BarChart3 size={32} />}>{t('usage.empty')}</EmptyState>;
   }
   return (
     <div className="usage-analysis-grid usage-analysis-view">
@@ -51,10 +42,9 @@ export function UsageAnalysisView({ analysis, overview, range }: {
         <RequestResults overview={overview} models={analysis.models} />
       </div>
       <UsageActivityChart timeline={overview.timeline} range={range} />
-      <section className="usage-analysis-context">
-        <CategorySummary title={t('usage.column.provider')} items={analysis.providers} />
-        <CategorySummary title={t('usage.analysis.sources')} items={analysis.sources} />
-        <CategorySummary title={t('usage.analysis.keys')} items={analysis.apiKeys} />
+      <section className="surface-card usage-analysis-context">
+        <CategorySummary title={t('usage.analysis.sources')} items={analysis.upstreams ?? []} />
+        <CategorySummary title={t('usage.analysis.keys')} items={analysis.apiKeys} selectableMetric />
       </section>
     </div>
   );
@@ -77,15 +67,11 @@ function ModelComparison({ models }: { models: UsageCategory[] }) {
     : ranked;
   const colorOrder = [...models].sort((a, b) => b.tokens - a.tokens || a.key.localeCompare(b.key));
   return (
-    <section className="usage-analysis-card usage-model-comparison">
+    <section className="surface-card usage-analysis-card usage-model-comparison">
       <header className="usage-analysis-heading">
         <div><h2>{t('usage.analysis.modelTitle')}</h2><p>{t('usage.analysis.modelHint')}</p></div>
-        <div className="usage-analysis-metric" role="group" aria-label={t('usage.analysis.metricLabel')}>
-          {(['tokens', 'requests'] as const).map(value => <button key={value} type="button"
-            aria-pressed={metric === value} onClick={() => setMetric(value)}>
-            {t(value === 'tokens' ? 'usage.analysis.metricTokens' : 'usage.analysis.metricRequests')}
-          </button>)}
-        </div>
+        <SegmentedControl className="usage-analysis-metric" aria-label={t('usage.analysis.metricLabel')} value={metric} onChange={setMetric}
+          items={(['tokens', 'requests'] as const).map(value => ({ value, label: t(value === 'tokens' ? 'usage.analysis.metricTokens' : 'usage.analysis.metricRequests') }))} />
       </header>
       <div className="usage-model-bars">
         {visible.map(item => {
@@ -109,11 +95,11 @@ function ModelComparison({ models }: { models: UsageCategory[] }) {
         })}
         {!models.length && <p className="usage-analysis-muted">{t('usage.empty')}</p>}
       </div>
-      {models.length > 6 && <button className="usage-analysis-expand" type="button" aria-expanded={expanded}
+      {models.length > 6 && <div className="usage-analysis-expand-row"><button className="link-button muted usage-analysis-expand" type="button" aria-expanded={expanded}
         onClick={() => setExpanded(value => !value)}>
         {t(expanded ? 'usage.analysis.showLess' : 'usage.analysis.showAll', { count: models.length })}
         {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-      </button>}
+      </button></div>}
     </section>
   );
 }
@@ -132,12 +118,13 @@ function RequestResults({ overview, models }: { overview: AnalysisOverview; mode
   const circumference = 2 * Math.PI * 46;
   let offset = 0;
   return (
-    <section className="usage-analysis-card usage-request-results">
+    <section className="surface-card usage-analysis-card usage-request-results">
       <header className="usage-analysis-heading">
         <div><h2>{t('usage.analysis.resultsTitle')}</h2><p>{t('usage.analysis.resultsHint')}</p></div>
         <span className="usage-analysis-total">{t('usage.analysis.requestCount', { count: formatUsageNumber(overview.totalRequests, locale) })}</span>
       </header>
       <div className="usage-results-chart">
+        <div className="usage-results-donut">
         <div className="usage-results-ring">
           <svg viewBox="0 0 120 120" role="img" aria-label={t('usage.analysis.resultChart', {
             success: formatNumber(overview.successCount), failed: formatNumber(overview.failureCount), canceled: formatNumber(overview.canceledCount),
@@ -153,8 +140,9 @@ function RequestResults({ overview, models }: { overview: AnalysisOverview; mode
             })}
           </svg>
           <div className="usage-results-center"><span>{t('usage.analysis.successRate')}</span>
-            <strong>{rate === null ? '—' : `${formatNumber(rate, { maximumFractionDigits: 1 })}%`}</strong>
-            <small>{t('usage.analysis.excludingCanceled')}</small></div>
+            <strong>{rate === null ? '—' : `${formatNumber(rate, { maximumFractionDigits: 1 })}%`}</strong></div>
+        </div>
+        <small className="usage-results-note">{t('usage.analysis.excludingCanceled')}</small>
         </div>
         <dl className="usage-results-legend">
           {statuses.map(status => <div key={status.key}>
@@ -179,19 +167,40 @@ function RequestResults({ overview, models }: { overview: AnalysisOverview; mode
   );
 }
 
-function CategorySummary({ title, items }: { title: string; items: UsageCategory[] }) {
+function CategorySummary({ title, items, selectableMetric = false }: { title: string; items: UsageCategory[]; selectableMetric?: boolean }) {
   const { t, locale, formatNumber } = useI18n();
-  const ranked = [...items].sort((a, b) => b.requests - a.requests || b.tokens - a.tokens);
-  const total = sum(items, 'requests');
+  const privacy = usePrivacyMask();
+  const [metric, setMetric] = useState<'tokens' | 'requests'>('tokens');
+  const selectedMetric = selectableMetric ? metric : 'requests';
+  const ranked = [...items].sort((left, right) => right[selectedMetric] - left[selectedMetric]
+    || right.requests - left.requests || right.tokens - left.tokens || (selectableMetric ? left.key.localeCompare(right.key) : 0))
+    .map((item) => ({ ...item, label: privacy.text(item.label) }));
+  const total = sum(items, selectedMetric);
   const first = ranked[0];
-  return <details className="usage-context-detail">
+  const categoryCount = <small>{t(items.length === 1 ? 'usage.analysis.categoryCountOne' : 'usage.analysis.categoryCount', { count: items.length })}</small>;
+  const metrics = (item: UsageCategory) => <span className="usage-context-metrics">
+    {([selectedMetric, selectedMetric === 'tokens' ? 'requests' : 'tokens'] as const).map((value, index) =>
+      <span key={value} className={index === 0 ? 'usage-context-primary' : undefined} title={formatNumber(item[value])}>
+        {value === 'tokens' ? `${formatUsageNumber(item.tokens, locale)} Token`
+          : t('usage.analysis.requestCount', { count: formatUsageNumber(item.requests, locale) })}
+      </span>)}
+  </span>;
+  const detail = <details className="usage-context-detail">
     <summary>
-      <div className="usage-context-heading"><span>{title}</span><small>{t('usage.analysis.categoryCount', { count: items.length })}</small></div>
-      <strong title={first?.label}>{first?.label || '—'}</strong>
-      <div className="usage-context-caption"><span>{items.length === 1 ? t('usage.analysis.singleCategory')
-        : first ? t('usage.analysis.leadingShare', { percent: formatNumber(total ? first.requests / total * 100 : 0, { maximumFractionDigits: 1 }) }) : '—'}</span><ChevronDown size={14} aria-hidden="true" /></div>
+      <div className="usage-context-heading"><span>{title} {selectableMetric && categoryCount}</span>{!selectableMetric && categoryCount}</div>
+      {selectableMetric ? <div className="usage-context-leader"><strong title={first?.label}>{first?.label || '—'}</strong>{first && metrics(first)}</div>
+        : <strong title={first?.label}>{first?.label || '—'}</strong>}
+      <div className="usage-context-caption"><span>{items.length === 1 && !selectableMetric ? t('usage.analysis.singleCategory')
+        : first ? t('usage.analysis.leadingShare', { percent: formatNumber(total > 0 ? first[selectedMetric] / total * 100 : 0, { maximumFractionDigits: 1 }) }) : '—'}</span><ChevronDown size={14} aria-hidden="true" /></div>
     </summary>
     <ul>{ranked.map(item => <li key={item.key}><span title={item.label}>{item.label}</span>
-      <strong title={formatNumber(item.requests)}>{t('usage.analysis.requestCount', { count: formatUsageNumber(item.requests, locale) })}</strong></li>)}</ul>
+      {selectableMetric ? <div className="usage-context-values">{metrics(item)}
+        <small>{formatNumber(total > 0 ? item[selectedMetric] / total * 100 : 0, { maximumFractionDigits: 1 })}%</small></div>
+        : <strong title={formatNumber(item.requests)}>{t('usage.analysis.requestCount', { count: formatUsageNumber(item.requests, locale) })}</strong>}</li>)}</ul>
   </details>;
+  return selectableMetric ? <section className="usage-context-key-panel" aria-label={title}>
+    <SegmentedControl className="usage-analysis-metric" aria-label={t('usage.analysis.keyMetricLabel')} value={metric} onChange={setMetric}
+      items={(['tokens', 'requests'] as const).map(value => ({ value, label: t(value === 'tokens' ? 'usage.analysis.metricTokens' : 'usage.analysis.metricRequests') }))} />
+    {detail}
+  </section> : detail;
 }

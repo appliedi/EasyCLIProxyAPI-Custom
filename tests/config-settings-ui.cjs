@@ -2,27 +2,26 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 
-const categories = ['general', 'aliases', 'routing', 'requests', 'oauth', 'diagnostics', 'extensions', 'storage', 'software'];
-const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { width: 1280, height: 800 }, { width: 1600, height: 1000 }];
+const categories = ['general', 'proxy', 'aliases', 'routing', 'requests', 'oauth', 'diagnostics', 'storage', 'software'];
+const viewports = [{ width: 1920, height: 1080 }, { width: 2560, height: 1440 }, { width: 640, height: 600 }, { width: 964, height: 700 }, { width: 1280, height: 800 }, { width: 1600, height: 1000 }];
+const scalarFields = '.template-config-field:is([data-field-type="string"], [data-field-type="number"], [data-field-type="select"]), :is(#config-native-retry, #config-native-routing) .config-network-field:has(input[type="text"], input[type="number"], select)';
 
 (async () => {
   let server;
   let browser;
-  let base = 'http://127.0.0.1:1420/';
+  let base;
   const runtimeErrors = [];
   try {
-    try {
-      const response = await fetch(base, { signal: AbortSignal.timeout(3000) });
-      if (!response.ok) throw new Error(String(response.status));
-    } catch {
+    {
       const { createServer } = await import('vite');
       const react = (await import('@vitejs/plugin-react')).default;
       server = await createServer({
         configFile: false,
         root: path.resolve(__dirname, '..'),
         plugins: [react()],
+        optimizeDeps: { entries: ['index.html'] },
         logLevel: 'error',
-        server: { host: '127.0.0.1', port: 1421, strictPort: false },
+        server: { host: '127.0.0.1', port: 0, strictPort: false },
       });
       await server.listen();
       base = `http://127.0.0.1:${server.httpServer.address().port}/`;
@@ -70,6 +69,16 @@ const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { w
           ].filter(Boolean).filter(element => element.scrollWidth > element.clientWidth + 1)
             .map(element => ({ element: element.className || element.tagName, width: element.clientWidth, scroll: element.scrollWidth })));
           assert.deepEqual(overflowing, [], `${label} ${context}: settings must fit without horizontal overflow`);
+          const crampedLabels = await page.locator('.template-config-field:not(.template-config-field-wide):not(.template-config-toggle)').evaluateAll(fields =>
+            fields.filter(field => field.getBoundingClientRect().width > 0).flatMap(field => {
+              const row = field.getBoundingClientRect();
+              const caption = field.querySelector('.template-config-label').getBoundingClientRect();
+              const control = field.querySelector('.template-config-control').getBoundingClientRect();
+              return caption.width < Math.min(180, row.width) - 1
+                || (caption.top < control.bottom && control.top < caption.bottom && caption.right > control.left + 1)
+                ? [{ id: field.id, row: row.width, label: caption.width, control: control.width }] : [];
+            }));
+          assert.deepEqual(crampedLabels, [], `${label} ${context}: scalar field labels need readable space without overlapping controls`);
           const narrowLists = await page.evaluate(() => {
             const width = document.querySelector('.config-settings-content').getBoundingClientRect().width;
             return [...document.querySelectorAll('#config-native-keys, #config-native-aliases, #config-native-sensitive-words, .template-config-card:has([data-field-type="custom"], [data-field-type="json"], [data-field-type="string-list"])')]
@@ -115,6 +124,107 @@ const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { w
           }
           assert.equal(metrics.reachable, true, `${label} ${context}: control must remain reachable: ${JSON.stringify(metrics)}`);
         };
+        const scalarLayout = async category => {
+          const originalViewport = page.viewportSize();
+          const scrollState = await page.evaluateHandle(() => ({
+            left: scrollX,
+            top: scrollY,
+            elements: [...document.querySelectorAll('*')]
+              .filter(element => element.scrollTop || element.scrollLeft
+                || element.scrollHeight > element.clientHeight || element.scrollWidth > element.clientWidth)
+              .map(element => ({ element, left: element.scrollLeft, top: element.scrollTop })),
+          }));
+          try {
+            await settle();
+            const geometry = await page.locator(scalarFields).evaluateAll(fields => {
+              const failures = [];
+              const types = [];
+              const overlaps = (first, second) => first.left < second.right - 1 && second.left < first.right - 1
+                && first.top < second.bottom - 1 && second.top < first.bottom - 1;
+              const contains = (outer, inner) => inner.left >= outer.left - 1 && inner.right <= outer.right + 1
+                && inner.top >= outer.top - 1 && inner.bottom <= outer.bottom + 1;
+              for (const field of fields) {
+                const row = field.getBoundingClientRect();
+                if (!row.width || !row.height) continue;
+                const caption = field.querySelector('.template-config-label, .config-field-label');
+                const label = caption.querySelector('label');
+                const control = field.querySelector('.template-config-control') || field.querySelector('input, select');
+                const captionBox = caption.getBoundingClientRect();
+                const labelBox = label.getBoundingClientRect();
+                const controlBox = control.getBoundingClientRect();
+                const style = getComputedStyle(label);
+                const canvas = document.createElement('canvas').getContext('2d');
+                canvas.font = style.font;
+                const text = label.textContent.trim();
+                const naturalWidth = canvas.measureText(text).width;
+                const walker = document.createTreeWalker(label, NodeFilter.SHOW_TEXT);
+                const fragments = [];
+                while (walker.nextNode()) {
+                  if (!walker.currentNode.textContent.trim()) continue;
+                  const range = document.createRange();
+                  range.selectNodeContents(walker.currentNode);
+                  fragments.push(...range.getClientRects());
+                }
+                const tools = [...caption.querySelectorAll('button')].map(button => button.getBoundingClientRect());
+                const toolWidth = tools.length ? captionBox.right - Math.min(...tools.map(tool => tool.left)) + 8 : 0;
+                const readableWidth = Math.min(naturalWidth, 160, row.width - toolWidth);
+                const lineCount = new Set(fragments.map(fragment => Math.round(fragment.top))).size;
+                const reasons = [];
+                if (!fragments.length || labelBox.width < readableWidth - 2) reasons.push('squeezed text');
+                if (lineCount > Math.ceil(naturalWidth / readableWidth) + 1) reasons.push('excessive wrapping');
+                if (fragments.some(fragment => !contains(captionBox, fragment) || !contains(row, fragment)
+                  || overlaps(fragment, controlBox) || tools.some(tool => overlaps(fragment, tool)))) reasons.push('clipped or overlapping text');
+                if (style.textOverflow === 'ellipsis' || style.webkitLineClamp !== 'none'
+                  || ['hidden', 'clip'].includes(style.overflowX) || ['hidden', 'clip'].includes(style.overflowY)) reasons.push('hidden or truncated text');
+                if (!contains(row, controlBox) || controlBox.width < 48 || controlBox.height < 24
+                  || overlaps(captionBox, controlBox) || tools.some(tool => !contains(row, tool) || tool.width < 20 || tool.height < 20
+                    || overlaps(tool, controlBox))) reasons.push('unusable control or tools');
+                if (field.scrollWidth > field.clientWidth + 1) reasons.push('field overflow');
+                const input = field.querySelector('input, select, [role="combobox"]');
+                types.push({ native: !field.matches('.template-config-field'), type: field.dataset.fieldType || input.type });
+                if (reasons.length) failures.push({ id: field.id || input.id, text, naturalWidth, readableWidth, labelWidth: labelBox.width, lineCount, reasons });
+              }
+              return { failures, types };
+            });
+            assert.ok(geometry.types.some(field => !field.native), `${label} ${category}: template scalar coverage is nonempty`);
+            if (category !== 'oauth') assert.ok(geometry.types.some(field => field.native), `${label} ${category}: native row coverage is nonempty`);
+            assert.deepEqual(geometry.failures, [], `${label} ${category}: actual label text must wrap readably without clipping or control overlap`);
+            const fields = page.locator(scalarFields).filter({ visible: true });
+            for (const type of ['select', 'text', 'number']) {
+              const input = fields.locator(type === 'select' ? 'select, [role="combobox"]' : `input[type="${type}"]`).first();
+              if (await input.count()) {
+                await reachable(input, `${category} ${type} control`);
+                await input.focus();
+                assert.equal(await input.evaluate(element => document.activeElement === element), true, `${label} ${category}: ${type} control accepts focus`);
+              }
+            }
+            for (const selector of ['.settings-help-trigger', '.template-config-reset']) {
+              const tool = fields.locator(selector).first();
+              if (await tool.count()) {
+                assert.equal(await tool.isEnabled(), true, `${label} ${category}: ${selector} remains enabled`);
+                await reachable(tool, `${category} ${selector}`);
+              }
+            }
+            if (process.env.SETTINGS_SCREENSHOT_DIR && [640, 1280].includes(viewport.width)) {
+              const fs = require('node:fs');
+              const directory = path.resolve(process.env.SETTINGS_SCREENSHOT_DIR);
+              fs.mkdirSync(directory, { recursive: true });
+              await page.setViewportSize({ width: viewport.width, height: 800 });
+              await page.locator('.config-settings-topnav').scrollIntoViewIfNeeded();
+              await noOverflow(`${category} screenshot`);
+              await page.screenshot({ path: path.join(directory, `ecpa_issue-479-settings-labels-1102_ui_${category}_${locale}_${viewport.width}x800.png`), fullPage: true });
+            }
+          } finally {
+            await page.setViewportSize(originalViewport);
+            await settle();
+            await page.evaluate(state => {
+              for (const { element, left, top } of state.elements) element.scrollTo({ left, top, behavior: 'instant' });
+              window.scrollTo({ left: state.left, top: state.top, behavior: 'instant' });
+            }, scrollState);
+            await settle();
+            await scrollState.dispose();
+          }
+        };
         const hasDirtyMarker = async id => page.locator(`#config-subpage-tab-${id}`).evaluate(element =>
           Boolean(element.querySelector('.config-nav-dirty, .config-settings-dirty, [data-dirty="true"]'))
           || /未保存|unsaved/i.test([element.getAttribute('aria-label'), element.getAttribute('title'), element.textContent].join(' ')));
@@ -145,7 +255,7 @@ const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { w
           assert.equal(await trigger.getAttribute('aria-expanded'), 'false', `${label}: clicking outside closes field help`);
         };
 
-        assert.equal(await page.getByRole('heading', { level: 1, name: locale === 'en' ? 'Advanced settings' : '高级设置', exact: true }).count(), 1);
+        assert.equal(await page.getByRole('heading', { level: 1, name: locale === 'en' ? 'Advanced settings' : '高级设置', exact: true }).count(), 0);
         assert.equal(await page.locator('.config-page [role="tabpanel"]').count(), 1);
         assert.equal(await page.locator('.config-settings-header p').count(), 0,
           `${label}: settings header must not repeat layout explanations`);
@@ -156,18 +266,25 @@ const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { w
         assert.equal(await page.locator('.config-subpage-tabs [role="tab"]').evaluateAll(elements =>
           elements.every(element => element.getAttribute('aria-controls') === 'config-subpage-panel')), true);
         const navigation = page.locator('.config-subpage-tabs');
+        assert.equal(await page.locator('.config-settings-topnav .config-settings-search').count(), 1);
+        if (viewport.width > 720) {
+          const navBox = await navigation.boundingBox();
+          const searchBox = await page.locator('.config-settings-search').boundingBox();
+          assert.ok(searchBox.x >= navBox.x + navBox.width, `${label}: search sits to the right of tabs`);
+          assert.ok(Math.abs(searchBox.y + searchBox.height / 2 - navBox.y - navBox.height / 2) < 2, `${label}: tabs and search share a row`);
+        }
         assert.equal(await navigation.getAttribute('aria-orientation'), 'horizontal');
         assert.equal(await page.locator('.config-settings-sidebar, .config-page aside').count(), 0,
           `${label}: settings must not add another vertical sidebar`);
         await settle();
         const navigationLayout = await navigation.evaluate(element => {
-          const header = document.querySelector('.config-settings-header').getBoundingClientRect();
+          const toolbar = document.querySelector('.config-settings-topnav').getBoundingClientRect();
           const panel = document.querySelector('#config-subpage-panel').getBoundingClientRect();
           const bounds = element.getBoundingClientRect();
           const elements = [...element.querySelectorAll('[role="tab"]')];
           const buttons = elements.map(button => button.getBoundingClientRect());
           return {
-            aboveContent: bounds.top >= header.bottom - 1 && bounds.bottom <= panel.top + 1,
+            aboveContent: bounds.top >= toolbar.top - 1 && toolbar.bottom <= panel.top + 1,
             singleRow: Math.max(...buttons.map(button => button.top)) - Math.min(...buttons.map(button => button.top)) <= 1,
             labelsFit: elements.every((button, index) => {
               const range = document.createRange();
@@ -238,7 +355,7 @@ const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { w
         const nativePort = page.locator('#config-native-network .config-network-port-field input');
         assert.ok((await nativePort.boundingBox()).width <= 160, `${label}: port input stays compact`);
         if (viewport.width >= 964) {
-          const secret = await page.locator('.config-secret-input').boundingBox();
+          const secret = await page.locator('#config-native-management .config-secret-input').boundingBox();
           assert.ok(secret.width <= 420, `${label}: secret input must not stretch across the page`);
         }
         assert.equal(await page.getByLabel(locale === 'en' ? 'Port' : '端口', { exact: true }).count(), 1,
@@ -249,7 +366,7 @@ const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { w
 
         await tab('routing');
         assert.equal(await page.locator('#config-routing-section-title').isVisible(), true);
-        assert.equal(await page.locator('#config-retry-section-title').isVisible(), true);
+        assert.equal(await page.locator('#config-retry-section-title').isVisible(), false);
         await templateVisible('routing-advanced');
         await templateVisible('extensions-concurrency');
         if (viewport.width >= 964) {
@@ -257,13 +374,15 @@ const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { w
           const ttl = await page.locator('#config-input-config-network-sessionTtl').boundingBox();
           assert.ok(toggle.width > 0 && ttl.width > 0, `${label}: controls remain visible inside their card`);
           assert.ok(ttl.width <= 200, `${label}: duration input stays compact`);
-          const retryInput = await page.locator('#config-input-config-network-requestRetry').boundingBox();
-          assert.ok(retryInput.width <= 160, `${label}: retry count stays compact`);
         }
         await templateVisible('extensions-plugins', false);
         await noOverflow('routing and stability');
+        await scalarLayout('routing');
+        await tab('requests');
+        assert.equal(await retrySection.isVisible(), true);
         if (viewport.width >= 964) {
           const value = await page.locator('#config-input-config-network-requestRetry').boundingBox();
+          assert.ok(value.width <= 160, `${label}: retry count stays compact`);
           const caption = await page.locator('label[for="config-input-config-network-requestRetry"]').boundingBox();
           assert.ok(Math.abs(value.y + value.height / 2 - caption.y - caption.height / 2) <= 2,
             `${label}: compact numeric settings keep labels next to their values`);
@@ -272,6 +391,7 @@ const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { w
               `${label}: paired routing cards should not create excessive vertical whitespace`);
           }
         }
+        await tab('routing');
         await page.locator('.template-config-card:visible').last().scrollIntoViewIfNeeded();
         await settle();
         const pinnedCategory = await page.locator('#config-subpage-tab-routing').evaluate(element => {
@@ -315,6 +435,7 @@ const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { w
           assert.ok(Math.abs(leftSave.y + leftSave.height - rightSave.y - rightSave.height) <= 1, 'paired save buttons share a bottom baseline');
         }
         await noOverflow('model and request behavior');
+        await scalarLayout('requests');
         assert.equal(await page.locator('#config-native-aliases').isVisible(), false, 'aliases are separate from model and request settings');
         await tab('aliases');
         await templateVisible('request-behavior', false);
@@ -363,6 +484,7 @@ const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { w
         await tab('oauth');
         for (const id of ['oauth-common', 'oauth-models', 'oauth-codex', 'oauth-media', 'oauth-claude', 'oauth-others']) await templateVisible(id);
         await noOverflow('upstream credentials');
+        await scalarLayout('oauth');
         await tab('requests');
         assert.equal(await page.locator('.config-settings-views').count(), 0, `${label}: secondary pagination is removed`);
         await tab('diagnostics');
@@ -370,11 +492,8 @@ const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { w
         await templateVisible('diagnostics');
         await templateVisible('extensions-inflight');
         await noOverflow('diagnostics');
-        await tab('extensions');
-        await templateVisible('extensions-plugins');
-        await templateVisible('extensions-concurrency', false);
-        await templateVisible('extensions-inflight', false);
-        await noOverflow('extensions');
+        assert.equal(await page.locator('#config-subpage-tab-extensions').count(), 0);
+        await templateVisible('extensions-plugins', false);
         await tab('software');
         assert.equal(await page.locator('.config-software-panel').isVisible(), true);
         await noOverflow('application preferences');
@@ -387,7 +506,7 @@ const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { w
         await noOverflow('search results');
         await reachable(results.getByRole('button').first(), 'search result');
         await results.getByRole('button', { name: locale === 'en' ? /Retries & cooldowns/ : /重试与冷却/ }).first().click();
-        assert.equal(await page.locator('#config-subpage-tab-routing').getAttribute('aria-selected'), 'true');
+        assert.equal(await page.locator('#config-subpage-tab-requests').getAttribute('aria-selected'), 'true');
         await reachable(page.locator('#config-retry-section-title'), 'search target');
         await search.fill(locale === 'en' ? 'Sensitive Words' : '敏感词');
         await results.getByRole('button').first().waitFor();
@@ -431,11 +550,11 @@ const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { w
           fs.mkdirSync(directory, { recursive: true });
           await page.setViewportSize({ width: 640, height: 900 });
           await tab('general');
-          await page.locator('.config-settings-header').scrollIntoViewIfNeeded();
+          await page.locator('.config-settings-topnav').scrollIntoViewIfNeeded();
           await settle();
           await page.screenshot({ path: path.join(directory, locale === 'en' ? 'settings-access-640-en.png' : 'settings-access-640.png') });
           await tab('routing');
-          await page.locator('.config-settings-header').scrollIntoViewIfNeeded();
+          await page.locator('.config-settings-topnav').scrollIntoViewIfNeeded();
           await settle();
           await page.screenshot({ path: path.join(directory, locale === 'en' ? 'settings-routing-640-en.png' : 'settings-routing-640.png') });
           await page.setViewportSize(viewport);
@@ -447,21 +566,25 @@ const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { w
           fs.mkdirSync(directory, { recursive: true });
           await page.setViewportSize({ width: 1280, height: 900 });
           await tab('general');
-          await page.locator('.config-settings-header').scrollIntoViewIfNeeded();
+          await page.locator('.config-settings-topnav').scrollIntoViewIfNeeded();
           await settle();
           await page.screenshot({ path: path.join(directory, 'settings-access.png') });
           await tab('routing');
-          await page.locator('.config-settings-header').scrollIntoViewIfNeeded();
+          await page.locator('.config-settings-topnav').scrollIntoViewIfNeeded();
           await settle();
           await page.screenshot({ path: path.join(directory, 'settings-routing.png') });
-          await page.locator('.sidebar-theme-selector').getByRole('button', { name: '暗色', exact: true }).click();
+          await page.locator('.theme-selector-trigger').click();
+          await page.locator('.theme-selector-card[data-theme-id="dark"]').click();
+          await page.keyboard.press('Escape');
           await settle();
           await page.screenshot({ path: path.join(directory, 'settings-routing-dark.png') });
           await tab('general');
-          await page.locator('.config-settings-header').scrollIntoViewIfNeeded();
+          await page.locator('.config-settings-topnav').scrollIntoViewIfNeeded();
           await settle();
           await page.screenshot({ path: path.join(directory, 'settings-access-dark.png') });
-          await page.locator('.sidebar-theme-selector').getByRole('button', { name: '亮色', exact: true }).click();
+          await page.locator('.theme-selector-trigger').click();
+          await page.locator('.theme-selector-card[data-theme-id="light"]').click();
+          await page.keyboard.press('Escape');
           await page.setViewportSize(viewport);
         }
 
@@ -472,20 +595,32 @@ const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { w
           const remoteManagement = page.locator('#template-management-0');
           await remoteManagement.check();
           assert.equal(await hasDirtyMarker('general'), true, `${label}: template drafts mark their category`);
-          await tab('routing');
+          await tab('requests');
           const retryInput = retrySection.locator('input[type="text"]').first();
           await retryInput.fill('5');
-          assert.equal(await hasDirtyMarker('routing'), true, `${label}: core drafts mark their category`);
+          const cooling = page.getByRole('switch', { name: locale === 'en' ? 'Enable cooldowns' : '启用冷却', exact: true });
+          assert.equal(await cooling.isChecked(), true, 'existing false disable-cooling means enabled');
+          await cooling.uncheck();
+          assert.equal(await hasDirtyMarker('requests'), true, `${label}: core drafts mark their category`);
           await tab('software');
-          assert.equal(await hasDirtyMarker('routing'), true, `${label}: dirty category remains marked while inactive`);
-          await tab('routing');
+          assert.equal(await hasDirtyMarker('requests'), true, `${label}: dirty category remains marked while inactive`);
+          await tab('requests');
           assert.equal(await retryInput.inputValue(), '5', `${label}: changing categories preserves core drafts`);
           const retrySave = retrySection.getByRole('button', { name: locale === 'en' ? /Save/ : /保存/ });
           await retrySave.click();
           await page.waitForFunction(button => {
             return button?.disabled && !/正在保存|保存中|saving/i.test(button.textContent);
           }, await retrySave.elementHandle());
-          assert.equal(await hasDirtyMarker('routing'), false, `${label}: saving clears the category marker`);
+          assert.equal(await hasDirtyMarker('requests'), false, `${label}: saving clears the category marker`);
+          await tab('software');
+          await tab('requests');
+          assert.equal(await cooling.isChecked(), false, 'saved disable-cooling true means switch off');
+          await cooling.check();
+          await retrySave.click();
+          await page.waitForFunction(button => button?.disabled && !/正在保存|保存中|saving/i.test(button.textContent), await retrySave.elementHandle());
+          await tab('software');
+          await tab('requests');
+          assert.equal(await cooling.isChecked(), true, 'manually enabled cooling survives saving');
           await tab('general');
           assert.equal(await remoteManagement.isChecked(), true, `${label}: saving another category preserves template drafts`);
           assert.equal(await hasDirtyMarker('general'), true);
@@ -497,7 +632,7 @@ const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { w
           await tab('requests');
           const sensitiveWord = page.locator('.config-sensitive-words-row input').first();
           await sensitiveWord.fill('settings-navigation-draft');
-          await tab('extensions');
+          await tab('software');
           assert.equal(await hasDirtyMarker('requests'), true, `${label}: sensitive-word drafts mark their category`);
           await tab('requests');
           assert.equal(await sensitiveWord.inputValue(), 'settings-navigation-draft', `${label}: sensitive-word drafts survive category changes`);
@@ -506,9 +641,12 @@ const viewports = [{ width: 640, height: 600 }, { width: 964, height: 700 }, { w
       }
     }
     assert.deepEqual(runtimeErrors, [], 'Settings navigation must not produce runtime errors');
-    console.log('PASS: nine settings categories including storage, independent model aliases, adaptive cards, search, retained drafts, save feedback, and Chinese/English responsive layouts.');
+    console.log('PASS: nine settings categories including storage and independent model aliases, adaptive cards, search, retained drafts, save feedback, and Chinese/English responsive layouts.');
   } finally {
-    if (browser) await browser.close();
-    if (server) await server.close();
+    try {
+      if (browser) await browser.close();
+    } finally {
+      if (server) await server.close();
+    }
   }
 })().catch(error => { console.error(error); process.exitCode = 1; });

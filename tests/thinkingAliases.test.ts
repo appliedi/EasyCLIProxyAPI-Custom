@@ -28,6 +28,7 @@ describe('模型别名默认名称', () => {
 describe('统一模型别名列表', () => {
   test('同一个别名可同时显示思考强度和 Fast', () => {
     const identity = {
+      position: { section: 'oauth-model-alias', providerIndex: null, modelIndex: 0 },
       sourceModel: 'gpt-5.6-sol',
       alias: 'gpt-5.6-sol-xhigh-fast',
       provider: 'Codex OAuth',
@@ -45,6 +46,7 @@ describe('统一模型别名列表', () => {
 
   test('Fast-only 别名仍会显示为独立条目', () => {
     const entries = combineModelAliasEntries([], [{
+      position: { section: 'oauth-model-alias', providerIndex: null, modelIndex: 0 },
       sourceModel: 'gpt-5.6-sol',
       alias: 'gpt-5.6-sol-fast',
       serviceTier: 'priority',
@@ -92,3 +94,15 @@ describe('思考别名来源', () => {
     expect(sources.find((source) => source.id === 'plain')?.supportsFast).toBe(false);
   });
 });
+
+ test('Ultra Fast generates a distinct alias and survives list merging', () => {
+   expect(defaultModelAlias('gpt-6.1-sol', 'high', true, 'ultrafast')).toBe('gpt-6.1-sol-high-ultrafast');
+   expect(defaultModelAlias('gpt-6.1-sol', '', true, 'ultrafast')).toBe('gpt-6.1-sol-ultrafast');
+   expect(defaultModelAlias('gpt-6.1-sol', '', false, 'ultrafast')).toBe('gpt-6.1-sol-alias');
+   const entries = combineModelAliasEntries([], [{
+     position: { section: 'oauth-model-alias', providerIndex: null, modelIndex: 0 },
+     sourceModel: 'gpt-6.1-sol', alias: 'sol-ultrafast', serviceTier: 'ultrafast',
+     provider: 'Codex OAuth', kind: 'codex-oauth', oauthChannel: 'codex',
+   }]);
+   expect(entries[0].serviceTier).toBe('ultrafast');
+ });

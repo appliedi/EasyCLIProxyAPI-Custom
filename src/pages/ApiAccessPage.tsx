@@ -1,7 +1,12 @@
+import { EmptyState } from '../components/EmptyState';
+import { Switch } from '../components/Switch';
+import { resolveApiAccessRemarks, saveApiAccessRemark } from '../services/apiAccessRemarks';
+import type { ProviderSection, ApiAccessRemarkLocator } from '../services/apiAccessRemarks';
 import { useConfirmation } from '../components/ConfirmationDialog';
+import { AdvancedSettingsGroup } from '../components/api-access/AdvancedSettingsGroup';
 import { normalizeProviderModels } from '../services/providerModels';
 import { ModelSelectionPanel } from '../components/ModelSelectionPanel';
-import { useDialogFocusTrap } from '../components/useDialogFocusTrap';
+import { Dialog } from '../components/Dialog';
 import {
   type CSSProperties,
   FormEvent,
@@ -12,8 +17,6 @@ import {
   useRef,
   useState,
 } from 'react';
-import { createPortal } from 'react-dom';
-import { invoke } from '@tauri-apps/api/core';
 import {
   closestCenter,
   DndContext,
@@ -49,6 +52,8 @@ import metaIcon from '../assets/icons/meta.svg';
 import openaiIcon from '../assets/icons/openai-light.svg';
 import vertexIcon from '../assets/icons/vertex.svg';
 import grokIcon from '../assets/icons/grok.svg';
+import zaiIcon from '../assets/icons/zai.svg';
+import { isZaiCodingPlanRecord, ZAI_CODING_PLAN_BASE_URL } from '../services/zaiQuota';
 import {
   isRecord,
   managementApi,
@@ -56,6 +61,7 @@ import {
   readBoolean,
   readNumber,
   readString,
+  providerGroupsApi,
 } from '../services/managementApi';
 import {
   DEEPSEEK_BASE_URL,
@@ -84,9 +90,8 @@ import { ProviderGroupTemplateFields, ProviderKeyTemplateFields, ProviderModelFi
 import { providerText } from '../i18n/providerTemplate';
 import {
   cleanProviderGroup, effectiveProviderKey, providerGroupIdentity, providerGroupKeys, providerGroupStatus,
-  providerKeyDraft, serializeProviderKey, validateProviderGroupKeys, validateProviderTemplateRecord, type ProviderKeyDraft,
+  providerKeyDraft, providerKeyIsDisabled, serializeProviderKey, validateProviderGroupKeys, validateProviderTemplateRecord, type ProviderKeyDraft,
 } from '../services/providerGroups';
-import { providerGroupsApi } from '../services/managementApi';
 import {
   appendProviderEntry, locateProviderEntry, providerEntries, removeProviderEntry,
   reorderProviderEntries, updateProviderEntry, type ProviderEntrySource,
@@ -94,18 +99,11 @@ import {
 import { getCurrentLocale, translate, useI18n } from '../i18n';
 import type { MessageKey } from '../i18n/resources';
 import { MessageNotice, FloatingNotice, useAppNotice } from '../appNotice';
+import { Select } from '../components/Select';
 
-export type ProviderSection =
-  | 'gemini-api-key'
-  | 'interactions-api-key'
-  | 'vertex-api-key'
-  | 'xai-api-key'
-  | 'meta-api-key'
-  | 'codex-api-key'
-  | 'claude-api-key'
-  | 'openai-compatibility';
+export type { ProviderSection } from '../services/apiAccessRemarks';
 
-export type ProviderCategory = ProviderSection | 'deepseek';
+export type ProviderCategory = ProviderSection | 'deepseek' | 'zai';
 
 export const OPENAI_THINKING_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
 export { DEEPSEEK_BASE_URL };
@@ -137,12 +135,7 @@ type ProviderRow = {
   remark: string;
 };
 
-export type ApiAccessRemarkLocator = {
-  providerName: string;
-  baseUrl: string;
-  apiKeys: string[];
-  configIdentity?: string;
-};
+export type { ApiAccessRemarkLocator } from '../services/apiAccessRemarks';
 
 export const providerDragId = (
   row: Pick<ProviderRow, 'section' | 'index' | 'name' | 'apiKey' | 'baseUrl'>,
@@ -202,11 +195,11 @@ function SortableProviderRow({
     <article
       ref={setNodeRef}
       style={style}
-      className={`real-provider-row${isDragging ? ' dragging' : ''}${isDragOver && !isDragging ? ' drag-over' : ''}`}
+      className={`real-provider-row${isDragging ? ' dragging' : ''}${isDragOver && !isDragging ? ' drag-over' : ''}${row.disabled ? ' disabled' : ''}`}
     >
       <button
         type="button"
-        className="icon-button quiet provider-drag-handle"
+        className="icon-button quiet ghost small-button provider-drag-handle"
         disabled={disabled}
         aria-label={dragLabel}
         title={dragLabel}
@@ -266,6 +259,14 @@ const providerDefinitions: ProviderDefinition[] = [
     openAi: true,
   },
   {
+    id: 'zai',
+    section: 'openai-compatibility',
+    responseKey: 'openai-compatibility',
+    labelKey: 'apiAccess.provider.zai',
+    icon: zaiIcon,
+    openAi: true,
+  },
+  {
     id: 'deepseek',
     section: 'codex-api-key',
     responseKey: 'codex-api-key',
@@ -282,6 +283,26 @@ const providerDefinitions: ProviderDefinition[] = [
 ];
 
 const providerLabel = (definition: ProviderDefinition) => definition.label ?? translate(getCurrentLocale(), definition.labelKey);
+
+const SELECTED_CATEGORY_KEY = 'cpa-gui.api-access-selected-category.v1';
+
+const readSelectedCategory = (): ProviderCategory => {
+  const fallback = providerDefinitions[0].id;
+  if (typeof window === 'undefined') return fallback;
+  try {
+    const saved = window.localStorage.getItem(SELECTED_CATEGORY_KEY);
+    return providerDefinitions.find((definition) => definition.id === saved)?.id ?? fallback;
+  } catch {
+    return fallback;
+  }
+};
+
+const writeSelectedCategory = (category: ProviderCategory) => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(SELECTED_CATEGORY_KEY, category);
+  } catch { /* Keep category navigation available when storage is unavailable. */ }
+};
 
 export const providerSectionOrder = providerDefinitions.map((definition) => definition.id);
 
@@ -321,8 +342,11 @@ export const providerCategoryMatchesRecord = (
   if (category === 'codex-api-key') {
     return section === 'codex-api-key' && !isDeepSeekRecord(record);
   }
+  if (category === 'zai') {
+    return section === 'openai-compatibility' && isZaiCodingPlanRecord(record);
+  }
   if (category === 'openai-compatibility') {
-    return section === 'openai-compatibility';
+    return section === 'openai-compatibility' && !isZaiCodingPlanRecord(record);
   }
   return true;
 };
@@ -346,9 +370,6 @@ const rowFromRecord = (
     .map((item) => readString(item, 'api-key', 'apiKey'))
     .filter(Boolean);
   const singleApiKey = readString(record, 'api-key', 'apiKey');
-  const excludedModels = Array.isArray(record['excluded-models'])
-    ? record['excluded-models'].map(String)
-    : [];
   return {
     section,
     index,
@@ -361,9 +382,7 @@ const rowFromRecord = (
     baseUrl: readString(record, 'base-url', 'baseUrl'),
     models: Array.isArray(record.models)
       ? record.models.flatMap((model) => modelsFromRecord([model], true)) : modelsFromRecord(record.models, true),
-    disabled: grouped ? providerGroupStatus(record) === 'disabled' : definitionFor(section).openAi
-      ? readBoolean(record, 'disabled')
-      : excludedModels.some((model) => model.trim() === '*'),
+    disabled: grouped ? providerGroupStatus(record) === 'disabled' : providerKeyIsDisabled(record, record),
     priority: record.priority == null ? null : readNumber(record, 'priority'),
     authIndex: entry
       ? readString(entry, 'auth-index', 'authIndex')
@@ -372,11 +391,21 @@ const rowFromRecord = (
   };
 };
 
-const rowsFromGroups = (section: ProviderSection, groups: Record<string, unknown>[]): ProviderRow[] =>
+export const providerRowsFromGroups = (section: ProviderSection, groups: Record<string, unknown>[]): ProviderRow[] =>
   providerEntries(section, groups).map(({ record, source }, index) => {
     const deepSeek = section === 'codex-api-key' && (isDeepSeekRecord(record) || isDeepSeekRecord(source.group));
+    const zai = section === 'openai-compatibility' && (isZaiCodingPlanRecord(record) || isZaiCodingPlanRecord(source.group));
     const row = rowFromRecord(section, record, index);
-    return { ...row, source, category: deepSeek ? 'deepseek' : section, name: deepSeek ? 'DeepSeek' : row.name };
+    const key = source.keyIndex !== undefined && Array.isArray(source.group.keys)
+      ? source.group.keys[source.keyIndex]
+      : undefined;
+    return {
+      ...row,
+      source,
+      category: deepSeek ? 'deepseek' : zai ? 'zai' : section,
+      name: deepSeek ? 'DeepSeek' : row.name,
+      disabled: isRecord(key) ? providerKeyIsDisabled(source.group, key) : row.disabled,
+    };
   });
 
 export const providerRemarkIdentity = (
@@ -749,7 +778,14 @@ const emptyProviderDraft = (): ProviderDraft => ({
 
 export const createProviderDraft = (category: ProviderCategory): ProviderDraft => {
   const draft = emptyProviderDraft();
-  if (category === 'openai-compatibility') return { ...draft, thinkingLevels: [], thinkingLevelsEdited: false };
+  if (category === 'openai-compatibility' || category === 'zai') {
+    return {
+      ...draft,
+      ...(category === 'zai' ? { name: 'z.ai', baseUrl: ZAI_CODING_PLAN_BASE_URL } : {}),
+      thinkingLevels: [],
+      thinkingLevelsEdited: false,
+    };
+  }
   if (category !== 'deepseek') return draft;
   return {
     ...draft,
@@ -764,6 +800,8 @@ export const applyProviderRemarkIdentity = (
   draft: ProviderDraft,
 ): ProviderDraft => draft.groupKeys ? draft : category === 'deepseek'
   ? { ...draft, name: draft.name.trim() || 'DeepSeek' }
+  : category === 'zai'
+    ? { ...draft, name: draft.name.trim() || 'z.ai', baseUrl: draft.baseUrl.trim() || ZAI_CODING_PLAN_BASE_URL }
   : definitionFor(category).openAi
     ? { ...draft, name: draft.remark.trim() }
     : draft;
@@ -1180,10 +1218,13 @@ export const providerRecordWithDisabledState = (
   disabled: boolean,
 ) => {
   const nextRecord = stripResponseFields(record);
+  // Only OpenAI-compatible providers have a native disabled field. Codex, Claude,
+  // Gemini, and the other key types reject it during YAML unmarshal.
   if (definitionFor(section).openAi) {
     nextRecord.disabled = disabled;
     return nextRecord;
   }
+  delete nextRecord.disabled;
 
   const excludedModels = Array.isArray(nextRecord['excluded-models'])
     ? nextRecord['excluded-models'].map(String).filter((model) => model.trim() !== '*')
@@ -1198,7 +1239,7 @@ export function ApiAccessPage() {
   const { askConfirmation, confirmationDialog } = useConfirmation();
   const { t } = useI18n();
   const [records, setRecords] = useState(emptyRecords);
-  const [activeCategory, setActiveCategory] = useState<ProviderCategory>('codex-api-key');
+  const [activeCategory, setActiveCategory] = useState<ProviderCategory>(readSelectedCategory);
   const [filter, setFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -1257,13 +1298,13 @@ export function ApiAccessPage() {
 
   useEffect(() => {
     const providerRows = (Object.entries(records) as [ProviderSection, Record<string, unknown>[]][])
-      .flatMap(([section, items]) => rowsFromGroups(section, items));
+      .flatMap(([section, items]) => providerRowsFromGroups(section, items));
     if (providerRows.length === 0) {
       setApiAccessRemarks({});
       return;
     }
     let disposed = false;
-    void invoke<string[]>('resolve_api_access_remarks', {
+    void resolveApiAccessRemarks({
       queries: providerRows.flatMap((row) => [{
         providerSection: row.section,
         ...apiAccessRemarkLocatorFromRow(row),
@@ -1287,7 +1328,7 @@ export function ApiAccessPage() {
 
   const rows = useMemo(
     () =>
-      rowsFromGroups(activeSection, records[activeSection])
+      providerRowsFromGroups(activeSection, records[activeSection])
         .map((row) => ({
           ...row,
           remark: apiAccessRemarks[
@@ -1327,17 +1368,17 @@ export function ApiAccessPage() {
     section: ProviderSection, previous: Record<string, unknown>[], next: Record<string, unknown>[],
     edited?: { row: ProviderRow; remark: string },
   ) => {
-    const previousRows = rowsFromGroups(section, previous);
+    const previousRows = providerRowsFromGroups(section, previous);
     const previousLocators = previousRows.flatMap((row) => [
       apiAccessRemarkLocatorFromRow(row), apiAccessRemarkLocatorFromRecord(section, row.source!.group),
     ]);
-    const resolved = await invoke<string[]>('resolve_api_access_remarks', {
+    const resolved = await resolveApiAccessRemarks({
       queries: previousLocators.map((locator) => ({ providerSection: section, ...locator })),
     });
     const previousRemarks = new Map(previousRows.map((row, index) => [
       providerRemarkIdentity(section, apiAccessRemarkLocatorFromRow(row)), resolved[index * 2] || resolved[index * 2 + 1] || '',
     ]));
-    const nextRows = rowsFromGroups(section, next);
+    const nextRows = providerRowsFromGroups(section, next);
     const allRecords = nextRows.map(apiAccessRemarkLocatorFromRow);
     const byRemark = new Map<string, ApiAccessRemarkLocator[]>();
     for (const row of nextRows) {
@@ -1350,7 +1391,7 @@ export function ApiAccessPage() {
     if (!byRemark.size) byRemark.set('', []);
     let first = true;
     for (const [remark, updatedRecords] of byRemark) {
-      await invoke('save_api_access_remark', { update: {
+      await saveApiAccessRemark({ update: {
         providerSection: section, previousRecords: first ? previousLocators : [],
         records: updatedRecords, allRecords, remark,
       } });
@@ -1360,7 +1401,6 @@ export function ApiAccessPage() {
 
   const saveProvider = async (
     nextDraft: ProviderDraft,
-    modelDiscoveryReady: boolean,
   ): Promise<ProviderSaveResult> => {
     const definition = activeDefinition;
     const preparedDraft = applyProviderRemarkIdentity(
@@ -1396,12 +1436,12 @@ export function ApiAccessPage() {
     }
     if (
       activeCategory === 'deepseek'
-      && (!modelDiscoveryReady || preparedDraftForSave.models.length === 0)
+      && preparedDraftForSave.models.length === 0
     ) {
       return {
         saved: false,
         target: 'models',
-        error: t('apiAccess.error.fetchModelsBeforeSave'),
+        error: t('apiAccess.error.modelsRequired'),
       };
     }
     if (Array.from(preparedDraft.remark.trim()).length > 80 || /[\u0000-\u001f\u007f]/.test(preparedDraft.remark)) {
@@ -1468,7 +1508,7 @@ export function ApiAccessPage() {
       const savedRecord = definition.openAi
         ? buildProviderGroupRecord(activeSection, draftToSave, currentRecord)
         : buildProviderKeyRecord(activeSection, draftToSave, currentRecord);
-      const currentEntries = rowsFromGroups(activeSection, current);
+      const currentEntries = providerRowsFromGroups(activeSection, current);
       const targetIndex = location ? currentEntries.findIndex((row) => {
         return row.source?.groupIndex === location.groupIndex && row.source?.keyIndex === location.keyIndex;
       }) : -1;
@@ -1483,7 +1523,7 @@ export function ApiAccessPage() {
       const detached = location && nextList.length > current.length;
       const savedGroupIndex = location ? location.groupIndex + (detached ? 1 : 0) : nextList.length - 1;
       const savedKeyIndex = definition.openAi ? undefined : location && !detached ? location.keyIndex : 0;
-      const savedRow = rowsFromGroups(activeSection, nextList).find((row) => row.source?.groupIndex === savedGroupIndex && row.source?.keyIndex === savedKeyIndex)!;
+      const savedRow = providerRowsFromGroups(activeSection, nextList).find((row) => row.source?.groupIndex === savedGroupIndex && row.source?.keyIndex === savedKeyIndex)!;
       await persistEntryRemarks(activeSection, current, nextList, { row: savedRow, remark: draftToSave.remark });
       setNotice(editingRow ? t('apiAccess.notice.updated') : t('apiAccess.notice.added'));
       await loadProviders();
@@ -1565,7 +1605,7 @@ export function ApiAccessPage() {
   };
 
   const countForDefinition = (definition: ProviderDefinition) =>
-    rowsFromGroups(definition.section, records[definition.section]).filter((row) => row.category === definition.id).length;
+    providerRowsFromGroups(definition.section, records[definition.section]).filter((row) => row.category === definition.id).length;
 
   return (
     <section className="page management-page api-access-page">
@@ -1573,23 +1613,28 @@ export function ApiAccessPage() {
       {error ? <MessageNotice message={error} onDismiss={() => setError('')} /> : null}
       <div className="provider-workbench real-provider-workbench">
         <aside className="panel provider-category-panel">
-          {providerDefinitions.map((definition) => (
-            <button
-              type="button"
-              key={definition.id}
-              className={definition.id === activeCategory ? 'active' : ''}
-              aria-pressed={definition.id === activeCategory}
-              onClick={() => {
-                setActiveCategory(definition.id);
-                feedback.clearNotice();
-              }}
-              disabled={busy}
-            >
-              <img src={definition.icon} alt="" className="provider-logo" />
-              <span title={providerLabel(definition)}>{providerLabel(definition)}</span>
-              <strong>{countForDefinition(definition)}</strong>
-            </button>
-          ))}
+          {providerDefinitions.map((definition) => {
+            const count = countForDefinition(definition);
+            return (
+              <button
+                type="button"
+                key={definition.id}
+                className={definition.id === activeCategory ? 'active' : ''}
+                data-empty={count === 0 ? 'true' : undefined}
+                aria-pressed={definition.id === activeCategory}
+                onClick={() => {
+                  setActiveCategory(definition.id);
+                  writeSelectedCategory(definition.id);
+                  feedback.clearNotice();
+                }}
+                disabled={busy}
+              >
+                <img src={definition.icon} alt="" className="provider-logo" />
+                <span title={providerLabel(definition)}>{providerLabel(definition)}</span>
+                <strong>{count}</strong>
+              </button>
+            );
+          })}
         </aside>
 
         <section className="panel provider-resource-panel">
@@ -1598,7 +1643,7 @@ export function ApiAccessPage() {
               <h2 title={providerLabel(activeDefinition)}>{providerLabel(activeDefinition)}</h2>
               <span>{t(activeDefinition.openAi ? 'apiAccess.entries.summaryProviders' : 'apiAccess.entries.summaryKeys', { count: rows.length })}</span>
             </div>
-            <div className="management-toolbar compact-toolbar api-access-search">
+            <div className="management-toolbar compact-toolbar api-access-search search-control" data-size="default">
               <Search size={16} aria-hidden="true" />
               <input value={filter} onChange={(event) => setFilter(event.currentTarget.value)} placeholder={t('apiAccess.search')} aria-label={t('apiAccess.search')} />
             </div>
@@ -1617,11 +1662,11 @@ export function ApiAccessPage() {
           {loading ? (
             <div className="management-loading"><LoaderCircle size={20} className="spin" />{t('apiAccess.loading')}</div>
           ) : rows.length === 0 ? (
-            <div className="management-empty">
-              <Filter size={24} aria-hidden="true" />
-              <strong>{filter ? t('apiAccess.empty.filtered') : t('apiAccess.empty.none')}</strong>
-              <span>{filter ? t('apiAccess.empty.tryKeyword') : t('apiAccess.empty.addFirst')}</span>
-            </div>
+            <EmptyState className="management-empty" icon={<Filter size={24} />} title={filter ? t('apiAccess.empty.filtered') : t('apiAccess.empty.none')}>
+              {filter ? t('apiAccess.empty.tryKeyword') : t('apiAccess.empty.addFirst', {
+                action: t(activeDefinition.openAi ? 'apiAccess.entries.addProvider' : 'apiAccess.entries.addKey'),
+              })}
+            </EmptyState>
           ) : (
             <DndContext
               sensors={dragSensors}
@@ -1646,8 +1691,10 @@ export function ApiAccessPage() {
                     >
                   <div className="provider-row-main">
                     <div className="provider-row-title">
-                      <strong title={row.name}>{row.name}</strong>
-                      {row.remark ? <span title={row.remark}>{row.remark}</span> : null}
+                      <strong title={row.remark || row.name}>{row.remark || row.name}</strong>
+                      {Array.isArray(row.record.keys) && providerGroupStatus(row.record) === 'partial'
+                        ? <span className="state-pill">{t('apiAccess.groups.partial')}</span>
+                        : null}
                     </div>
                     <span className="provider-row-url" title={row.baseUrl || undefined}>{row.baseUrl || t('apiAccess.defaultUrl')}</span>
                     <div className="provider-row-meta">
@@ -1663,7 +1710,7 @@ export function ApiAccessPage() {
                   <div className="provider-row-actions">
                     <button
                       type="button"
-                      className="secondary-button provider-health-button"
+                      className="secondary-button small-button provider-health-button"
                       onClick={() => setHealthDialogRow(row)}
                       disabled={busy}
                     >
@@ -1671,21 +1718,12 @@ export function ApiAccessPage() {
                     </button>
                     <label className="provider-enabled-control">
                       <span>{t(row.disabled ? 'apiAccess.status.disabled' : 'apiAccess.status.enabled')}</span>
-                      <span className="switch-control">
-                        <input
-                          type="checkbox"
-                          checked={!row.disabled}
-                          onChange={() => void toggleProvider(row)}
-                          disabled={busy}
-                          aria-label={t('apiAccess.toggleAria', { remark: row.remark || row.name, action: row.disabled ? t('common.enable') : t('common.disable') })}
-                        />
-                        <span className="switch-track" />
-                      </span>
+                      <Switch checked={!row.disabled} onChange={() => void toggleProvider(row)} disabled={busy} aria-label={t('apiAccess.toggleAria', { remark: row.remark || row.name, action: row.disabled ? t('common.enable') : t('common.disable') })} />
                     </label>
-                    <button type="button" className="icon-button quiet" onClick={() => openEdit(row)} disabled={busy} title={t('common.edit')} aria-label={t('common.edit')}>
+                    <button type="button" className="icon-button quiet small-button" onClick={() => openEdit(row)} disabled={busy} title={t('common.edit')} aria-label={t('common.edit')}>
                       <Edit3 size={16} aria-hidden="true" />
                     </button>
-                    <button type="button" className="icon-button danger" onClick={() => void deleteRow(row)} disabled={busy} title={t('common.delete')} aria-label={t('common.delete')}>
+                    <button type="button" className="icon-button danger small-button" onClick={() => void deleteRow(row)} disabled={busy} title={t('common.delete')} aria-label={t('common.delete')}>
                       <Trash2 size={16} aria-hidden="true" />
                     </button>
                   </div>
@@ -1739,9 +1777,9 @@ function ProviderGroupHealthDialog({ row, onClose }: ProviderHealthDialogProps) 
   }, [row, key]);
   return <ProviderHealthDialog key={selected} row={effectiveRow} onClose={onClose} keySelector={keys.length ?
     <label className="provider-health-key-selector"><span>{t('apiAccess.groups.healthKey')}</span>
-      <select value={selected} onChange={(event) => setSelected(Number(event.currentTarget.value))}>
+      <Select value={selected} onChange={(event) => setSelected(Number(event.currentTarget.value))}>
         {keys.map((entry, index) => <option key={index} value={index}>{t('apiAccess.groups.keyNumber', { number: index + 1 })} · {maskSecret(readString(entry, 'api-key'))}</option>)}
-      </select></label> : undefined} />;
+      </Select></label> : undefined} />;
 }
 
 type ProviderModelHealthState = { status: 'checking' } | ProviderModelHealthResult;
@@ -1759,7 +1797,6 @@ function ProviderHealthDialog({ row, onClose, keySelector }: ProviderHealthDialo
   const [results, setResults] = useState<Record<string, ProviderModelHealthState>>({});
   const [checkingAll, setCheckingAll] = useState(false);
   const healthControllerRef = useRef<AbortController | null>(null);
-  const dialogRef = useDialogFocusTrap<HTMLElement>({ onEscape: onClose });
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1853,109 +1890,107 @@ function ProviderHealthDialog({ row, onClose, keySelector }: ProviderHealthDialo
   };
 
   return (
-    <div className="model-discovery-backdrop" onMouseDown={(event) => event.currentTarget === event.target && onClose()}>
-      <section ref={dialogRef} className="model-discovery-dialog provider-health-dialog" role="dialog" aria-modal="true" aria-labelledby="provider-health-title">
-        <div className="model-discovery-header">
-          <div>
-            <h2 id="provider-health-title">{t('apiAccess.health.title')}</h2>
-            <span>{t('apiAccess.health.description', { provider: row.remark || row.name })}</span>
-          </div>
-          <button type="button" className="icon-button quiet" onClick={onClose} title={t('common.close')} aria-label={t('common.close')}>
-            <X size={18} aria-hidden="true" />
-          </button>
+    <Dialog className="model-discovery-dialog provider-health-dialog" backdropClassName="model-discovery-backdrop" labelledBy="provider-health-title" onClose={onClose} dismissOnBackdrop>
+      <div className="model-discovery-header">
+        <div>
+          <h2 id="provider-health-title">{t('apiAccess.health.title')}</h2>
+          <span>{t('apiAccess.health.description', { provider: row.remark || row.name })}</span>
         </div>
+        <button type="button" className="icon-button quiet" onClick={onClose} title={t('common.close')} aria-label={t('common.close')}>
+          <X size={18} aria-hidden="true" />
+        </button>
+      </div>
 
-        {keySelector}
-        <div className="model-discovery-search">
-          <Search size={16} aria-hidden="true" />
-          <input value={search} onChange={(event) => setSearch(event.currentTarget.value)} placeholder={t('apiAccess.health.search')} />
-        </div>
+      {keySelector}
+      <div className="model-discovery-search search-control" data-size="default">
+        <Search size={16} aria-hidden="true" />
+        <input value={search} onChange={(event) => setSearch(event.currentTarget.value)} placeholder={t('apiAccess.health.search')} />
+      </div>
 
-        <div className="provider-health-overview">
-          <p>{t('apiAccess.health.warning')}</p>
-          <span>{t('apiAccess.health.summary', {
-            checked: checkedCount,
-            total: models.length,
-            healthy: healthyCount,
-            failed: failedCount,
-          })}</span>
-          {modelError ? (
-            <MessageNotice message={t('apiAccess.health.modelLoadFailed', { error: modelError })} onDismiss={() => setModelError('')} />
-          ) : modelLoading ? (
-            <small>{t('apiAccess.health.loadingModels')}</small>
-          ) : null}
-        </div>
+      <div className="provider-health-overview">
+        <p>{t('apiAccess.health.warning')}</p>
+        <span>{t('apiAccess.health.summary', {
+          checked: checkedCount,
+          total: models.length,
+          healthy: healthyCount,
+          failed: failedCount,
+        })}</span>
+        {modelError ? (
+          <MessageNotice message={t('apiAccess.health.modelLoadFailed', { error: modelError })} onDismiss={() => setModelError('')} />
+        ) : modelLoading ? (
+          <small>{t('apiAccess.health.loadingModels')}</small>
+        ) : null}
+      </div>
 
-        <div className="model-discovery-list provider-health-model-list">
-          {modelLoading && models.length === 0 ? (
-            <div className="model-discovery-message"><LoaderCircle size={20} className="spin" /><strong>{t('apiAccess.health.loadingModels')}</strong></div>
-          ) : visibleModels.length === 0 ? (
-            <div className="model-discovery-message"><strong>{models.length ? t('apiAccess.health.noMatch') : t('apiAccess.health.noModel')}</strong></div>
-          ) : visibleModels.map((model) => {
-            const state = results[model.name.toLowerCase()];
-            const checked = state && state.status !== 'checking' ? state : null;
-            const error = checked?.status === 'failed'
-              ? checked.errorCode === 'missing-direct-key'
-                ? t('apiAccess.health.missingDirectKey')
-                : checked.timedOut
-                  ? t('apiAccess.health.timeout')
-                  : checked.error || t('apiAccess.health.failed')
+      <div className="model-discovery-list provider-health-model-list">
+        {modelLoading && models.length === 0 ? (
+          <div className="model-discovery-message"><LoaderCircle size={20} className="spin" /><strong>{t('apiAccess.health.loadingModels')}</strong></div>
+        ) : visibleModels.length === 0 ? (
+          <div className="model-discovery-message"><strong>{models.length ? t('apiAccess.health.noMatch') : t('apiAccess.health.noModel')}</strong></div>
+        ) : visibleModels.map((model) => {
+          const state = results[model.name.toLowerCase()];
+          const checked = state && state.status !== 'checking' ? state : null;
+          const error = checked?.status === 'failed'
+            ? checked.errorCode === 'missing-direct-key'
+              ? t('apiAccess.health.missingDirectKey')
+              : checked.timedOut
+                ? t('apiAccess.health.timeout')
+                : checked.error || t('apiAccess.health.failed')
+            : '';
+          const latencyTitle = checked?.firstTokenLatencyMs !== undefined
+            ? t('apiAccess.health.firstTokenLatencyResult', { latency: checked.firstTokenLatencyMs })
+            : checked?.responseLatencyMs !== undefined
+              ? t('apiAccess.health.responseLatencyResult', { latency: checked.responseLatencyMs })
+              : error || undefined;
+          const latencyInline = checked?.firstTokenLatencyMs !== undefined
+            ? t('apiAccess.health.firstTokenInline', { latency: checked.firstTokenLatencyMs })
+            : checked?.responseLatencyMs !== undefined
+              ? t('apiAccess.health.responseInline', { latency: checked.responseLatencyMs })
               : '';
-            const latencyTitle = checked?.firstTokenLatencyMs !== undefined
-              ? t('apiAccess.health.firstTokenLatencyResult', { latency: checked.firstTokenLatencyMs })
-              : checked?.responseLatencyMs !== undefined
-                ? t('apiAccess.health.responseLatencyResult', { latency: checked.responseLatencyMs })
-                : error || undefined;
-            const latencyInline = checked?.firstTokenLatencyMs !== undefined
-              ? t('apiAccess.health.firstTokenInline', { latency: checked.firstTokenLatencyMs })
-              : checked?.responseLatencyMs !== undefined
-                ? t('apiAccess.health.responseInline', { latency: checked.responseLatencyMs })
-                : '';
-            return (
-              <div className={`provider-health-model-row ${checked?.status === 'failed' ? 'failed' : ''}`} key={model.name}>
-                <div className="provider-health-model-name">
-                  <strong title={model.name}>{model.name}</strong>
-                  {error
-                    ? <small className="error" title={error}>{error}</small>
-                    : model.alias || model.displayName
-                      ? <small title={model.alias || model.displayName}>{model.alias || model.displayName}</small>
-                      : null}
-                </div>
-                <span
-                  className={`state-pill provider-health-pill ${state?.status === 'checking' ? 'checking' : checked?.status === 'healthy' ? 'success' : checked?.status === 'failed' ? 'error' : ''}`}
-                  title={latencyTitle}
-                >
-                  {statusLabel(state)}
-                  {latencyInline ? ` · ${latencyInline}` : ''}
-                </span>
-                <button
-                  type="button"
-                  className="secondary-button compact-button provider-health-single-button"
-                  onClick={() => void checkOneModel(model)}
-                  disabled={modelLoading || checkingAll || state?.status === 'checking'}
-                >
-                  {checked ? t('apiAccess.health.retryOne') : t('apiAccess.health.checkOne')}
-                </button>
+          return (
+            <div className={`provider-health-model-row ${checked?.status === 'failed' ? 'failed' : ''}`} key={model.name}>
+              <div className="provider-health-model-name">
+                <strong title={model.name}>{model.name}</strong>
+                {error
+                  ? <small className="error" title={error}>{error}</small>
+                  : model.alias || model.displayName
+                    ? <small title={model.alias || model.displayName}>{model.alias || model.displayName}</small>
+                    : null}
               </div>
-            );
-          })}
-        </div>
+              <span
+                className={`state-pill provider-health-pill ${state?.status === 'checking' ? 'checking' : checked?.status === 'healthy' ? 'success' : checked?.status === 'failed' ? 'error' : ''}`}
+                title={latencyTitle}
+              >
+                {statusLabel(state)}
+                {latencyInline ? ` · ${latencyInline}` : ''}
+              </span>
+              <button
+                type="button"
+                className="secondary-button compact-button provider-health-single-button"
+                onClick={() => void checkOneModel(model)}
+                disabled={modelLoading || checkingAll || state?.status === 'checking'}
+              >
+                {checked ? t('apiAccess.health.retryOne') : t('apiAccess.health.checkOne')}
+              </button>
+            </div>
+          );
+        })}
+      </div>
 
-        <div className="model-discovery-actions provider-health-actions">
-          <button type="button" className="secondary-button compact-button" onClick={onClose}>{t('common.close')}</button>
-          <button
-            type="button"
-            className="primary-button compact-button"
-            onClick={() => void checkAllModels()}
-            disabled={modelLoading || models.length === 0 || hasCheckingModel}
-          >
-            {checkingAll
-              ? t('apiAccess.health.checkingProgress', { checked: checkedCount, total: models.length })
-              : t('apiAccess.health.checkAll')}
-          </button>
-        </div>
-      </section>
-    </div>
+      <div className="model-discovery-actions provider-health-actions">
+        <button type="button" className="secondary-button compact-button" onClick={onClose}>{t('common.close')}</button>
+        <button
+          type="button"
+          className="primary-button compact-button"
+          onClick={() => void checkAllModels()}
+          disabled={modelLoading || models.length === 0 || hasCheckingModel}
+        >
+          {checkingAll
+            ? t('apiAccess.health.checkingProgress', { checked: checkedCount, total: models.length })
+            : t('apiAccess.health.checkAll')}
+        </button>
+      </div>
+    </Dialog>
   );
 }
 
@@ -1965,7 +2000,7 @@ type ApiProviderDialogProps = {
   initialDraft: ProviderDraft;
   busy: boolean;
   onClose: () => void;
-  onSave: (draft: ProviderDraft, modelDiscoveryReady: boolean) => Promise<ProviderSaveResult>;
+  onSave: (draft: ProviderDraft) => Promise<ProviderSaveResult>;
 };
 
 export function ApiProviderDialog({
@@ -1988,10 +2023,6 @@ export function ApiProviderDialog({
   const [formError, setFormError] = useState('');
   const [discoveredModels, setDiscoveredModels] = useState<ModelOption[]>([]);
   const [modelDiscoveryOpen, setModelDiscoveryOpen] = useState(false);
-  const [modelDiscoveryReady, setModelDiscoveryReady] = useState(
-    () => activeCategory !== 'deepseek'
-      || Boolean(editingRow && initialDraft.models.some((model) => model.name.trim())),
-  );
   const [thinkingLevelInput, setThinkingLevelInput] = useState('');
   const [selectedModelNames, setSelectedModelNames] = useState<Set<string>>(
     () => new Set(mergeModelOptions(initialDraft.models).map((model) => model.name.toLowerCase())),
@@ -2005,14 +2036,6 @@ export function ApiProviderDialog({
     setModelLoading(false);
     setModelDiscoveryOpen(false);
   }, []);
-  const providerDialogRef = useDialogFocusTrap<HTMLFormElement>({
-    onEscape: busy ? undefined : onClose,
-    preventEscape: busy,
-  });
-  const modelDialogRef = useDialogFocusTrap<HTMLElement>({
-    active: modelDiscoveryOpen,
-    onEscape: closeModelDiscovery,
-  });
 
   useEffect(() => () => { discoveryRequestRef.current += 1; }, []);
 
@@ -2042,7 +2065,6 @@ export function ApiProviderDialog({
       discoveryRequestRef.current += 1;
       setModelLoading(false);
       setModelError('');
-      if (activeCategory === 'deepseek') setModelDiscoveryReady(false);
     }
     setDraft((current) => ({
       ...current,
@@ -2151,7 +2173,6 @@ export function ApiProviderDialog({
           ? reconcileModelSelection(models, draft.models, current, 'refresh')
           : modelSelectionForDiscovery(draft.models, models, draft.excludedModelsText ?? ''));
       discoverySelectionInitializedRef.current = true;
-      if (activeCategory === 'deepseek') setModelDiscoveryReady(true);
       if (!models.length) setModelError(t('apiAccess.error.noAvailableModels'));
     } catch (requestError) {
       if (requestId === discoveryRequestRef.current) setModelError(requestErrorMessage(requestError));
@@ -2209,7 +2230,7 @@ export function ApiProviderDialog({
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setFormError('');
-    const result = await onSave(draft, modelDiscoveryReady);
+    const result = await onSave(draft);
     if (result.saved) {
       onClose();
       return;
@@ -2226,7 +2247,6 @@ export function ApiProviderDialog({
 
   const hasModelExclusions = activeSection !== 'openai-compatibility'
     && Boolean(draft.excludedModelsText?.trim());
-  const deepSeekModelsStale = activeCategory === 'deepseek' && !modelDiscoveryReady;
   const modelSummaryTitle = configuredModels.length > 0
     ? t('apiAccess.models.selected', { count: configuredModels.length })
     : activeCategory === 'deepseek'
@@ -2237,9 +2257,7 @@ export function ApiProviderDialog({
         ? t('apiAccess.models.autoAll')
         : t('apiAccess.models.upstreamDefault');
   const modelSummaryDetail = configuredModels.length > 0
-    ? deepSeekModelsStale
-      ? t('apiAccess.models.staleHint')
-      : configuredModels.slice(0, 3).map((model) => model.name).join('、')
+    ? configuredModels.slice(0, 3).map((model) => model.name).join('、')
     : activeCategory === 'deepseek'
       ? t('apiAccess.models.selectionRequiredHint')
     : hasModelExclusions
@@ -2248,10 +2266,9 @@ export function ApiProviderDialog({
         ? t('apiAccess.models.autoHint')
         : t('apiAccess.models.allHint');
 
-  const content = (
+  return (
     <>
-      <div className="config-dialog-backdrop" onMouseDown={(event) => event.currentTarget === event.target && !busy && onClose()}>
-      <form ref={providerDialogRef} className="config-dialog management-dialog api-provider-dialog" role="dialog" aria-modal="true" aria-labelledby="api-provider-dialog-title" onSubmit={(event) => void submit(event)}>
+      <Dialog as="form" className="config-dialog management-dialog api-provider-dialog" labelledBy="api-provider-dialog-title" onSubmit={(event) => void submit(event)} onClose={onClose} closeDisabled={busy} dismissOnBackdrop>
         <div className="config-dialog-heading">
           <div>
             <Plus size={19} aria-hidden="true" />
@@ -2268,7 +2285,7 @@ export function ApiProviderDialog({
         <div className="provider-dialog-basic-grid">
         {definition.openAi ? <label><span>{t('apiAccess.entries.name')}</span><input autoFocus value={draft.name} maxLength={80} onChange={(event) => updateTextField('name', event.currentTarget.value)} placeholder={t('apiAccess.entries.namePlaceholder')} /></label> : null}
         <label><span>{t('apiAccess.field.remark')}</span><input value={draft.remark} maxLength={80} onChange={(event) => updateTextField('remark', event.currentTarget.value)} placeholder={t('apiAccess.remarkPlaceholder')} /></label>
-        <label><span>{t('apiAccess.field.baseUrl')}</span><input value={draft.baseUrl} onChange={(event) => updateTextField('baseUrl', event.currentTarget.value)} placeholder={activeSection === 'codex-api-key' || activeSection === 'openai-compatibility' ? t('apiAccess.baseRequiredPlaceholder') : t('apiAccess.baseOptionalPlaceholder')} /></label>
+        <label><span>{t('apiAccess.field.baseUrl')}</span><input value={draft.baseUrl} onChange={(event) => updateTextField('baseUrl', event.currentTarget.value)} placeholder={activeCategory === 'zai' ? t('apiAccess.zai.basePlaceholder') : activeSection === 'codex-api-key' || activeSection === 'openai-compatibility' ? t('apiAccess.baseRequiredPlaceholder') : t('apiAccess.baseOptionalPlaceholder')} /></label>
         </div>
         {!definition.openAi ? <div className="provider-dialog-secret">
           <label><span>{t('apiAccess.field.key')}</span><input autoFocus type={keyVisible ? 'text' : 'password'} autoComplete="off" spellCheck={false}
@@ -2279,22 +2296,21 @@ export function ApiProviderDialog({
         </div> : null}
         {draft.groupKeys ? <ProviderGroupKeysEditor keys={draft.groupKeys} disabled={busy} onChange={(groupKeys) => {
             discoveryRequestRef.current += 1; setModelLoading(false); setModelError(''); setFormError('');
-            if (activeCategory === 'deepseek') setModelDiscoveryReady(false);
             setDraft((current) => ({ ...current, groupKeys }));
           }} /> : null}
         </section>
-        <div className="model-config-card" ref={modelCardRef}>
+        <div className="surface-section surface-muted model-config-card" ref={modelCardRef}>
           <div className="model-config-heading">
             <div><span>{t('apiAccess.models.title')}</span><small>{t('apiAccess.models.description')}</small></div>
             <button type="button" className="secondary-button compact-button" onClick={openModelDiscovery} disabled={busy}>
               <RefreshCw size={15} />{t('apiAccess.models.fetch')}
             </button>
           </div>
-          {(draft.groupKeys?.length ?? 0) > 1 ? <label><span>{t('apiAccess.entries.discoveryKey')}</span><select value={draft.groupKeys!.some((key) => key.id === discoveryKeyId) ? discoveryKeyId : draft.groupKeys![0].id}
+          {(draft.groupKeys?.length ?? 0) > 1 ? <label><span>{t('apiAccess.entries.discoveryKey')}</span><Select value={draft.groupKeys!.some((key) => key.id === discoveryKeyId) ? discoveryKeyId : draft.groupKeys![0].id}
             onChange={(event) => { discoveryRequestRef.current += 1; setModelLoading(false); setDiscoveryKeyId(event.currentTarget.value); }}>
             {draft.groupKeys!.map((key, index) => <option value={key.id} key={key.id}>{t('apiAccess.entries.keyNumber', { number: index + 1 })} · {maskSecret(readString(key.value, 'api-key'))}</option>)}
-          </select></label> : null}
-          <div className={`model-config-summary ${configuredModels.length || hasModelExclusions ? 'has-models' : ''}`}>
+          </Select></label> : null}
+          <div className={`model-config-summary surface-dashed ${configuredModels.length || hasModelExclusions ? 'has-models' : ''}`}>
             <strong>{modelSummaryTitle}</strong>
             <span>{modelSummaryDetail}</span>
           </div>
@@ -2317,7 +2333,7 @@ export function ApiProviderDialog({
                 />
                 <button
                   type="button"
-                  className="icon-button quiet danger"
+                  className="icon-button quiet danger small-button"
                   onClick={() => removeModel(index)}
                   disabled={busy}
                   title={t('apiAccess.models.remove')}
@@ -2335,11 +2351,19 @@ export function ApiProviderDialog({
           </div>
           {modelError && !modelDiscoveryOpen ? <MessageNotice message={modelError} onDismiss={() => setModelError('')} /> : null}
         </div>
-        <details className="provider-advanced-settings">
+        <details className="provider-advanced-settings surface-sunken">
           <summary>{t('apiAccess.advanced')}</summary>
           <div className="provider-advanced-fields">
+            <AdvancedSettingsGroup title={providerText('modelRules')}>
+            <label><span>{t('apiAccess.field.prefix')}</span><input value={draft.prefix ?? ''} onChange={(event) => updateTextField('prefix', event.currentTarget.value)} placeholder={t('apiAccess.prefixPlaceholder')} /></label>
+            {activeSection !== 'openai-compatibility' ? (
+              <label className="multiline-field">
+                <span>{t('apiAccess.field.excludedModels')}</span>
+                <textarea value={draft.excludedModelsText ?? ''} onChange={(event) => updateTextField('excludedModelsText', event.currentTarget.value)} rows={3} placeholder={'model-old-*\nmodel-preview'} />
+              </label>
+            ) : null}
         {activeCategory === 'openai-compatibility' ? (
-          <div className="thinking-level-config">
+          <div className="thinking-level-config surface-sunken">
             <div className="thinking-level-heading">
               <strong>{t('apiAccess.thinking.title')}</strong>
               <span>{t('apiAccess.thinking.description')}</span>
@@ -2374,35 +2398,32 @@ export function ApiProviderDialog({
             ) : <small className="thinking-level-empty">{t('apiAccess.thinking.empty')}</small>}
             </div>
         ) : null}
+            </AdvancedSettingsGroup>
+            <AdvancedSettingsGroup title={providerText('connectionRouting')}>
             <label><span>{t('apiAccess.field.priority')}</span><input type="number" step="1" value={draft.priority} onChange={(event) => updateTextField('priority', event.currentTarget.value)} placeholder={t('common.optional')} /></label>
             {!definition.openAi ? <>
               <label><span>{t('apiAccess.field.proxyUrl')}</span><input value={draft.proxyUrl ?? ''} onChange={(event) => updateTextField('proxyUrl', event.currentTarget.value)} placeholder="socks5://127.0.0.1:1080" /></label>
               <label><span>{t('apiAccess.entries.weight')}</span><input type="number" step="1" max="1000000" value={draft.weight ?? ''} placeholder="1" onChange={(event) => { const weight = event.currentTarget.value; setDraft((current) => ({ ...current, weight })); }} /></label>
-              <ProviderKeyTemplateFields section={activeSection} value={draft.templateFields ?? {}} inherited={{}} onChange={(templateFields) => setDraft((current) => ({ ...current, templateFields }))} />
             </> : null}
+            </AdvancedSettingsGroup>
+            <AdvancedSettingsGroup title={providerText('requestBehavior')}>
+            {!definition.openAi ? <ProviderKeyTemplateFields section={activeSection} value={draft.templateFields ?? {}} inherited={{}} onChange={(templateFields) => setDraft((current) => ({ ...current, templateFields }))} /> : null}
             <ProviderGroupTemplateFields section={activeSection} includeErrors={definition.openAi} value={draft.templateFields ?? {}} onChange={(templateFields) => setDraft((current) => ({ ...current, templateFields }))} />
-            <label><span>{t('apiAccess.field.prefix')}</span><input value={draft.prefix ?? ''} onChange={(event) => updateTextField('prefix', event.currentTarget.value)} placeholder={t('apiAccess.prefixPlaceholder')} /></label>
             <label className="multiline-field">
               <span>{t('apiAccess.field.headers')}</span>
               <textarea value={draft.headersText ?? ''} onChange={(event) => updateTextField('headersText', event.currentTarget.value)} rows={3} placeholder={'X-Team: production\nAuthorization: Bearer ...'} />
               <small>{providerText('headersHint')}</small>
             </label>
-            {activeSection !== 'openai-compatibility' ? (
-              <label className="multiline-field">
-                <span>{t('apiAccess.field.excludedModels')}</span>
-                <textarea value={draft.excludedModelsText ?? ''} onChange={(event) => updateTextField('excludedModelsText', event.currentTarget.value)} rows={3} placeholder={'model-old-*\nmodel-preview'} />
-              </label>
-            ) : null}
             {!grouped && activeSection === 'claude-api-key' ? (
-              <div className="provider-cloak-settings">
+              <div className="provider-cloak-settings surface-dashed">
                 <label>
                   <span>{t('apiAccess.cloak.mode')}</span>
-                  <select value={draft.cloakMode ?? ''} onChange={(event) => updateTextField('cloakMode', event.currentTarget.value)}>
+                  <Select value={draft.cloakMode ?? ''} onChange={(event) => updateTextField('cloakMode', event.currentTarget.value)}>
                     <option value="">{t('apiAccess.cloak.default')}</option>
                     <option value="auto">{t('apiAccess.cloak.auto')}</option>
                     <option value="always">{t('apiAccess.cloak.always')}</option>
                     <option value="never">{t('apiAccess.cloak.never')}</option>
-                  </select>
+                  </Select>
                 </label>
                 <label className="multiline-field">
                   <span>{t('apiAccess.cloak.words')}</span>
@@ -2410,32 +2431,33 @@ export function ApiProviderDialog({
                 </label>
                 <div className="provider-advanced-toggle">
                   <div><strong>{t('apiAccess.cloak.strict')}</strong><span>{t('apiAccess.cloak.strictDescription')}</span></div>
-                  <label className="switch-control" title={t('apiAccess.cloak.enableStrict')}><input type="checkbox" checked={Boolean(draft.cloakStrictMode)} onChange={(event) => updateBooleanField('cloakStrictMode', event.currentTarget.checked)} /><span className="switch-track" /></label>
+                  <Switch title={t('apiAccess.cloak.enableStrict')} checked={Boolean(draft.cloakStrictMode)} onChange={(event) => updateBooleanField('cloakStrictMode', event.currentTarget.checked)} />
                 </div>
                 <div className="provider-advanced-toggle">
                   <div><strong>{t('apiAccess.cloak.cacheUser')}</strong><span>{t('apiAccess.cloak.cacheUserDescription')}</span></div>
-                  <select aria-label={t('apiAccess.cloak.cacheUser')} value={draft.cloakCacheUserId == null ? '' : String(draft.cloakCacheUserId)} onChange={(event) => updateOptionalBooleanField('cloakCacheUserId', event.currentTarget.value)}>
+                  <Select aria-label={t('apiAccess.cloak.cacheUser')} value={draft.cloakCacheUserId == null ? '' : String(draft.cloakCacheUserId)} onChange={(event) => updateOptionalBooleanField('cloakCacheUserId', event.currentTarget.value)}>
                     <option value="">{t('apiAccess.option.inherit')}</option>
                     <option value="true">{t('common.enabled')}</option>
                     <option value="false">{t('common.disabled')}</option>
-                  </select>
+                  </Select>
                 </div>
               </div>
             ) : null}
             {!grouped && (activeSection === 'codex-api-key' || activeSection === 'xai-api-key') ? (
               <div className="provider-advanced-toggle">
                 <div><strong>WebSocket</strong><span>{t('apiAccess.websocket.description')}</span></div>
-                <label className="switch-control" title={t('apiAccess.websocket.enable')}><input type="checkbox" checked={Boolean(draft.websockets)} onChange={(event) => updateBooleanField('websockets', event.currentTarget.checked)} /><span className="switch-track" /></label>
+                <Switch title={t('apiAccess.websocket.enable')} checked={Boolean(draft.websockets)} onChange={(event) => updateBooleanField('websockets', event.currentTarget.checked)} />
               </div>
             ) : null}
             <div className="provider-advanced-toggle">
               <div><strong>{t('apiAccess.cooling.title')}</strong><span>{t('apiAccess.cooling.description')}</span></div>
-              <select aria-label={t('apiAccess.cooling.title')} value={draft.disableCooling == null ? '' : String(draft.disableCooling)} onChange={(event) => updateOptionalBooleanField('disableCooling', event.currentTarget.value)}>
+              <Select aria-label={t('apiAccess.cooling.title')} value={draft.disableCooling == null ? '' : String(draft.disableCooling)} onChange={(event) => updateOptionalBooleanField('disableCooling', event.currentTarget.value)}>
                 <option value="">{t('apiAccess.option.inherit')}</option>
                 <option value="true">{t('apiAccess.cooling.disable')}</option>
                 <option value="false">{t('apiAccess.cooling.enable')}</option>
-              </select>
+              </Select>
             </div>
+            </AdvancedSettingsGroup>
           </div>
         </details>
         {formError ? (
@@ -2445,43 +2467,38 @@ export function ApiProviderDialog({
           <button type="button" className="secondary-button" onClick={onClose} disabled={busy}>{t('common.cancel')}</button>
           <button type="submit" className="primary-button" disabled={busy}>{busy ? t('common.saving') : t('common.save')}</button>
         </div>
-      </form>
-      </div>
+      </Dialog>
 
       {modelDiscoveryOpen ? (
-        <div className="model-discovery-backdrop" onMouseDown={(event) => event.currentTarget === event.target && closeModelDiscovery()}>
-          <section ref={modelDialogRef} className="model-discovery-dialog model-transfer-dialog" role="dialog" aria-modal="true" aria-labelledby="model-discovery-title">
-            <div className="model-discovery-header">
-              <div><h2 id="model-discovery-title">{t('apiAccess.modelDialog.title')}</h2><span>{providerLabel(definition)}</span></div>
-              <button type="button" className="icon-button quiet" onClick={closeModelDiscovery} title={t('common.close')} aria-label={t('common.close')}><X size={18} aria-hidden="true" /></button>
-            </div>
+        <Dialog className="model-discovery-dialog model-transfer-dialog" backdropClassName="model-discovery-backdrop" labelledBy="model-discovery-title" onClose={closeModelDiscovery} dismissOnBackdrop>
+          <div className="model-discovery-header">
+            <div><h2 id="model-discovery-title">{t('apiAccess.modelDialog.title')}</h2><span>{providerLabel(definition)}</span></div>
+            <button type="button" className="icon-button quiet" onClick={closeModelDiscovery} title={t('common.close')} aria-label={t('common.close')}><X size={18} aria-hidden="true" /></button>
+          </div>
 
-            <div className="model-transfer-summary">
-              <span role="status">{t('apiAccess.modelDialog.summary', { found: modelOptions.length, selected: selectedModels.length })}</span>
-              <button type="button" className="secondary-button compact-button" onClick={() => void discoverModels()} disabled={modelLoading}>
-                <RefreshCw size={15} className={modelLoading ? 'spin' : ''} />{t('common.refresh')}
-              </button>
-            </div>
+          <div className="model-transfer-summary">
+            <span role="status">{t('apiAccess.modelDialog.summary', { found: modelOptions.length, selected: selectedModels.length })}</span>
+            <button type="button" className="secondary-button compact-button" onClick={() => void discoverModels()} disabled={modelLoading}>
+              <RefreshCw size={15} className={modelLoading ? 'spin' : ''} />{t('common.refresh')}
+            </button>
+          </div>
 
-            {modelError ? (
-              <MessageNotice source="apiAccess.modelDialog.fetchFailed" message={modelError} onDismiss={() => setModelError('')} />
-            ) : null}
+          {modelError ? (
+            <MessageNotice source="apiAccess.modelDialog.fetchFailed" message={modelError} onDismiss={() => setModelError('')} />
+          ) : null}
 
-            <div className="model-transfer-panels">
-              <ModelSelectionPanel models={unselectedModels} selected={false} loading={modelLoading} onMove={moveModels} />
-              <ModelSelectionPanel models={selectedModels} selected loading={modelLoading} onMove={moveModels} />
-            </div>
+          <div className="model-transfer-panels">
+            <ModelSelectionPanel models={unselectedModels} selected={false} loading={modelLoading} onMove={moveModels} />
+            <ModelSelectionPanel models={selectedModels} selected loading={modelLoading} onMove={moveModels} />
+          </div>
 
-            <div className="model-discovery-actions model-transfer-actions">
-              {selectedModels.length === 0 ? <span>{t('apiAccess.modelDialog.chooseOne')}</span> : null}
-              <button type="button" className="secondary-button" onClick={closeModelDiscovery}>{t('common.cancel')}</button>
-              <button type="button" className="primary-button" onClick={applyModelSelection} disabled={modelLoading || selectedModels.length === 0}>{t('apiAccess.modelDialog.apply', { count: selectedModels.length })}</button>
-            </div>
-          </section>
-        </div>
+          <div className="model-discovery-actions model-transfer-actions">
+            {selectedModels.length === 0 ? <span>{t('apiAccess.modelDialog.chooseOne')}</span> : null}
+            <button type="button" className="secondary-button" onClick={closeModelDiscovery}>{t('common.cancel')}</button>
+            <button type="button" className="primary-button" onClick={applyModelSelection} disabled={modelLoading || selectedModels.length === 0}>{t('apiAccess.modelDialog.apply', { count: selectedModels.length })}</button>
+          </div>
+        </Dialog>
       ) : null}
     </>
   );
-  // Keep both dialogs outside the page's query container, which can contain fixed elements in WebKit.
-  return typeof document === 'undefined' ? content : createPortal(content, document.body);
 }

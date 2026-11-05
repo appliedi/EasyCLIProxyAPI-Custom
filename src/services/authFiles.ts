@@ -1,8 +1,21 @@
 import { isRecord, managementApi, readBoolean, readString } from './managementApi';
 import { getCurrentLocale, translate } from '../i18n';
+import { normalizeAuthFileTags } from './credentialTags';
+export { normalizeAuthFileTags } from './credentialTags';
 
 export type AuthFileRecord = Record<string, unknown>;
 export type AuthFileSnapshot = Map<string, string>;
+
+export const countAuthFileTags = (files: AuthFileRecord[]): Map<string, number> => {
+  const counts = new Map<string, number>();
+  for (const file of files) {
+    for (const tag of normalizeAuthFileTags(file.tags)) {
+      counts.set(tag, (counts.get(tag) ?? 0) + 1);
+    }
+  }
+  return counts;
+};
+
 
 export type AuthFileCooldownResetResponse = {
   status: 'ok';
@@ -37,6 +50,12 @@ export const resetAuthFileCooldown = async (
 export const authFileName = (file: AuthFileRecord) =>
   readString(file, 'name') || translate(getCurrentLocale(), 'authFiles.unnamed');
 
+/** Account identifiers that privacy mode masks wherever this credential is shown. */
+export const authFileIdentities = (file: AuthFileRecord): string[] =>
+  [...new Set(['email', 'account', 'account_id', 'project_id', 'projectId']
+    .map((key) => readString(file, key).trim())
+    .filter(Boolean))];
+
 /**
  * Present credentials in the same order used by routing: higher explicit
  * priority first, then a deterministic case-insensitive filename order.
@@ -70,7 +89,8 @@ export const setOAuthCredentialFileDisabled = async (
   if (!isOAuthCredentialFile(file)) {
     throw new Error(translate(getCurrentLocale(), 'authFiles.fileOnly'));
   }
-  await api.patch('/credentials/status', { name: readString(file, 'name'), disabled });
+  const authIndex = authFileCooldownResetIndex(file);
+  await api.patch('/credentials/status', { name: readString(file, 'name'), disabled, ...(authIndex ? { auth_index: authIndex } : {}) });
 };
 
 export const parseAuthFilePriority = (value: unknown): number | undefined => {
@@ -105,6 +125,42 @@ const authFileProvider = (file: AuthFileRecord) =>
 
 export const oauthModelProvidersFromAuthFiles = (files: AuthFileRecord[]): string[] =>
   [...new Set(files.filter(isOAuthCredentialFile).map(authFileProvider).filter(Boolean))].sort();
+
+export type OAuthAccountSummary = {
+  name: string;
+  label: string;
+  disabled: boolean;
+  tone?: 'warning' | 'error';
+  /** Account identifiers that privacy mode masks inside `label`. */
+  identities: string[];
+};
+
+/** Group saved OAuth credential files by provider so login cards can show existing accounts. */
+export const groupOAuthAccountsByProvider = (files: AuthFileRecord[]): Map<string, OAuthAccountSummary[]> => {
+  const grouped = new Map<string, OAuthAccountSummary[]>();
+  dedupeAuthFiles(files).filter(isOAuthCredentialFile).forEach((file) => {
+    const provider = authFileProvider(file);
+    if (!provider) return;
+    const accounts = grouped.get(provider) ?? [];
+    const status = readString(file, 'status').toLowerCase();
+    const hasCooldown = Array.isArray(file.cooldowns) && file.cooldowns.length > 0;
+    const tone: 'warning' | 'error' | undefined =
+      status === 'error' || readBoolean(file, 'unavailable')
+        ? 'error'
+        : hasCooldown
+          ? 'warning'
+          : undefined;
+    accounts.push({
+      name: readString(file, 'name'),
+      label: readString(file, 'email', 'account', 'label') || authFileName(file),
+      disabled: readBoolean(file, 'disabled'),
+      ...(tone ? { tone } : {}),
+      identities: authFileIdentities(file),
+    });
+    grouped.set(provider, accounts);
+  });
+  return grouped;
+};
 
 export const snapshotAuthFiles = (files: AuthFileRecord[]): AuthFileSnapshot => {
   const grouped = new Map<string, string[]>();
@@ -184,7 +240,7 @@ const mergeDuplicateAuthFiles = (entries: AuthFileRecord[]) => {
   sorted.slice(1).forEach((entry) => {
     Object.entries(entry).forEach(([key, value]) => {
       if (authFileSourceFields.has(key)) return;
-      if (key === 'cooldowns' && Object.prototype.hasOwnProperty.call(merged, key)) return;
+      if ((key === 'cooldowns' || key === 'tags') && Object.prototype.hasOwnProperty.call(merged, key)) return;
       if (!hasMeaningfulValue(merged[key]) && hasMeaningfulValue(value)) merged[key] = value;
     });
   });

@@ -1,3 +1,4 @@
+import { requestBucketRangeLabel } from '../services/authFileRequests';
 type RecordValue = Record<string, unknown>;
 const future = (hours: number) => new Date(Date.now() + hours * 3_600_000).toISOString();
 
@@ -6,6 +7,7 @@ export function createQuotaMockFiles(): RecordValue[] {
   const seeds: Array<[string, string, RecordValue]> = [
     ['antigravity', 'team-with-a-long-account-name', {}],
     ['kimi', 'personal', {}],
+    ['kimi-ai', 'international', { domain: 'ai' }],
     ['xai', 'subscription', { user_id: 'mock-xai-user' }],
     ['devin', 'team', {}],
     ['codex', 'disabled', { disabled: true }],
@@ -26,7 +28,7 @@ export function createQuotaMockFiles(): RecordValue[] {
     note: 'Fictional browser preview account. Changes stay in memory until reload.',
     success: label === 'idle' ? 0 : 250 + index * 97, failed: label === 'idle' ? 0 : index,
     recent_requests: label === 'idle' ? [] : Array.from({ length: 20 }, (_, bucket) => ({
-      time: new Date(Date.now() - (19 - bucket) * 600_000).toISOString(),
+      time: requestBucketRangeLabel(new Date(Date.now() - (19 - bucket) * 600_000)),
       success: bucket % 4 + 1, failed: bucket % 7 === 0 ? 1 : 0,
     })),
     ...extra,
@@ -79,6 +81,8 @@ export function createQuotaMock() {
     if (path.endsWith('/api/oauth/usage')) return success({
       five_hour: { utilization: used ? 0 : 24, resets_at: future(3) },
       seven_day: { utilization: used ? 0 : 41, resets_at: future(72) },
+      iguana_necktie: { limit_dollars: '100.00', used_dollars: '23.50', remaining_dollars: '76.50', utilization: 23.5, resets_at: '2030-12-01T00:00:00Z' },
+      limits: [{ kind: 'weekly_scoped', percent: 32, is_active: true, scope: { model: { display_name: 'Fable 5' } }, resets_at: future(72) }],
       cedar_ember: { eligible: true, at_limit: false, next_grant_id: remaining ? 'mock-grant' : null,
         grants: [{ id: 'mock-grant', label: 'Preview quota resets', resets_total: 2, resets_left: remaining, ends_at: future(72), clears: ['five_hour', 'seven_day'], usable_now: remaining > 0, use_requires_limit: false }] },
     });
@@ -90,8 +94,15 @@ export function createQuotaMock() {
         resetTime: future(bucket ? 72 : 3),
       })),
     })) });
-    if (url.hostname === 'api.kimi.com' && path.endsWith('/usages')) return success({
+    if (['api.kimi.com', 'api.kimi.ai'].includes(url.hostname) && path.endsWith('/me')) return success({
+      user_id: `mock-${auth}`, user_level_name: 'Kimi Code Pro',
+    });
+    if (['api.kimi.com', 'api.kimi.ai'].includes(url.hostname) && path.endsWith('/usages')) return success({
       usage: { used: 64, limit: 100 },
+      usages: {
+        limit_month_total: { used_ratio: 0.2529, reset_time: future(24 * 20) },
+        limit_month_code: { used_ratio: 0.4, reset_time: future(24 * 15) },
+      },
       limits: [{ window: { duration: 5, timeUnit: 'TIME_UNIT_HOUR' }, detail: { limit: 100, remaining: 80, reset_in: 3600 } }],
     });
     if (path.endsWith('/getuserstatus')) return success({ userStatus: { planStatus: {

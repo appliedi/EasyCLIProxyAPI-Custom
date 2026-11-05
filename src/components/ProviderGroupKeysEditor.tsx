@@ -38,7 +38,7 @@ export function ProviderGroupKeysEditor({ keys, disabled, onChange }: Props) {
     {keys.map((draft, index) => {
       const key = draft.value;
       const isVisible = Boolean(visible[draft.id]);
-      return <fieldset className="provider-group-key" key={draft.id} disabled={disabled}>
+      return <fieldset className="provider-group-key surface-sunken" key={draft.id} disabled={disabled}>
         <legend>{t('apiAccess.entries.keyNumber', { number: index + 1 })}</legend>
         <div className="provider-group-key-main">
           <label><span>{t('apiAccess.field.key')}</span>
@@ -51,7 +51,7 @@ export function ProviderGroupKeysEditor({ keys, disabled, onChange }: Props) {
             onClick={() => setVisible((state) => ({ ...state, [draft.id]: !state[draft.id] }))}>
             {t(isVisible ? 'apiAccess.entries.hideKey' : 'apiAccess.entries.showKey')}
           </button>
-          <button type="button" className="icon-button quiet danger"
+          <button type="button" className="icon-button quiet danger small-button"
             aria-label={t('apiAccess.entries.removeKey', { number: index + 1 })}
             onClick={() => onChange(keys.filter((item) => item.id !== draft.id))}>
             <Trash2 size={15} />
