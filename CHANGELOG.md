@@ -6,11 +6,11 @@ Every functional change must update **Unreleased** in the same commit or pull re
 
 ## Unreleased
 
-- Reserve stable release tags atomically before publication, recheck their commit after any competing creation, and require an existing verified tag when creating the release. Failed reservations stop publication.
-
 ## 0.4.3 — 2026-11-05
 
 ### Review follow-up
+
+- Reserve stable release tags atomically before publication, recheck their commit after any competing creation, and require an existing verified tag when creating the release. Failed reservations stop publication.
 
 - Reject stable release tags whose peeled commit differs from the source being built. Publishing checks out the same source reference as the build jobs and uses the verified checkout commit when creating a tag; an existing stable release is still immutable.
 
@@ -26,7 +26,7 @@ Every functional change must update **Unreleased** in the same commit or pull re
 - Fixed all inherited frontend failures: shared controls, themed CSS layers/tokens, notices/empty states, translated ZCode/MCP UI, regenerated schema line endings, and missing browser mock IPC contracts. Added MCP/ZCode mock round-trip regressions; retained narrow documented exceptions for inline live regions and row controls.
 - Preserve explicit ZCode context windows and disabled/empty reasoning overrides instead of replacing them with catalog defaults. Fixed Windows regression fixtures by closing SQLite handles before cleanup, keeping PowerShell arguments out of executable source, and comparing paths structurally. Excluded generated build assets from the settings browser watcher to avoid Windows file-lock failures during packaging.
 - Replaced shell-dependent release-version resolution with a tested portable Node resolver; validate unsafe tags and retain immutable stable publication.
-- Full frontend suite: **1,296 passed, 32 skipped, zero failed**. Full Windows Rust suite: **1,157 passed, 13 ignored, zero failed**. The isolated 8.0.52 core API/routing tests pass. Production builds, browser regressions, and installer preservation checks are recorded in the [validation report](docs/upstream-0.3.76-validation.md).
+- Full frontend suite: **1,306 passed, 32 skipped, zero failed**. Full Windows Rust suite: **1,158 passed, 13 ignored, zero failed**. The isolated 8.0.52 core API/routing tests pass. Production builds, browser regressions, and installer preservation checks are recorded in the [validation report](docs/upstream-0.3.76-validation.md).
 
 ### Upstream integration — v0.3.76
 
