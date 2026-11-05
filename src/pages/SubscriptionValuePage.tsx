@@ -1,3 +1,4 @@
+import { Notice } from '../components/Notice';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '../services/platform';
 import { RefreshCw, SlidersHorizontal } from 'lucide-react';
@@ -91,16 +92,16 @@ export function SubscriptionValuePage() {
       <div className="sv-actions"><button className="secondary-button compact-button" type="button" onClick={() => void refresh()} disabled={loading || editing || saving}><RefreshCw size={15} />{t('subscriptionValue.refresh')}</button>
         <button className="secondary-button compact-button" type="button" onClick={startEditing} disabled={!accounts.length || loading || editing || saving} aria-expanded={editing} aria-controls="sv-fees"><SlidersHorizontal size={15} />{t('subscriptionValue.fees')}</button></div>
     </div>
-    {error && <div className="sv-error" role="alert">{t('subscriptionValue.failed', { error })}</div>}
+    {error && <Notice className="sv-error" tone="error" variant="text">{t('subscriptionValue.failed', { error })}</Notice>}
     {offline && <p className="sv-notice">{t('subscriptionValue.offline')}</p>}
-    {saved && <p className="sv-notice" role="status">{t('subscriptionValue.saved')}</p>}
+    {saved && <Notice className="sv-notice" tone="info" variant="text">{t('subscriptionValue.saved')}</Notice>}
     {editing && <form id="sv-fees" className="panel sv-fee-editor" onSubmit={event => { event.preventDefault(); void saveFees(); }}>
       <h2>{t('subscriptionValue.fees')}</h2><p>{t('subscriptionValue.feeHint', { month })}</p>
       <div className="sv-fee-fields">{accounts.map(a => <label key={a.id}>{name(a)}<input type="text" inputMode="decimal" value={draft[a.id] ?? ''} placeholder={t('subscriptionValue.notSet')} disabled={saving} onChange={event => setDraft(old => ({ ...old, [a.id]: event.target.value }))} aria-label={`${name(a)} · USD`} /></label>)}</div>
-      {feeError && <p className="sv-error" role="alert">{feeError}</p>}
+      {feeError && <Notice className="sv-error" tone="error" variant="text">{feeError}</Notice>}
       <div className="sv-actions"><button type="submit" className="primary-button compact-button" disabled={saving}>{t(saving ? 'subscriptionValue.saving' : 'subscriptionValue.save')}</button><button type="button" className="secondary-button compact-button" disabled={saving} onClick={() => setEditing(false)}>{t('subscriptionValue.cancel')}</button></div>
     </form>}
-    {loading && !report && <p role="status">{t('subscriptionValue.loading')}</p>}
+    {loading && !report && <Notice tone="info" variant="text">{t('subscriptionValue.loading')}</Notice>}
     {report && <>
       <div className="sv-period-note">{t(month === currentMonth() ? 'subscriptionValue.toDate' : 'subscriptionValue.closedMonth')}</div>
       <div className="sv-stats" aria-live="polite">

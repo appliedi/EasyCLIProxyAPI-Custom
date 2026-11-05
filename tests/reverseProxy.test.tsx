@@ -66,7 +66,9 @@ describe('reverse proxy contract and settings card', () => {
       'reverseProxyStatusListening',
       'reverseProxyStatusTarget',
       'reverseProxyStatusRequests',
-      'reverseProxySecurityWarning',
+      'reverseProxyHardeningOk',
+      'reverseProxyHardeningPending',
+      'reverseProxyHardeningFailed',
       'reverseProxyBackendNotReady',
     ];
     for (const key of requiredKeys) {
@@ -77,17 +79,20 @@ describe('reverse proxy contract and settings card', () => {
     }
   });
 
-  it('contains the security warning mentioning 127.0.0.1, trusted-proxies, and allow-remote: false', () => {
-    const warning = settingsMessages.reverseProxySecurityWarning;
+  it('describes automatic core hardening and local-only management access', () => {
+    const warning = settingsMessages.reverseProxyEnableHint;
+    expect(warning.zh).toContain('只允许本机访问');
+    expect(warning.en).toContain('local-only');
+    expect(warning.ja).toContain('ローカルからのみ');
     expect(warning.zh).toContain('127.0.0.1');
     expect(warning.zh).toContain('trusted-proxies');
-    expect(warning.zh).toContain('allow-remote: false');
+
     expect(warning.en).toContain('127.0.0.1');
     expect(warning.en).toContain('trusted-proxies');
-    expect(warning.en).toContain('allow-remote: false');
+
     expect(warning.ja).toContain('127.0.0.1');
     expect(warning.ja).toContain('trusted-proxies');
-    expect(warning.ja).toContain('allow-remote: false');
+
   });
 
   it('places config-native-reverse-proxy after config-native-tls with expected classes', () => {

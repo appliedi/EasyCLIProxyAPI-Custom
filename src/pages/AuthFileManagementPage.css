@@ -36,7 +36,7 @@
   max-width: 100%;
   padding: 6px 10px;
   border: 1px solid var(--border-color);
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: var(--bg-secondary);
   color: var(--text-primary);
   font: inherit;
@@ -51,7 +51,7 @@
 .credential-tag-manager .credential-tag-count {
   flex-shrink: 0;
   padding: 1px 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: var(--bg-card);
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
@@ -70,7 +70,7 @@
 .credential-tag-manager-label { justify-self: start; min-width: 0; text-align: start; }
 .credential-tag-manager-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .credential-tag-manager-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px; min-width: 0; }
-.config-dialog.credential-tag-manager .credential-tag-manager-actions > button { flex: 0 0 auto; width: auto; padding: 6px 8px; font-size: var(--font-size-caption); }
+.config-dialog.credential-tag-manager .credential-tag-manager-actions > button { flex: 0 0 auto; width: auto; padding: 6px 8px; }
 .credential-tag-manager-row:has(.credential-tag-rename) { grid-template-columns: minmax(0, 1fr); }
 .credential-tag-manager-row:has(.credential-tag-rename) .credential-tag-manager-actions { justify-content: flex-start; }
 .credential-tag-rename { display: flex; flex: 1 1 100%; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }

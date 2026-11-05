@@ -46,13 +46,18 @@ test('service IPC commands are registered and have browser mock contracts', () =
     const namespaces = new Set<string>();
     for (const node of module.statements) {
       if (!ts.isImportDeclaration(node) || !ts.isStringLiteral(node.moduleSpecifier)
-        || node.moduleSpecifier.text !== '@tauri-apps/api/core') continue;
+        ) continue;
+      const agentWrapper = node.moduleSpecifier.text === './agents';
+      if (!agentWrapper && node.moduleSpecifier.text !== '@tauri-apps/api/core') continue;
       const bindings = node.importClause?.namedBindings;
       if (bindings && ts.isNamespaceImport(bindings)) namespaces.add(bindings.name.text);
       if (bindings && ts.isNamedImports(bindings)) for (const binding of bindings.elements) {
-        if ((binding.propertyName ?? binding.name).text === 'invoke') invokers.add(binding.name.text);
+        if ((binding.propertyName ?? binding.name).text === (agentWrapper ? 'invokeAgentCommand' : 'invoke')) invokers.add(binding.name.text);
       }
     }
+    // The agent boundary adds configDirectories once, and its literal callers
+    // (including imported aliases) still need backend and browser mock coverage.
+    if (relative(root, path).replaceAll('\\', '/') === 'src/services/agents.ts') invokers.add('invoke');
     walk(module, node => {
       if (!ts.isCallExpression(node)) return;
       const expression = node.expression;
@@ -62,7 +67,15 @@ test('service IPC commands are registered and have browser mock contracts', () =
       if (!invokes) return;
       const command = node.arguments[0];
       if (command && ts.isStringLiteral(command)) commands.add(command.text);
-      else dynamic.push(relative(root, path));
+      else {
+        const wrapper = node.parent;
+        const declaration = wrapper && ts.isArrowFunction(wrapper) ? wrapper.parent : undefined;
+        const forwardsAgentCommand = relative(root, path).replaceAll('\\', '/') === 'src/services/agents.ts'
+          && ts.isIdentifier(expression) && expression.text === 'tauriInvoke'
+          && command && ts.isIdentifier(command) && command.text === 'command'
+          && declaration && ts.isVariableDeclaration(declaration) && declaration.name.getText() === 'invokeAgentCommand';
+        if (!forwardsAgentCommand) dynamic.push(relative(root, path));
+      }
     });
   }
   const backend = readFileSync(join(root, 'src-tauri/src/main.rs'), 'utf8');

@@ -1456,6 +1456,7 @@ mod tests {
         assert_eq!(pi.totals.input_tokens, 105);
         assert_eq!(pi.totals.output_tokens, 11);
         assert_eq!(pi.totals.samples, 2);
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1482,6 +1483,7 @@ mod tests {
         assert_eq!(pi.status, "archived");
         assert!(!pi.archived_at.is_empty());
         assert_eq!(pi.totals.total_tokens, 44);
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1510,6 +1512,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(remaining, 0);
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1546,6 +1549,7 @@ mod tests {
             report(&connection, &filtered).unwrap().totals.total_tokens,
             0
         );
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1571,6 +1575,7 @@ mod tests {
             .hourly
             .iter()
             .any(|row| row.weekday == weekday && row.hour == 9 && row.total_tokens == 15));
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1620,6 +1625,7 @@ mod tests {
         let filtered = report(&connection, &other).unwrap();
         assert!(filtered.calendar.is_empty());
         assert!(filtered.hourly.is_empty());
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1651,6 +1657,7 @@ mod tests {
             .unwrap();
         assert!(pi["totals"].get("costUSD").is_some());
         assert!(pi["models"][0].get("costUSD").is_some());
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1684,6 +1691,7 @@ mod tests {
             .find(|source| source.source == "pi")
             .unwrap();
         assert_eq!(pi.totals.days, 2);
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1712,6 +1720,7 @@ mod tests {
             .iter()
             .flat_map(|source| &source.series)
             .any(|row| row.bucket.contains('|')));
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1736,6 +1745,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(present, 1);
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1755,6 +1765,7 @@ mod tests {
         let storage = storage(&connection, &root.join("agent_usage.db")).unwrap();
         assert_eq!(storage.daily_rows, 0);
         assert_eq!(storage.file_rows, 0);
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1817,6 +1828,7 @@ mod tests {
                 ("qwen3.8-27b".to_string(), 5)
             ]
         );
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1838,6 +1850,7 @@ mod tests {
                 .count(),
             5
         );
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1871,6 +1884,7 @@ mod tests {
             report_hours.timeline.len() as u32,
             6 * 24 + Local::now().hour() + 1
         );
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1904,6 +1918,7 @@ mod tests {
         future.start = day_offset(3);
         future.end = day_offset(-5);
         assert_eq!(report(&connection, &future).unwrap().timeline.len(), 4);
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1928,6 +1943,7 @@ mod tests {
         assert_eq!(claude.totals.total_tokens, 40);
         assert!(claude.models.is_empty());
         assert!(report_all_previous_is_none(&connection));
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1972,6 +1988,7 @@ mod tests {
                 .total_tokens,
             before
         );
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2022,6 +2039,7 @@ mod tests {
             32
         );
         drop(writer);
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2117,6 +2135,7 @@ mod tests {
         assert_eq!(copilot_after.error, "");
         assert_eq!(copilot_after.totals.total_tokens, 150);
 
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 }

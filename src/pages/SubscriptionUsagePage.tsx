@@ -1,3 +1,4 @@
+import { EmptyState } from '../components/EmptyState';
 import { Select } from '../components/Select';
 import { ResetCreditExpiries } from '../components/ResetCreditExpiries';
 import { MessageNotice } from '../appNotice';
@@ -190,7 +191,7 @@ export function SubscriptionUsagePage() {
       {loading ? (
         <div className="management-loading"><LoaderCircle size={20} className="spin" />{t('quota.loadingFiles')}</div>
       ) : grouped.length === 0 ? (
-        <div className="management-empty"><AlertCircle size={24} /><strong>{t('quota.empty.title')}</strong><span>{t('quota.empty.description')}</span></div>
+        <EmptyState className="management-empty" icon={<AlertCircle size={24} />} title={t('quota.empty.title')}>{t('quota.empty.description')}</EmptyState>
       ) : (
         <>
         <div className="quota-toolbar">
@@ -207,7 +208,7 @@ export function SubscriptionUsagePage() {
         <p className="quota-summary-hint">{t('quota.summaryHint')}</p>
         {visibleGroups.length ? <div className="quota-overview">
           {visibleGroups.map(([provider, items]) => <ProviderQuotaSummary key={provider} provider={provider} items={items} />)}
-        </div> : <div className="management-empty">{t('quota.noProviderCredentials')}</div>}
+        </div> : <EmptyState className="management-empty">{t('quota.noProviderCredentials')}</EmptyState>}
         <div className="quota-account-toolbar">
           <input type="search" className="quota-account-search" aria-label={t('quota.searchAccounts')} placeholder={t('quota.searchAccounts')} value={search} onChange={(event) => setSearch(event.target.value)} />
           <label className="quota-layout-control">{t('quota.sort')}<Select aria-label={t('quota.sort')} value={sort} onChange={(event) => setSort(event.target.value as QuotaSort)}>
@@ -220,7 +221,7 @@ export function SubscriptionUsagePage() {
           </button>
         </div>
         {search.trim() ? <p className="quota-summary-hint" role="status">{t('quota.searchScope', { count: visibleFiles.length })}</p> : null}
-        {visibleGroups.length > 0 && !accountGroups.length ? <div className="management-empty">{t('quota.noMatchingAccounts')}<button type="button" className="secondary-button compact-button" onClick={() => setSearch('')}>{t('quota.clearSearch')}</button></div> : null}
+        {visibleGroups.length > 0 && !accountGroups.length ? <EmptyState className="management-empty">{t('quota.noMatchingAccounts')}<button type="button" className="secondary-button compact-button" onClick={() => setSearch('')}>{t('quota.clearSearch')}</button></EmptyState> : null}
         <div className={`quota-group-list quota-layout-${layout}`}>
           {accountGroups.map(([provider, items]) => (
             <section className="quota-provider-group" key={provider}>

@@ -12,7 +12,7 @@ function parseCss(relPath: string) {
 function getDeclarations(root: postcss.Root, selector: string): Record<string, string> {
   const decls: Record<string, string> = {};
   root.walkRules((rule) => {
-    if (rule.selector === selector) {
+    if (rule.selector.replace(/\s+/g, ' ') === selector.replace(/\s+/g, ' ')) {
       rule.walkDecls((decl) => {
         decls[decl.prop] = decl.value;
       });

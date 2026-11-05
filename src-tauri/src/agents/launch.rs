@@ -2505,10 +2505,13 @@ class GuiHelper {
         ));
         fs::create_dir_all(&directory).unwrap();
         #[cfg(windows)]
-        let (executable, arguments) = (windows_powershell_executable(), vec![
-            "-NoLogo".to_string(), "-NoProfile".to_string(), "-NonInteractive".to_string(), "-Command".to_string(),
-            "[IO.File]::AppendAllText((Join-Path (Get-Location).Path 'launches.txt'), ((Get-Location).Path + [Environment]::NewLine)); Start-Sleep -Seconds 60".to_string(),
-        ]);
+        let (executable, arguments) = {
+            // Trailing fixture arguments must remain data rather than being parsed
+            // as part of PowerShell's -Command source.
+            let script = directory.join("record-launch.ps1");
+            fs::write(&script, "[IO.File]::AppendAllText((Join-Path (Get-Location).Path 'launches.txt'), ((Get-Location).Path + [Environment]::NewLine)); Start-Sleep -Seconds 60").unwrap();
+            (script, Vec::new())
+        };
         #[cfg(unix)]
         let (executable, arguments) = (
             PathBuf::from("/bin/sh"),

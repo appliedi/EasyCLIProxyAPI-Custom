@@ -1,6 +1,6 @@
 # Windows Setup.exe
 
-Custom builds starting with 0.4.2 can be distributed in two formats:
+Public Custom releases starting with 0.4.3 can be distributed in two formats:
 
 - `EasyCLIProxyAPI-v<version>-Windows-<arch>-setup.exe`: the standard installer.
 - `EasyCLIProxyAPI-v<version>-Windows-<arch>.zip`: the existing portable package and in-app update payload.

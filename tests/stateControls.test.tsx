@@ -21,6 +21,9 @@ const emptyExceptions: Record<string, string> = {
   'thinking-level-empty': 'Inline muted text inside a field.',
   'usage-analysis-muted': 'Inline muted text inside an analysis card.',
   'usage-activity-empty': 'Overlay positioned on the chart plot area.',
+  'empty': 'Decorative aria-hidden sparkline placeholder; contains no empty-state message.',
+  'routing-empty': 'In-flow tier-ladder hint between entry and exit nodes in the drag target.',
+  'sv-empty': 'Compact paragraph within the subscription report panel.',
   'usage-trend-tooltip-empty': 'Chart tooltip content.',
 };
 const noticeHooks = [
@@ -34,15 +37,26 @@ const removed = [
   'easy-mode-hint', 'easy-mode-alert-icon', 'core-locked-panel', 'thinking-alias-feedback',
 ];
 const roleExceptions: Record<string, [number, number, string]> = {
+  'components/AuthFileBatchDialog.tsx': [0, 2, 'Selection and tag-search hints inside the batch form.'],
+  'components/CredentialTagManager.tsx': [0, 2, 'Tag list empty/search hint and batch-operation result count.'],
+  'components/DataStoragePanel.tsx': [0, 1, 'Pending-operation region contains destination and restart/cancel controls.'],
+  'components/routing/RoutingPanel.tsx': [0, 1, 'Compact live/paused badge in the routing diagram heading.'],
+  'components/WindowFrame.tsx': [1, 0, 'Compact native titlebar error indicator.'],
+  'pages/McpSkillsPage.tsx': [5, 0, 'Two retry strips embedded in the lists and three inline row-error indicators; preserve per-row alert ownership.'],
+  'pages/routing/PolicyStrip.tsx': [1, 0, 'TTL field validation linked by aria-describedby.'],
+  'pages/routing/RoutingPage.tsx': [0, 1, 'Reserved save/dirty/loading status slot beside route editor actions.'],
+  'pages/SubscriptionUsagePage.tsx': [0, 1, 'Filtered-account result count.'],
+  'pages/ZCodeSubagentConfigDialog.tsx': [1, 1, 'Roles passed to EmptyState for load failure and loading, matching Codex dialog.'],
+
   'components/AppReleaseNotes.tsx': [0, 1, 'Release notes empty message.'],
   'components/AuthFileQuotaPanel.tsx': [0, 2, 'Dense credential quota cell loading and error lines.'],
-  'components/AuthFileSettingsDialog.tsx': [0, 1, 'Catalog loading text.'],
+  'components/AuthFileSettingsDialog.tsx': [0, 2, 'Catalog loading text and inline tag-search result hint.'],
   'components/StructuredConfigEditor.tsx': [1, 0, 'Field-level key error.'],
   'components/TemplateConfigSection.tsx': [1, 2, 'Field-level validation error, loading text and save status.'],
   'components/claude-code/ClaudeCodeModelInputs.tsx': [0, 1, 'Field hint.'],
   'pages/AgentClientList.tsx': [0, 2, 'Result count and selection summary.'],
   'pages/AgentConfigBackupDialog.tsx': [0, 1, 'Loading text.'],
-  'pages/AgentsPage.tsx': [0, 4, 'Model hints.'],
+  'pages/AgentsPage.tsx': [1, 4, 'Model hints and field validation linked by aria-describedby.'],
   'pages/ApiAccessPage.tsx': [0, 1, 'Model summary count.'],
   'pages/CodexSubagentConfigDialog.tsx': [1, 1, 'Role passed to EmptyState for the load error and loading placeholder.'],
   'pages/ConfigPanel.tsx': [2, 6, 'Reserved status slots, dirty badges, search count and disabled text.'],

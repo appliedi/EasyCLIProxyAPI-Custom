@@ -21,7 +21,7 @@ const scalarFields = '.template-config-field:is([data-field-type="string"], [dat
         plugins: [react()],
         optimizeDeps: { entries: ['index.html'] },
         logLevel: 'error',
-        server: { host: '127.0.0.1', port: 0, strictPort: false },
+        server: { host: '127.0.0.1', port: 0, strictPort: false, watch: { ignored: ['**/.codex/**', '**/src-tauri/**', '**/cpa-core/**'] } },
       });
       await server.listen();
       base = `http://127.0.0.1:${server.httpServer.address().port}/`;

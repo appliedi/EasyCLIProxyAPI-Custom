@@ -2,6 +2,13 @@ import { getCurrentLocale, type AppLocale } from './index';
 import { createTraditionalMessages } from './traditional';
 
 const messages = {
+  serverFilter: ["服务器筛选", "Server filter", "サーバーフィルター"],
+  keyLabel: ["键", "Key", "キー"],
+  valueLabel: ["值", "Value", "値"],
+  headerLabel: ["请求头", "Header", "ヘッダー"],
+  skillSource: ["技能源", "Skill source", "スキルの提供元"],
+  remove: ["移除", "Remove", "削除"],
+
   title: ['MCP 与技能', 'MCP & Skills', 'MCP & スキル'],
   description: [
     '管理 MCP 服务器与技能扩展，为智能体提供工具和上下文能力。',

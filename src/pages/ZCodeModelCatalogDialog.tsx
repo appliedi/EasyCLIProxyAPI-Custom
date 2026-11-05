@@ -134,9 +134,9 @@ export function ZCodeModelCatalogDialog({
         <div>
           <h2 id="zcode-catalog-title">
             <SlidersHorizontal size={18} style={{ display: "inline", verticalAlign: "middle", marginRight: 8 }} />
-            {t("agents.zcode.catalog.title") || "ZCode 模型列表与规则设置"}
+            {t("agents.zcode.catalog.title")}
           </h2>
-          <p>{t("agents.zcode.catalog.subtitle") || "管理注入到 ZCode 的可用模型、显示与隐藏、上下文窗口及参数规则。"}</p>
+          <p>{t("agents.zcode.catalog.subtitle")}</p>
         </div>
         <button type="button" className="icon-button quiet" onClick={onClose} disabled={saving} aria-label={t("common.close")}>
           <X size={18} aria-hidden="true" />
@@ -150,10 +150,10 @@ export function ZCodeModelCatalogDialog({
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder={t("agents.catalog.search") || "搜索模型 ID"}
+              placeholder={t("agents.catalog.search")}
             />
           </div>
-          <div className="codex-catalog-models" role="listbox">
+          <div className="codex-catalog-models" role="group" aria-label={t("agents.zcode.catalog.title")}>
             {loading ? (
               <div className="codex-catalog-state">
                 <LoaderCircle size={18} className="spin" />
@@ -171,16 +171,16 @@ export function ZCodeModelCatalogDialog({
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", gap: "8px", marginTop: "2px" }}>
                     <div style={{ display: "flex", gap: "6px", fontSize: "11px", opacity: 0.8, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {model.configuration.contextWindow ? (
-                        <span>{Math.round(model.configuration.contextWindow / 1024)}K</span>
+                        <span>{`${Math.round(model.configuration.contextWindow / 1024)}K`}</span>
                       ) : null}
-                      {model.configuration.supportsImage ? <span>· 视觉</span> : null}
+                      {model.configuration.supportsImage ? <span>{t("agents.zcode.ui.vision")}</span> : null}
                     </div>
                     <div style={{ flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
                       <Switch
                         size="sm"
                         checked={model.enabled}
                         onChange={(e) => toggleModelEnabled(model.id, e?.target?.checked ?? !model.enabled)}
-                        title={model.enabled ? "在 ZCode 中启用" : "在 ZCode 中隐藏"}
+                        title={t(model.enabled ? "agents.zcode.ui.enabled" : "agents.zcode.ui.hidden")}
                       />
                     </div>
                   </div>
@@ -202,19 +202,19 @@ export function ZCodeModelCatalogDialog({
                 <div>
                   <h3>{selectedModel.id}</h3>
                   <span className="customized">
-                    已由 CPA 代管下发规格（ZCode 软件端显示为手动自定义配置，关闭其内部默认配置）
+                    {t("agents.zcode.ui.managed")}
                   </span>
                 </div>
               </div>
 
               <label>
-                <span>上下文窗口 (Tokens)</span>
+                <span>{t("agents.catalog.context")}</span>
                 <input
                   type="number"
                   min={1}
                   step={1024}
                   value={selectedModel.configuration.contextWindow ?? ""}
-                  placeholder="例如 1048576"
+                  placeholder={t("agents.zcode.ui.contextExample")}
                   onChange={(e) => {
                     const val = e.target.value;
                     updateSelectedConfig((prev) => ({
@@ -226,13 +226,13 @@ export function ZCodeModelCatalogDialog({
               </label>
 
               <label>
-                <span>最大输出 Token</span>
+                <span>{t("agents.zcode.ui.output")}</span>
                 <input
                   type="number"
                   min={1}
                   step={1024}
                   value={selectedModel.configuration.maxOutputTokens ?? ""}
-                  placeholder="留空使用默认 (例如 128000)"
+                  placeholder={t("agents.zcode.ui.outputExample")}
                   onChange={(e) => {
                     const val = e.target.value;
                     updateSelectedConfig((prev) => ({
@@ -244,7 +244,7 @@ export function ZCodeModelCatalogDialog({
               </label>
 
               <fieldset className="wide codex-catalog-choice-group surface-frame">
-                <legend>思考等级 (reasoningLevel)</legend>
+                <legend>{t("agents.catalog.reasoning")}</legend>
                 <div className="codex-catalog-chips">
                   {COMMON_REASONING_LEVELS.map((level) => {
                     const activeLevels = selectedModel.configuration.reasoningLevels;
@@ -266,11 +266,11 @@ export function ZCodeModelCatalogDialog({
               </fieldset>
 
               <fieldset className="wide codex-catalog-choice-group surface-frame">
-                <legend>输入模态支持</legend>
+                <legend>{t("agents.catalog.modalities")}</legend>
                 <div className="codex-catalog-checkboxes">
                   <label>
                     <Checkbox checked disabled onChange={() => undefined} />
-                    <span>文本 (必需)</span>
+                    <span>{t("agents.catalog.text")}</span>
                   </label>
                   <label>
                     <Checkbox
@@ -280,7 +280,7 @@ export function ZCodeModelCatalogDialog({
                         updateSelectedConfig((prev) => ({ ...prev, supportsImage: chk }));
                       }}
                     />
-                    <span>图像 (Vision)</span>
+                    <span>{t("agents.catalog.image")}</span>
                   </label>
                   <label>
                     <Checkbox
@@ -290,7 +290,7 @@ export function ZCodeModelCatalogDialog({
                         updateSelectedConfig((prev) => ({ ...prev, supportsPdf: chk }));
                       }}
                     />
-                    <span>PDF 文档</span>
+                    <span>{t("agents.zcode.ui.pdf")}</span>
                   </label>
                   <label>
                     <Checkbox
@@ -300,13 +300,13 @@ export function ZCodeModelCatalogDialog({
                         updateSelectedConfig((prev) => ({ ...prev, supportsVideo: chk }));
                       }}
                     />
-                    <span>视频</span>
+                    <span>{t("agents.zcode.ui.video")}</span>
                   </label>
                 </div>
               </fieldset>
 
               <fieldset className="wide codex-catalog-choice-group surface-frame">
-                <legend>高级特性支持</legend>
+                <legend>{t("agents.zcode.ui.features")}</legend>
                 <div className="codex-catalog-checkboxes">
                   <label>
                     <Checkbox
@@ -316,7 +316,7 @@ export function ZCodeModelCatalogDialog({
                         updateSelectedConfig((prev) => ({ ...prev, supportsJsonSchemaOutput: chk }));
                       }}
                     />
-                    <span>结构化输出 (JSON Schema)</span>
+                    <span>{t("agents.zcode.ui.json")}</span>
                   </label>
                   <label>
                     <Checkbox
@@ -326,7 +326,7 @@ export function ZCodeModelCatalogDialog({
                         updateSelectedConfig((prev) => ({ ...prev, supportsNativeWebSearch: chk }));
                       }}
                     />
-                    <span>原生联网搜索</span>
+                    <span>{t("agents.zcode.ui.web")}</span>
                   </label>
                   <label>
                     <Checkbox
@@ -336,7 +336,7 @@ export function ZCodeModelCatalogDialog({
                         updateSelectedConfig((prev) => ({ ...prev, supportsMidConversationSystem: chk }));
                       }}
                     />
-                    <span>对话中系统消息</span>
+                    <span>{t("agents.zcode.ui.system")}</span>
                   </label>
                 </div>
               </fieldset>
@@ -351,7 +351,7 @@ export function ZCodeModelCatalogDialog({
         <div>
           <button type="button" className="secondary-button" onClick={restoreSelectedDefaults} disabled={saving || !selectedModel}>
             <RotateCcw size={15} />
-            恢复推荐配置
+            {t("agents.catalog.resetAll")}
           </button>
         </div>
         <div className="dialog-footer-actions" style={{ display: "flex", gap: "8px" }}>

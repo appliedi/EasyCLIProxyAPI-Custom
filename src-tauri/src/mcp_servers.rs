@@ -1124,7 +1124,7 @@ mod tests {
         let saved = save_mcp_server(server).unwrap();
 
         let resolved_path = sync_mcp_server_to_openclaw(saved.id.clone()).unwrap();
-        assert_eq!(resolved_path, config_file.to_string_lossy().to_string());
+        assert_eq!(PathBuf::from(resolved_path), config_file);
 
         let parsed: Value = serde_json::from_str(&fs::read_to_string(&config_file).unwrap()).unwrap();
         assert_eq!(parsed["mcp"]["servers"]["live-test"]["command"], "echo");

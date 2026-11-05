@@ -6,22 +6,32 @@ Every functional change must update **Unreleased** in the same commit or pull re
 
 ## Unreleased
 
+## 0.4.3 — 2026-11-05
+
+### Release fixes and validation
+
+- Release as **0.4.3** so existing local **0.4.2** development installations receive an update. No public 0.4.2 tag is created.
+- Fixed all inherited frontend failures: shared controls, themed CSS layers/tokens, notices/empty states, translated ZCode/MCP UI, regenerated schema line endings, and missing browser mock IPC contracts. Added MCP/ZCode mock round-trip regressions; retained narrow documented exceptions for inline live regions and row controls.
+- Preserve explicit ZCode context windows and disabled/empty reasoning overrides instead of replacing them with catalog defaults. Fixed Windows regression fixtures by closing SQLite handles before cleanup, keeping PowerShell arguments out of executable source, and comparing paths structurally. Excluded generated build assets from the settings browser watcher to avoid Windows file-lock failures during packaging.
+- Replaced shell-dependent release-version resolution with a tested portable Node resolver; validate unsafe tags and retain immutable stable publication.
+- Full frontend suite: **1,296 passed, 32 skipped, zero failed**. Full Windows Rust suite: **1,157 passed, 13 ignored, zero failed**. The isolated 8.0.52 core API/routing tests pass. Production builds, browser regressions, and installer preservation checks are recorded in the [validation report](docs/upstream-0.3.76-validation.md).
+
 ### Upstream integration — v0.3.76
 
-- Merged upstream desktop **v0.3.76**, commit `027cdb94d228907a3922d807d5790b52d0d08600`, from the previous v0.3.22 base. The pinned official CLIProxyAPI core advances from **8.0.15** to **8.0.52**. Custom desktop version remains the unreleased **0.4.2**.
+- Merged upstream desktop **v0.3.76**, commit `027cdb94d228907a3922d807d5790b52d0d08600`, from the previous v0.3.22 base. The pinned official CLIProxyAPI core advances from **8.0.15** to **8.0.52**. Custom desktop release is **0.4.3**.
 - Incorporated upstream quota/provider improvements, agent discovery performance fixes, client configuration updates, Agent usage history, routing, MCP/skills management, themes, reverse proxy, and updater/runtime fixes.
 - Retained separate Subscription Usage and Subscription Value pages, priority and affinity controls, effective-dated fees, pricing/attribution semantics, persistent storage/profile locks, graceful restarts, and the Windows installer. Adapted custom controls to upstream shared components and theme layers.
 - Extended verified storage snapshots to include agent usage, MCP servers, skill state, theme/custom-theme settings, usage-view preferences, and privacy settings. Agent SQLite snapshots use the backup API to retain committed WAL data without copying live WAL/SHM files.
 - Resolved 18 conflicted files by combining custom features with upstream dependencies/runtime commands, retaining fail-closed storage startup and our independent version. Desktop stable/preview update URLs and catalogs stay on appliedi/EasyCLIProxyAPI-Custom; core downloads stay official. Windows x64/ARM64 ZIP and Setup packaging remain. Disabled upstream PR retargeting in this fork, removed automatic core-version drift in release CI, and protected published stable releases from retagging/republication.
-- Validation and known upstream test failures are recorded in [the integration report](docs/upstream-0.3.76-validation.md). No release tag or installer deployment is part of this integration.
+- Validation and known upstream test failures are recorded in [the integration report](docs/upstream-0.3.76-validation.md). The local installed app is not replaced during release verification.
 
 ### Windows installer
 
-- Prepared version **0.4.2** with a standard per-user NSIS **Setup.exe** alongside portable ZIPs. Setup creates Start Menu/optional desktop shortcuts and a Windows Installed Apps entry, includes the proxy archive, and installs WebView2 when needed.
+- Released version **0.4.3** with a standard per-user NSIS **Setup.exe** alongside portable ZIPs. Setup creates Start Menu/optional desktop shortcuts and a Windows Installed Apps entry, includes the proxy archive, and installs WebView2 when needed.
 - Fresh installed copies default to the separate per-user data folder. Setup can select an existing portable folder before first launch; already registered storage locations always take precedence. Install/reinstall/uninstall preserve usage, fees, settings, credentials, and non-packaged files.
 - Require a graceful app exit before Setup or uninstall, including silent runs, instead of Tauri's default force-kill behavior. Remove only this installation's matching autostart registration.
 - Keep the updater-compatible `EasyCLIProxyAPI.exe` filename and portable manifest. In-app updates continue using ZIPs and preserve the installation marker. Installer resources use an exact allowlist and a verified core checksum, excluding user data.
-- Added `build-installer.ps1`, x64/ARM64 installer and checksum assets to the release workflow, Windows installation/reinstallation/uninstallation smoke checks, and installer documentation. Signing is not configured; locally built installers are unsigned. No new release has been published.
+- Added `build-installer.ps1`, x64/ARM64 installer and checksum assets to the release workflow, Windows installation/reinstallation/uninstallation smoke checks, and installer documentation. Signing is not configured; locally built installers are unsigned. The release includes both portable ZIP and Setup packages.
 - Validation: built the x64 0.4.2 Setup.exe and verified its version and SHA-256 sidecar. An isolated installer identity passed real Windows install/reinstall/uninstall tests, including retaining the original portable selection and unchanged sample data inside/outside the install directory. All 18 storage regressions, updater replacement/rollback preservation, and 707 frontend tests passed (32 existing integration tests/hooks skipped). ARM64 packaging is configured for CI but was not built locally. The active portable installation was not replaced.
 
 ### Storage and upgrade persistence

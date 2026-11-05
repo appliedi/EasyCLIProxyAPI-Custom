@@ -1,3 +1,4 @@
+import { Notice } from '../../components/Notice';
 import { useCallback, useEffect, useState } from 'react';
 import { GitBranch, RefreshCw, Save } from 'lucide-react';
 import { Dialog } from '../../components/Dialog';
@@ -60,15 +61,15 @@ export function RoutingPage() {
       <button type="button" className="secondary-button" disabled={busy} onClick={() => { if (!dirty || window.confirm(t('routing.leave'))) void refresh(); }}><RefreshCw size={15} />{t('routing.refresh')}</button>
       <button type="button" className="secondary-button" disabled={!dirty || busy} onClick={() => { if (board) { setPlan(draftFromBoard(board)); setSaved(false); } }}>{t('routing.reset')}</button>
       <button type="button" className="primary-button" disabled={disabled || !dirty || !!invalidReason} onClick={() => setReviewOpen(true)}><Save size={15} />{t(busy ? 'routing.saving' : 'routing.apply')}</button>
-      {dirty && invalidReason && <p className="routing-action-hint" role="status">{invalidReason}</p>}
+      {dirty && invalidReason && <Notice className="routing-action-hint" tone="info" variant="text">{invalidReason}</Notice>}
     </div></header>
     {reviewOpen && diff && <Dialog className="routing-review-dialog" title={t('routing.reviewTitle')} onClose={() => setReviewOpen(false)} closeDisabled={busy}
       actions={<><button type="button" className="secondary-button" disabled={busy} onClick={() => setReviewOpen(false)}>{t('common.cancel')}</button><button type="button" className="primary-button" disabled={busy} onClick={() => { setReviewOpen(false); void apply(); }}><Save size={15} />{t(busy ? 'routing.saving' : 'routing.apply')}</button></>}>
       <p className="routing-review-hint">{t('routing.reviewHint', { count: diff.changes.length })}</p>
       <div className="routing-change-list">{diff.changes.map((change, index) => { const described = describeChange(change); return <div key={index}><strong>{described.name}</strong><span>{described.field}</span><span>{described.detail}</span></div>; })}</div>
     </Dialog>}
-    {error && <p role="alert" className="routing-error">{error}</p>}
-    {board?.partial.length ? <p role="alert" className="routing-error">{t('routing.partial')} ({board.partial.join(', ')})</p> : null}
+    {error && <Notice tone="error" variant="text" className="routing-error">{error}</Notice>}
+    {board?.partial.length ? <Notice tone="error" variant="text" className="routing-error">{t('routing.partial')} ({board.partial.join(', ')})</Notice> : null}
     <div role="status" className="routing-status">{saved ? t('routing.saved') : dirty ? t('routing.dirty') : busy ? t('routing.loading') : ''}</div>
     {board && plan && diff && <div className="routing-workspace"><div className="routing-board"><TierLadder board={board} draft={plan} tierPriorities={diff.tierPriorities} preview={resolveRoute(board, plan)} disabled={disabled} onChange={next => { if (diffPlan(board, next)) { setPlan(next); setSaved(false); setError(''); } else setError(t('routing.fixedConflict')); }} /></div>
       <aside className="routing-aside"><PolicyStrip settings={plan.settings} disabled={disabled} onChange={settings => { setPlan({ ...plan, settings }); setSaved(false); }} /></aside>

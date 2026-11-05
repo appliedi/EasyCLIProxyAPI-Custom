@@ -1,3 +1,6 @@
+import type { McpServer } from '../services/mcpSkills';
+import type { ZCodeCatalogEditorSnapshot } from '../services/zcodeModelCatalog';
+import type { ZCodeSubagentConfigSnapshot } from '../services/zcodeSubagent';
 import { isThemeSelection, type ThemeSelection } from '../themes/types';
 import { applyTemplateChanges, readTemplatePath, sameTemplateValue, type TemplateConfigChange } from '../services/templateConfig';
 import { requestBucketRangeLabel } from '../services/authFileRequests';
@@ -1243,6 +1246,9 @@ export function createBrowserMockRuntime(
   onPluginWebview?: (state: PluginWebviewMockState) => void,
 ): BrowserMockRuntime {
   const state = createState(scenario);
+  let mcpServers: McpServer[] = [];
+  let zcodeCatalog: ZCodeCatalogEditorSnapshot = { models: [], modelOrder: [], configured: false };
+  let zcodeSubagents: ZCodeSubagentConfigSnapshot = { defaultSubagentModel: null, defaultThoughtLevel: null, subagents: [] };
   const subscriptionValue = createSubscriptionValueMock(scenario === 'empty');
   const dataStorage: DataStorageSettings = {
     mode: 'portable', directory: 'C:\\Apps\\EasyCLIProxyAPI',
@@ -1843,6 +1849,63 @@ export function createBrowserMockRuntime(
         return clone(state.speedAliases);
       }
 
+      case 'list_update_channels': return ['stable', 'preview'];
+      case 'list_mcp_servers': return clone(mcpServers);
+      case 'save_mcp_server': {
+        const server = clone(asObject(payload.server)) as McpServer;
+        if (!server.name?.trim()) throw new Error('MCP server name is required');
+        if (!server.id) server.id = `mock-mcp-${Date.now()}-${mcpServers.length}`;
+        mcpServers = [...mcpServers.filter(item => item.id !== server.id), server];
+        return null;
+      }
+      case 'delete_mcp_server':
+        mcpServers = mcpServers.filter(item => item.id !== payload.id);
+        return null;
+      case 'set_mcp_server_enabled': {
+        const server = mcpServers.find(item => item.id === payload.id);
+        if (!server) throw new Error('MCP server not found');
+        server.enabled = Boolean(payload.enabled);
+        return null;
+      }
+      case 'export_mcp_servers_json': return JSON.stringify({ mcpServers: Object.fromEntries(mcpServers.map(server => [server.name, clone(server)])) }, null, 2);
+      case 'import_mcp_servers_json': {
+        const parsed = JSON.parse(readString(payload.raw));
+        const input = asObject(parsed);
+        const entries = Array.isArray(parsed) ? parsed.map((value, index) => [String(index), value] as const) : Object.entries(asObject(input.mcpServers ?? input));
+        const result = { added: 0, updated: 0, skipped: 0, errors: [] as string[] };
+        for (const [name, value] of entries) {
+          const raw = asObject(value);
+          const transport = readString(raw.transport) || (raw.url ? 'http' : 'stdio');
+          if (!['stdio', 'http', 'sse'].includes(transport) || !(transport === 'stdio' ? raw.command : raw.url)) {
+            result.skipped++; result.errors.push(`Invalid MCP server: ${name}`); continue;
+          }
+          const existing = mcpServers.find(server => server.name === (raw.name ?? name));
+          const server: McpServer = { id: existing?.id ?? `mock-mcp-${Date.now()}-${mcpServers.length}`, name: readString(raw.name) || name,
+            transport: transport as McpServer['transport'], command: readString(raw.command) || null, args: asArray(raw.args).map(String),
+            env: clone(asObject(raw.env)) as Record<string, string>, url: readString(raw.url) || null,
+            headers: clone(asObject(raw.headers)) as Record<string, string>, enabled: raw.enabled !== false, description: readString(raw.description) || null };
+          mcpServers = [...mcpServers.filter(item => item.id !== server.id), server];
+          if (existing) result.updated++; else result.added++;
+        }
+        return result;
+      }
+      // Browser previews have no host skill files or filesystem side effects.
+      case 'list_skills': return [];
+      case 'get_skill_detail': throw new Error('Skill file not found in browser preview');
+      case 'set_skill_enabled': throw new Error('Skill file not found in browser preview');
+      case 'open_mcp_skills_directory': return null;
+      case 'get_zcode_model_catalog_editor': return clone(zcodeCatalog);
+      case 'save_zcode_model_catalog_editor': {
+        const request = asObject(payload.request);
+        zcodeCatalog = { models: clone(asArray(request.models)) as ZCodeCatalogEditorSnapshot['models'], modelOrder: asArray(request.modelOrder).map(String), configured: true };
+        return clone(zcodeCatalog);
+      }
+      case 'get_zcode_subagent_config': return clone(zcodeSubagents);
+      case 'save_zcode_subagent_config': {
+        const request = asObject(payload.request);
+        zcodeSubagents = { defaultSubagentModel: readString(request.defaultSubagentModel) || null, defaultThoughtLevel: readString(request.defaultThoughtLevel) || null, subagents: clone(asArray(request.subagents)) as ZCodeSubagentConfigSnapshot['subagents'] };
+        return clone(zcodeSubagents);
+      }
       case 'get_codex_model_catalog_editor': return clone(state.codexCatalog);
       case 'get_codex_subagent_config': return clone(state.codexSubagents);
       case 'save_codex_subagent_config': {

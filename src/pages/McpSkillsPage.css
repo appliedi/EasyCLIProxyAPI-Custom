@@ -54,19 +54,12 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    height: 32px;
-    font-size: 13px;
-    font-weight: 500;
   }
 
   .mcp-header-actions .secondary-button.ghost {
-    background: transparent;
-    border-color: var(--border-color);
   }
 
   .mcp-header-actions .secondary-button.ghost:hover {
-    background: var(--bg-hover);
-    border-color: var(--border-hover);
   }
 
   /* "More" dropdown menu */
@@ -85,7 +78,7 @@
     border: 1px solid var(--border-color);
     border-radius: var(--radius-md);
     background: var(--bg-card);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.14);
+    box-shadow: var(--shadow-lg);
     display: flex;
     flex-direction: column;
     gap: 2px;
@@ -97,12 +90,6 @@
     gap: 8px;
     width: 100%;
     padding: 6px 10px;
-    border: 0;
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--text-primary);
-    font-size: 13px;
-    font-weight: 500;
     text-align: left;
     cursor: pointer;
     transition: background 120ms ease;
@@ -110,7 +97,6 @@
   }
 
   .mcp-menu-item:hover:not(:disabled) {
-    background: var(--bg-hover);
   }
 
   .mcp-menu-item:disabled {
@@ -146,7 +132,7 @@
     border: 1px solid var(--border-color);
     background: var(--bg-card);
     color: var(--text-secondary);
-    border-radius: 9999px;
+    border-radius: var(--radius-full);
     padding: 3px 10px;
     font-size: 12px;
     font-weight: 500;
@@ -273,9 +259,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    height: 34px;
     padding: 0 12px;
-    font-size: 13px;
   }
 
   .mcp-list-meta-bar {
@@ -345,7 +329,7 @@
   .mcp-status-dot {
     width: 8px;
     height: 8px;
-    border-radius: 50%;
+    border-radius: var(--radius-full);
     flex-shrink: 0;
   }
 
@@ -397,17 +381,17 @@
 
   .mcp-transport-badge.transport-stdio {
     background: var(--theme-soft-surface);
-    color: #3b82f6;
+    color: var(--primary-color);
   }
 
   .mcp-transport-badge.transport-http {
     background: var(--theme-soft-surface);
-    color: #10b981;
+    color: var(--success-color);
   }
 
   .mcp-transport-badge.transport-sse {
     background: var(--theme-soft-surface);
-    color: #f59e0b;
+    color: var(--warning-color);
   }
 
   .mcp-server-row-desc-line {
@@ -429,8 +413,8 @@
 
   .mcp-row-error {
     font-size: 11px;
-    color: var(--danger-color, #ef4444);
-    background: color-mix(in srgb, var(--danger-color, #ef4444) 10%, transparent);
+    color: var(--danger-color);
+    background: color-mix(in srgb, var(--danger-color) 10%, transparent);
     padding: 1px 6px;
     border-radius: var(--radius-sm);
     max-width: 140px;
@@ -460,16 +444,16 @@
     gap: 8px;
     padding: 8px 12px;
     border-radius: var(--radius-md);
-    background: color-mix(in srgb, var(--danger-color, #ef4444) 10%, var(--bg-secondary));
-    border: 1px solid color-mix(in srgb, var(--danger-color, #ef4444) 25%, transparent);
+    background: color-mix(in srgb, var(--danger-color) 10%, var(--bg-secondary));
+    border: 1px solid color-mix(in srgb, var(--danger-color) 25%, transparent);
     color: var(--text-primary);
     font-size: 12px;
     line-height: 1.4;
   }
 
   .mcp-inline-error-strip--warn {
-    background: color-mix(in srgb, var(--warning-color, #f59e0b) 10%, var(--bg-secondary));
-    border-color: color-mix(in srgb, var(--warning-color, #f59e0b) 25%, transparent);
+    background: color-mix(in srgb, var(--warning-color) 10%, var(--bg-secondary));
+    border-color: color-mix(in srgb, var(--warning-color) 25%, transparent);
   }
 
   .mcp-inline-error-body {
@@ -482,11 +466,11 @@
 
   .mcp-inline-error-icon {
     flex-shrink: 0;
-    color: var(--danger-color, #ef4444);
+    color: var(--danger-color);
   }
 
   .mcp-inline-error-strip--warn .mcp-inline-error-icon {
-    color: var(--warning-color, #f59e0b);
+    color: var(--warning-color);
   }
 
   .mcp-inline-error-msg {
@@ -567,8 +551,6 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    height: 30px;
-    font-size: 12px;
     padding: 0 9px;
   }
 
@@ -579,8 +561,8 @@
     gap: 12px;
     padding: 10px 14px;
     border-radius: var(--radius-md);
-    background: color-mix(in srgb, var(--danger-color, #ef4444) 10%, var(--bg-secondary));
-    border: 1px solid color-mix(in srgb, var(--danger-color, #ef4444) 30%, transparent);
+    background: color-mix(in srgb, var(--danger-color) 10%, var(--bg-secondary));
+    border: 1px solid color-mix(in srgb, var(--danger-color) 30%, transparent);
     color: var(--text-primary);
     font-size: 12px;
   }
@@ -593,8 +575,6 @@
   }
 
   .mcp-delete-confirm-actions button {
-    height: 28px;
-    font-size: 12px;
     padding: 0 8px;
   }
 
@@ -728,12 +708,7 @@
 
   .mcp-copy-json-btn {
     appearance: none;
-    background: transparent;
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-sm);
     padding: 2px 7px;
-    font-size: 11px;
-    color: var(--text-secondary);
     cursor: pointer;
     display: inline-flex;
     align-items: center;
@@ -741,8 +716,6 @@
   }
 
   .mcp-copy-json-btn:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
   }
 
   /* Compact low-emphasis placeholder in detail column */
@@ -840,13 +813,13 @@
       width: min(720px, 100%);
       height: 100%;
       max-height: 100dvh;
-      border-radius: 0;
+      border-radius: var(--radius-none);
       border-right: 0;
       border-top: 0;
       border-bottom: 0;
       position: relative;
       top: 0;
-      box-shadow: -4px 0 24px rgba(0, 0, 0, 0.3);
+      box-shadow: var(--shadow-lg);
       animation: mcpSlideLeft 200ms ease;
     }
   }
@@ -925,7 +898,7 @@
     white-space: nowrap;
   }
 
-  .skill-card-switch-wrap {
+  .skill-card-toggle-wrap {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -946,22 +919,22 @@
 
   .skill-source-badge.source-openclaw {
     background: var(--theme-soft-surface);
-    color: #a855f7;
+    color: var(--context-reasoning-color);
   }
 
   .skill-source-badge.source-workshop {
     background: var(--theme-soft-surface);
-    color: #ec4899;
+    color: var(--primary-color);
   }
 
   .skill-source-badge.source-project {
     background: var(--theme-soft-surface);
-    color: #3b82f6;
+    color: var(--primary-color);
   }
 
   .skill-source-badge.source-custom {
     background: var(--theme-soft-surface);
-    color: #10b981;
+    color: var(--success-color);
   }
 
   .skill-card-description {
@@ -1092,23 +1065,15 @@
 
   .skill-copy-path-btn {
     appearance: none;
-    background: transparent;
-    border: 0;
-    color: var(--text-secondary);
-    font-size: 11px;
-    font-weight: 500;
     cursor: pointer;
     display: inline-flex;
     align-items: center;
     gap: 4px;
     flex-shrink: 0;
     padding: 2px 4px;
-    border-radius: var(--radius-sm);
   }
 
   .skill-copy-path-btn:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover);
   }
 
   .skill-prose-scroll {
@@ -1171,7 +1136,7 @@
     padding: 6px 12px;
     border-left: 3px solid var(--primary-color);
     background: var(--bg-secondary);
-    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    border-radius: var(--radius-none) var(--radius-sm) var(--radius-sm) var(--radius-none);
     color: var(--text-secondary);
     font-size: 12px;
   }
@@ -1341,7 +1306,7 @@
 
   .mcp-field-error {
     font-size: 12px;
-    color: var(--danger-color, #ef4444);
+    color: var(--danger-color);
     font-weight: 500;
   }
 
@@ -1417,7 +1382,7 @@
     margin: 0;
     padding-left: 20px;
     font-size: 12px;
-    color: var(--danger-color, #ef4444);
+    color: var(--danger-color);
     max-height: 140px;
     overflow-y: auto;
   }
@@ -1475,6 +1440,8 @@
 /* These overrides must stay outside `@layer components`: .config-dialog in
    src/styles.css is unlayered, and layered rules lose to unlayered ones no
    matter how specific they are. */
+
+@layer components {
 .mcp-form-dialog.config-dialog {
   display: flex;
   flex-direction: column;
@@ -1503,6 +1470,6 @@
 
 .mcp-form-dialog.config-dialog > .config-dialog-actions button {
   height: auto;
-  min-height: 36px;
+}
 }
 

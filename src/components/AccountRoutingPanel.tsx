@@ -1,3 +1,4 @@
+import { Notice } from './Notice';
 import { Switch } from './Switch';
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '../services/platform';
@@ -72,8 +73,8 @@ export function AccountRoutingPanel() {
     <p>{t('quota.routing.affinityHint')}</p>
     <p>{t('quota.routing.projectHint')}</p>
     <p className="quota-summary-hint">{t('quota.routing.cacheHint')}</p>
-    {error ? <p role="alert" className="quota-routing-error">{error}</p> : null}
+    {error ? <Notice tone="error" variant="text" className="quota-routing-error">{error}</Notice> : null}
     {!settings && !loading ? <button type="button" className="secondary-button compact-button" onClick={() => setAttempt((value) => value + 1)}>{t('common.refresh')}</button> : null}
-    {saved && !dirty ? <p role="status">{t('config.notice.sessionRoutingUpdated')}</p> : null}
+    {saved && !dirty ? <Notice tone="info" variant="text">{t('config.notice.sessionRoutingUpdated')}</Notice> : null}
   </details>;
 }

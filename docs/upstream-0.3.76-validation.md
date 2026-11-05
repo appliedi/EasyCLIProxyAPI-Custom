@@ -2,7 +2,7 @@
 
 Integration date: 2026-11-05. Custom checkpoint: d09537044137d30f3c520ba0053b1ad5d8bad9b4.
 Upstream release: v0.3.76, commit 027cdb94d228907a3922d807d5790b52d0d08600.
-Pinned core: official CLIProxyAPI 8.0.52. Desktop version: 0.4.2 (Unreleased).
+Pinned core: official CLIProxyAPI 8.0.52. Initial integration desktop version: 0.4.2 (Unreleased). Release follow-up: 0.4.3.
 
 ## Preserved behavior and resolutions
 
@@ -31,9 +31,9 @@ Desktop stable/preview manifests, release URLs and model catalog remain owned by
 - English/Chinese settings browser regression passed all nine categories and six viewport sizes.
 - Windows optimized build command: ./build.ps1 -SkipCopy -BuildJobs 8. The active installation and user profile are not replaced. Build emits one inherited unused scale_factor warning.
 
-## Remaining failures and release gate
+## Initial integration failures (resolved for 0.4.3)
 
-This integration is not a clean-suite release candidate. No release is published or tagged.
+The initial integration checkpoint was not a clean-suite release candidate and was not tagged. The release follow-up below resolves these failures.
 
 Unmodified upstream v0.3.76 was extracted separately and tested against the same installed dependencies: 1,250 passed, 32 skipped, 25 failed. The merged full frontend suite with a 20-second timeout for source-scanning tests reports 1,269 passed, 32 skipped, 23 failed. Every remaining failure name also occurs in the unmodified upstream baseline. The two upstream quota-priority failures are resolved by targeting the custom card that retains that feature. A default-timeout run additionally timed out in the token-consumer source scanner under concurrent compilation; the longer-timeout run completed it.
 
@@ -65,4 +65,20 @@ Remaining frontend failure names:
 
 The full serial Windows Rust run reported 1,131 passed, 25 failed, 13 ignored. The failures are in upstream agent usage store fixtures (19 remove_dir_all calls while SQLite connections remain open on Windows), PowerShell harness restart fixtures (4 script parsing/launch failures), MCP sync path separator comparison (1), and ZCode model-context expectation (1). These files are unchanged from upstream; a separate full upstream Rust build was not run. The ZCode mismatch needs investigation before release; it is not classified as an environmental failure. Focused custom storage, updater and usage checks pass as listed above.
 
-ARM64 compilation, a fresh installer smoke test, and release asset/manifest publication were not performed for this integration. Resolve or explicitly disposition the inherited failures and run packaging validation before a release tag.
+ARM64 compilation, a fresh installer smoke test, and publication were pending at the initial integration checkpoint. These are release-stage checks, separate from the initial merge.
+
+## Release follow-up — 0.4.3
+
+The release fixes all recorded failures rather than excluding them. Version 0.4.3 supersedes the existing local 0.4.2 development installation so its updater can offer the new build.
+
+- Full frontend suite: `bun test --timeout 20000` — **1,296 passed, 32 skipped, zero failed**. TypeScript check passed. The skips are the existing optional isolated-core tests/hooks; the 28 API integration tests were also run explicitly against the verified official 8.0.52 executable and passed, as did account routing.
+- Full serial Windows Rust suite — **1,157 passed, 13 ignored, zero failed**. The ignored cases remain the existing integration/helper entries.
+- Fixed ZCode production precedence for explicit context and disabled/empty reasoning settings. Fixed Windows SQLite cleanup and PowerShell/path fixtures without skipping tests.
+- Fixed UI/CSS/localization contracts, shared controls/notices/empty states, generated-schema line endings, and missing MCP/skills/ZCode/update-channel browser mocks. Narrow inline live-region/row-control exceptions are documented in their regression inventories. New round-trip mocks retain caller isolation and persistence behavior.
+- Replaced shell-dependent workflow version resolution with a portable Node module tested against fixed version/time fixtures and the CLI output contract. Stable tags/releases remain immutable.
+- Independent backend/tooling and frontend/release-path reviews found no blocking issues. The frontend reviewer independently ran 40 passing tests.
+- Dashboard, Storage & backups and Subscription Value browser regressions passed again on the release source. Windows optimized build and isolated installer install/reinstall/uninstall validation precede tagging. The installed app, existing registry identity and data locator are not changed by local validation.
+
+Release packaging evidence: the optimized Windows x64 0.4.3 executable built successfully. The ship-ready x64 Setup.exe and SHA-256 sidecar were built. A separate installer product/binary/profile namespace passed real install, reinstall and uninstall tests, retaining portable selection and unchanged fixture data. This avoided the existing installed Custom product and saved locator. Its payload allowlist contains only the application, portable manifest, core version and verified core archive.
+
+The comprehensive settings browser test initially hit a Windows EBUSY file-watcher error while packaging wrote generated core archives. Its Vite watcher now excludes .codex, src-tauri and cpa-core outputs, matching the other browser harnesses.

@@ -249,6 +249,7 @@ export function CodexModelCatalogDialog({ onClose, onSaved }: CodexModelCatalogD
                     <div className="codex-catalog-order">
                       <button
                         type="button"
+                        className="icon-button quiet tiny-button"
                         aria-label={t('agents.catalog.moveUp')}
                         title={t('agents.catalog.moveUp')}
                         disabled={loading || saving || index <= 0}
@@ -258,6 +259,7 @@ export function CodexModelCatalogDialog({ onClose, onSaved }: CodexModelCatalogD
                       </button>
                       <button
                         type="button"
+                        className="icon-button quiet tiny-button"
                         aria-label={t('agents.catalog.moveDown')}
                         title={t('agents.catalog.moveDown')}
                         disabled={loading || saving || index < 0 || index >= models.length - 1}

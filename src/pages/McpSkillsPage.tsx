@@ -808,7 +808,7 @@ export function McpSkillsPage() {
                 <button
                   type="button"
                   role="menuitem"
-                  className="mcp-menu-item"
+                  className="secondary-button ghost mcp-menu-item"
                   disabled={servers.length === 0}
                   onClick={() => {
                     setMoreOpen(false);
@@ -821,7 +821,7 @@ export function McpSkillsPage() {
                 <button
                   type="button"
                   role="menuitem"
-                  className="mcp-menu-item"
+                  className="secondary-button ghost mcp-menu-item"
                   onClick={() => {
                     setMoreOpen(false);
                     void handleOpenFolder();
@@ -912,7 +912,7 @@ export function McpSkillsPage() {
               {/* Filter chips */}
               <SegmentedControl
                 className="mcp-filter-chips"
-                aria-label="Server filter"
+                aria-label={t('serverFilter')}
                 value={serverFilter}
                 onChange={setServerFilter}
                 buttonClassName="mcp-filter-chip"
@@ -1216,8 +1216,8 @@ export function McpSkillsPage() {
                         <table className="mcp-kv-table">
                           <thead>
                             <tr>
-                              <th>Key</th>
-                              <th>Value</th>
+                              <th>{t('keyLabel')}</th>
+                              <th>{t('valueLabel')}</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -1240,8 +1240,8 @@ export function McpSkillsPage() {
                         <table className="mcp-kv-table">
                           <thead>
                             <tr>
-                              <th>Header</th>
-                              <th>Value</th>
+                              <th>{t('headerLabel')}</th>
+                              <th>{t('valueLabel')}</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -1265,7 +1265,7 @@ export function McpSkillsPage() {
                       <span>{t('rawJson')}</span>
                       <button
                         type="button"
-                        className="mcp-copy-json-btn"
+                        className="secondary-button compact-button mcp-copy-json-btn"
                         onClick={(e) => {
                           e.preventDefault();
                           void handleCopyRawJson(selectedServer);
@@ -1325,7 +1325,7 @@ export function McpSkillsPage() {
                 {/* Source Filter chips */}
                 <SegmentedControl
                   className="mcp-filter-chips"
-                  aria-label="Skill source"
+                  aria-label={t('skillSource')}
                   value={skillSourceFilter}
                   onChange={setSkillSourceFilter}
                   buttonClassName="mcp-filter-chip"
@@ -1458,7 +1458,7 @@ export function McpSkillsPage() {
                               </span>
                             </div>
                             <div
-                              className="skill-card-switch-wrap"
+                              className="skill-card-toggle-wrap"
                               onClick={(e) => e.stopPropagation()}
                               onKeyDown={(e) => e.stopPropagation()}
                             >
@@ -1548,7 +1548,7 @@ export function McpSkillsPage() {
                         </span>
                         <button
                           type="button"
-                          className="skill-copy-path-btn"
+                          className="icon-button quiet tiny-button skill-copy-path-btn"
                           onClick={() => void handleCopySkillPath(selectedSkill.path)}
                         >
                           {skillPathCopied ? (
@@ -1767,7 +1767,7 @@ export function McpSkillsPage() {
                       onClick={() =>
                         setFormEnv((prev) => prev.filter((_, idx) => idx !== index))
                       }
-                      aria-label="Remove"
+                      aria-label={t('remove')}
                     >
                       <X size={15} aria-hidden="true" />
                     </button>
@@ -1827,7 +1827,7 @@ export function McpSkillsPage() {
                       onClick={() =>
                         setFormHeaders((prev) => prev.filter((_, idx) => idx !== index))
                       }
-                      aria-label="Remove"
+                      aria-label={t('remove')}
                     >
                       <X size={15} aria-hidden="true" />
                     </button>

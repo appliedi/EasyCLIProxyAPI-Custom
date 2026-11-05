@@ -18,13 +18,14 @@ const rowButtons: Record<string, [number, string]> = {
   'components/WindowFrame.tsx': [2, 'Native window chrome uses caption button dimensions.'],
   'App.tsx': [2, 'Sidebar navigation items and language list rows (.nav-section, .sidebar-language-list).'],
   'pages/EasyModePage.tsx': [1, 'Language menu items (.simple-mode-lang-menu).'],
-  'pages/ThinkingAliasesPage.tsx': [3, 'Model list rows and effort options (.thinking-model-list, .thinking-effort-options).'],
+  'pages/ThinkingAliasesPage.tsx': [5, 'Model list rows, effort options, and speed options (.thinking-model-list, .thinking-effort-options).'],
   'pages/AgentClientList.tsx': [1, 'Client list rows (.agent-list-items).'],
   'pages/AgentsPage.tsx': [1, 'Launch directory history rows (.agent-launch-directory-history-list).'],
   'pages/ApiAccessPage.tsx': [2, 'Provider category rows and the thinking level tag remove control (.provider-category-panel, .thinking-level-tags).'],
   'pages/CodexModelCatalogDialog.tsx': [1, 'Catalog model rows (.codex-catalog-models).'],
   'pages/ConfigPanel.tsx': [1, 'Settings search result rows (.config-search-result-list).'],
   'pages/AgentConfigBackupDialog.tsx': [1, 'Backup version rows (.agent-backup-columns nav).'],
+  'pages/ZCodeModelCatalogDialog.tsx': [1, 'Catalog model selection rows, matching Codex catalog rows.'],
   'pages/DeepSeekHarnessCatalogDialog.tsx': [1, 'Harness model rows.'],
 };
 const removed = [
@@ -49,13 +50,13 @@ const exceptions: Record<string, string[]> = {
   'Clickable cards and list rows: the row itself is the control': [
     'simple-mode-choice', 'simple-mode-step-status-item', 'provider-category-panel', 'agent-list-items', 'agent-backup-columns', 'codex-catalog-models',
     'model-discovery-row', 'model-transfer-row', 'auth-model-view-row', 'thinking-model-list', 'agent-launch-directory-picker', 'agent-launch-directory-history-list',
-    'config-search-result-list', 'auth-health-summary', 'agent-client-list', 'harness-provider-button', 'harness-catalog-dialog', 'codex-model-catalog',
+    'config-search-result-list', 'auth-health-summary', 'agent-client-list', 'harness-provider-button', 'harness-catalog-dialog', 'codex-model-catalog', 'mcp-server-row-button', 'skill-card', 'mcp-transport-option', 'codex-catalog-row',
   ],
   'Chips, badges and legend toggles': [
     'usage-trend-legend-item', 'filter-chip', 'role-select-chip', 'oauth-account-count', 'context-badge', 'context-id-badge', 'context-meta-head', 'context-add-button',
     'thinking-level-tags', 'auth-file-request-block', 'agent-usage-chip',
   ],
-  'Multi-line content buttons whose height follows the content': ['agent-codex-catalog-button', 'close-choice-button'],
+  'Multi-line content buttons whose height follows the content': ['agent-codex-catalog-button', 'close-choice-button', 'quota-reset-footer'],
 };
 const exceptionNames = new Set(Object.values(exceptions).flat());
 const banned = /^(background(-color|-image)?|border(-(top|right|bottom|left|color|style|width|radius|inline|block)[a-z-]*)?|border-radius|color|height|min-height|max-height|font-size|font-weight|box-shadow)$/;
