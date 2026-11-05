@@ -4,10 +4,22 @@ param(
     [Parameter(Mandatory = $true)][string]$ProductName,
     [string]$BinaryName = 'EasyCLIProxyAPI.exe',
     [string]$AutostartName = 'EasyCLIProxyAPI',
-    [string]$RunRegistryPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    [string]$RunRegistryPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
+    [string]$IsolationManifest
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# Production installers use the fixed identity. Custom bundles must carry the
+# matching builder manifest, checked before fixtures or registry writes.
+$customIdentity = $ProductName -ne 'EasyCLIProxyAPI Custom' -or $BinaryName -ne 'EasyCLIProxyAPI.exe' -or $AutostartName -ne 'EasyCLIProxyAPI' -or $RunRegistryPath -ne 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+if ($customIdentity -or $IsolationManifest) {
+    if (-not $IsolationManifest) { throw 'Custom smoke bundle requires an isolation manifest.' }
+    $manifest = Get-Content -LiteralPath $IsolationManifest -Raw | ConvertFrom-Json
+    if ($manifest.schemaVersion -ne 1 -or $manifest.productName -ne $ProductName -or $manifest.binaryName -ne $BinaryName -or $manifest.autostartName -ne $AutostartName -or $manifest.runRegistryPath -ne $RunRegistryPath) {
+        throw 'Smoke parameters do not match the isolation manifest.'
+    }
+    if ((Get-FileHash -LiteralPath $Installer -Algorithm SHA256).Hash -ne $manifest.installerSha256) { throw 'Installer does not match the isolation manifest SHA-256.' }
+}
 $Workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $Fixture = Join-Path $Workspace ('.codex/installer-smoke-' + [Guid]::NewGuid().ToString('N'))
 $InstallDirectory = Join-Path $Fixture 'installed'
