@@ -382,7 +382,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.source_sha || github.sha }}
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -441,11 +441,12 @@ jobs:
             esac
           fi
 
+          build_commit="$(node scripts/verify-release-target.mjs "$RELEASE_TAG")"
           prerelease="$MANUAL_PRERELEASE"
           release_args=(--title "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/easycli-release-notes.md")
           if [[ "$is_unique_preview" == "true" ]]; then
             prerelease=true
-            release_args+=(--target "$GITHUB_SHA" --latest=false)
+            release_args+=(--target "$build_commit" --latest=false)
           elif [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             if [[ "$RELEASE_TAG" == *-* ]]; then
               prerelease=true
@@ -455,7 +456,7 @@ jobs:
               prerelease=false
             fi
           else
-            release_args+=(--target "$GITHUB_SHA")
+            release_args+=(--target "$build_commit")
           fi
           if [[ "$prerelease" == "true" ]]; then
             release_args+=(--prerelease)
