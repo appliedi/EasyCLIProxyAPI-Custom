@@ -82,3 +82,5 @@ The release fixes all recorded failures rather than excluding them. Version 0.4.
 Release packaging evidence: the optimized Windows x64 0.4.3 executable built successfully. The ship-ready x64 Setup.exe and SHA-256 sidecar were built. A separate installer product/binary/profile namespace passed real install, reinstall and uninstall tests, retaining portable selection and unchanged fixture data. This avoided the existing installed Custom product and saved locator. Its payload allowlist contains only the application, portable manifest, core version and verified core archive.
 
 The comprehensive settings browser test initially hit a Windows EBUSY file-watcher error while packaging wrote generated core archives. Its Vite watcher now excludes .codex, src-tauri and cpa-core outputs, matching the other browser harnesses.
+
+The final English/Chinese settings browser rerun passed all nine categories across six viewport sizes after excluding generated build outputs from its watcher. The release source has zero failures in both full unit suites and the custom browser regressions.
