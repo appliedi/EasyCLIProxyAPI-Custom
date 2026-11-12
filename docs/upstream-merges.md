@@ -22,8 +22,8 @@ Use separate refs for upstream releases: our `v*` tags trigger our releases and 
 | Upstream desktop release | `v0.3.99` |
 | Upstream commit | `023f656a99471b09bdfe3ec8af0b77bf62ccec72` |
 | Core version | `8.0.63` |
-| Custom pre-merge checkpoint | `56334fcb` |
-| Merge commit | See `git log --merges --grep="Merge upstream v0.3.99"` |
+| Custom pre-merge checkpoint | `56334fcb398606b696eb1a3d308b570f137776ab` |
+| Merge commit | `fed5a368b95dfa7c1a0005dfd96f500cb543bd98` |
 
 See the [v0.3.99 integration report](upstream-0.3.99-validation.md) for the current preparation and validation status. The prior 0.4.3 integration is documented in the [v0.3.76 report](upstream-0.3.76-validation.md).
 
