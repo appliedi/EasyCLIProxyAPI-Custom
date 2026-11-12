@@ -18,7 +18,7 @@ import grok from '../../assets/icons/grok.svg';
 
 const brands: [string, string][] = [['antigravity', antigravity], ['copilot', copilot], ['codex', codex], ['claude', claude], ['deepseek', deepseek], ['kimi', kimi], ['vertex', vertex], ['gemini', gemini], ['meta', meta], ['xai', grok], ['grok', grok]];
 function brandIcon(member: RoutingMember) {
-  const identity = `${member.family} ${member.name}`.toLowerCase();
+  const identity = `${member.family} ${member.name} ${member.remark ?? ''}`.toLowerCase();
   return brands.find(([brand]) => identity.includes(brand))?.[1] ?? openai;
 }
 
@@ -32,15 +32,18 @@ function MemberCard({ member, draft, routeMember, disabled, isAlone, onChange }:
   const state = routeMember?.state;
   const weights = draft.weights[member.key] ?? member.weights;
   const step = (direction: 'up' | 'down') => onChange({ ...draft, tiers: stepMember(draft.tiers, member.key, direction) });
+  const displayName = member.remark || member.name;
+  const hasDistinctRemark = Boolean(member.remark && member.remark !== member.name);
   return <article ref={setNodeRef} className={`routing-card${isDragging ? ' routing-card-dragging' : ''}`} tabIndex={locked ? undefined : 0}
     style={transform ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` } : undefined}
-    aria-label={t('routing.drag', { name: member.name })} onKeyDown={event => {
+    aria-label={t('routing.drag', { name: displayName })} onKeyDown={event => {
       if (!locked && event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) { event.preventDefault(); step(event.key === 'ArrowUp' ? 'up' : 'down'); }
     }}>
     <div className="routing-card-face">
-      <button type="button" className="icon-button quiet tiny-button routing-grip" {...attributes} {...listeners} disabled={locked} aria-label={t('routing.drag', { name: member.name })}><GripVertical size={15} /></button>
+      <button type="button" className="icon-button quiet tiny-button routing-grip" {...attributes} {...listeners} disabled={locked} aria-label={t('routing.drag', { name: displayName })}><GripVertical size={15} /></button>
       <img className="routing-brand" src={brandIcon(member)} alt="" width={20} height={20} />
-      <div className="routing-card-text"><strong className="routing-card-name" title={member.name}>{member.name}</strong><span className="routing-card-sub">
+      <div className="routing-card-text"><strong className="routing-card-name" title={hasDistinctRemark ? `${member.remark} (${member.name})` : member.name}>{displayName}</strong><span className="routing-card-sub">
+        {hasDistinctRemark && <span className="routing-card-raw-name">{member.name} · </span>}
         {t(member.kind === 'credential' || member.credentialName ? 'routing.oauth' : 'routing.apiKey')}{t('routing.familyDetail', { family: member.family })}
         {(member.keyCount ?? weights.length) > 1 && t('routing.keyCount', { count: member.keyCount ?? weights.length })}
         {member.prefix && <code>{t('routing.prefixDetail', { prefix: member.prefix })}</code>}
@@ -81,8 +84,8 @@ function TierBand({ tier, index, priority, step, strategy, disabled, children }:
   </section>;
 }
 
-export function TierLadder({ board, draft, tierPriorities, preview, disabled, onChange }: {
-  board: RoutingBoard; draft: RoutingDraft; tierPriorities: number[]; preview: RoutePreview; disabled: boolean; onChange: (draft: RoutingDraft) => void;
+export function TierLadder({ board, draft, tierPriorities, preview, disabled, hideDisabled = false, onChange }: {
+  board: RoutingBoard; draft: RoutingDraft; tierPriorities: number[]; preview: RoutePreview; disabled: boolean; hideDisabled?: boolean; onChange: (draft: RoutingDraft) => void;
 }) {
   const { t } = useI18n();
   const [dragging, setDragging] = useState(false);
@@ -91,6 +94,7 @@ export function TierLadder({ board, draft, tierPriorities, preview, disabled, on
   const steps = new Map(preview.steps.map(step => [step.tierId, step]));
   const activeMembers = preview.steps.find(step => step.isPrimary)?.members.filter(member => member.state === 'serving') ?? [];
   const activeCount = activeMembers.reduce((sum, member) => sum + (members.get(member.key)?.keyCount ?? members.get(member.key)?.weights.length ?? 0), 0);
+  const hasVisibleTiers = draft.tiers.some(tier => tier.memberKeys.some(key => !hideDisabled || !members.get(key)?.disabled));
   return <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragStart={() => setDragging(true)} onDragCancel={() => setDragging(false)} onDragEnd={({ active, over }) => {
     setDragging(false);
     const member = members.get(String(active.id));
@@ -100,10 +104,18 @@ export function TierLadder({ board, draft, tierPriorities, preview, disabled, on
   }}><div className="routing-flow">
     <div className="routing-flow-entry"><span className="routing-flow-node" /><strong>{t('routing.entry')}</strong><span>{t('routing.entrySummary', { count: activeCount, tiers: preview.steps.length })}</span></div>
     <TierLink index={0} dragging={dragging} first />
-    {!draft.tiers.length && <p className="routing-empty">{t('routing.empty')}</p>}
-    {draft.tiers.map((tier, index) => <Fragment key={tier.id}><TierBand tier={tier} index={index} priority={tierPriorities[index]} step={steps.get(tier.id)} strategy={draft.settings.strategy} disabled={disabled}>
-      {tier.memberKeys.map(key => { const member = members.get(key); return member ? <MemberCard key={key} member={member} draft={draft} routeMember={steps.get(tier.id)?.members.find(item => item.key === key) ?? { key, state: preview.states.get(key) ?? 'ineligible', share: null }} disabled={disabled} isAlone={tier.memberKeys.length === 1} onChange={onChange} /> : null; })}
-    </TierBand><TierLink index={index + 1} dragging={dragging} first={false} /></Fragment>)}
+    {!hasVisibleTiers && <p className="routing-empty">{t('routing.empty')}</p>}
+    {(() => {
+      let visibleIndex = 0;
+      return draft.tiers.map((tier, index) => {
+        const visibleKeys = hideDisabled ? tier.memberKeys.filter(key => !members.get(key)?.disabled) : tier.memberKeys;
+        if (hideDisabled && visibleKeys.length === 0) return null;
+        const currentVisibleIndex = visibleIndex++;
+        return <Fragment key={tier.id}><TierBand tier={tier} index={currentVisibleIndex} priority={tierPriorities[index]} step={steps.get(tier.id)} strategy={draft.settings.strategy} disabled={disabled}>
+          {visibleKeys.map(key => { const member = members.get(key); return member ? <MemberCard key={key} member={member} draft={draft} routeMember={steps.get(tier.id)?.members.find(item => item.key === key) ?? { key, state: preview.states.get(key) ?? 'ineligible', share: null }} disabled={disabled} isAlone={tier.memberKeys.length === 1} onChange={onChange} /> : null; })}
+        </TierBand><TierLink index={index + 1} dragging={dragging} first={false} /></Fragment>;
+      });
+    })()}
     <div className="routing-flow-exit"><span className="routing-flow-node" /><strong>{t('routing.exit')}</strong><span>{draft.settings.request_retry > 0 ? t('routing.exitRetry', { rounds: draft.settings.request_retry }) : t('routing.exitDirect')}</span></div>
   </div></DndContext>;
 }

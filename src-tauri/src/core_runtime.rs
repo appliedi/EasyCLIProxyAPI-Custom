@@ -15,6 +15,7 @@ pub(crate) fn lock_core_operation(
 
 pub(crate) struct CoreChild {
     child: Child,
+    detached: bool,
     #[cfg(windows)]
     job: isize,
 }
@@ -35,6 +36,11 @@ impl std::ops::DerefMut for CoreChild {
 
 impl Drop for CoreChild {
     fn drop(&mut self) {
+        if self.detached {
+            #[cfg(windows)]
+            close_windows_handle(self.job);
+            return;
+        }
         #[cfg(windows)]
         {
             close_windows_handle(self.job);
@@ -82,6 +88,11 @@ pub(crate) fn spawn_core_child(command: Command) -> Result<CoreChild, String> {
     #[cfg(not(target_os = "linux"))]
     let child = {
         let mut command = command;
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         command
             .spawn()
             .map_err(|error| format!("Failed to start CPA kernel: {error}"))?
@@ -102,6 +113,7 @@ pub(crate) fn spawn_core_child(command: Command) -> Result<CoreChild, String> {
     };
     Ok(CoreChild {
         child,
+        detached: false,
         #[cfg(windows)]
         job,
     })
@@ -120,8 +132,32 @@ pub(crate) fn spawn_core_child_on_lifetime_thread(command: Command) -> Result<Ch
         .map_err(|error| format!("Failed to start CPA kernel: {error}"))
 }
 
-async fn run_core_command(
-    app: tauri::AppHandle,
+pub(crate) async fn run_core_command<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    operation: fn(&CoreProcessState, &GuiConfigState) -> Result<CoreStatus, String>,
+) -> Result<CoreStatus, String> {
+    let status = run_core_command_without_proxy(app.clone(), operation).await?;
+    if status.running {
+        if let Some(manager) = app.try_state::<crate::reverse_proxy::ReverseProxyManagerState>() {
+            if let Err(error) = manager
+                .restore_after_core_start(&app, app.state::<CoreProcessState>().inner())
+                .await
+            {
+                eprintln!("Failed to restore reverse proxy after kernel start: {error}");
+            }
+        }
+        return tauri::async_runtime::spawn_blocking(move || {
+            let port = app.state::<GuiConfigState>().snapshot()?.port;
+            current_core_status(Some(app.state::<CoreProcessState>().inner()), Some(port))
+        })
+        .await
+        .map_err(|error| format!("Kernel background task failed: {error}"))?;
+    }
+    Ok(status)
+}
+
+async fn run_core_command_without_proxy<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     operation: fn(&CoreProcessState, &GuiConfigState) -> Result<CoreStatus, String>,
 ) -> Result<CoreStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -130,7 +166,6 @@ async fn run_core_command(
             app.state::<CoreProcessState>().inner(),
             app.state::<GuiConfigState>().inner(),
         )?;
-        emit_core_status(&app, &status);
         Ok(status)
     })
     .await
@@ -139,7 +174,6 @@ async fn run_core_command(
 
 #[tauri::command]
 pub(crate) async fn check_latest_core(
-    app: tauri::AppHandle,
     gui_config_state: tauri::State<'_, GuiConfigState>,
 ) -> Result<CoreLatest, String> {
     let _detection_guard = VERSION_SOURCE_DETECTION_LOCK.lock().await;
@@ -147,20 +181,7 @@ pub(crate) async fn check_latest_core(
     let config = gui_config_state.snapshot()?;
     let proxy_url = config.proxy_url.clone();
     let client = http_client(&proxy_url, &config.custom_download_mirrors)?;
-    let requested_source = config.selected_download_candidate();
-    let (release, resolved_source) = fetch_release(
-        &client,
-        None,
-        requested_source.clone(),
-        &config.custom_download_mirrors,
-    )
-    .await?;
-    persist_automatic_download_source_switch(
-        &app,
-        gui_config_state.inner(),
-        &requested_source,
-        &resolved_source,
-    )?;
+    let (release, _) = fetch_release(&client, None, config.selected_download_candidate()).await?;
     let asset = select_release_asset(&release, &platform)?;
 
     Ok(CoreLatest {
@@ -186,31 +207,24 @@ pub(crate) async fn list_core_versions(
     let config = gui_config_state.snapshot()?;
     let client = http_client(&config.proxy_url, &config.custom_download_mirrors)?;
     let repository = configured_gitcode_core_repository();
-    let mut failures = Vec::new();
-    for candidate in version_download_source_candidates(
-        config.selected_download_candidate(),
-        repository.is_some(),
-        &config.custom_download_mirrors,
-    ) {
-        let result = fetch_core_versions_from_source(&client, &candidate, repository).await;
-        match result {
-            Ok(releases) => {
-                let versions = core_version_options(releases, &platform);
-                if !versions.is_empty() {
-                    return Ok(versions);
-                }
-                failures.push(format!(
-                    "{}: No selectable kernel versions",
-                    candidate.display_name()
-                ));
-            }
-            Err(error) => failures.push(format!("{}: {error}", candidate.display_name())),
-        }
+    let source = config.selected_download_candidate();
+    validate_version_download_source(&source, repository.is_some())?;
+    let releases = fetch_core_versions_from_source(&client, &source, repository)
+        .await
+        .map_err(|error| {
+            format!(
+                "{} kernel version list failed: {error}",
+                source.display_name()
+            )
+        })?;
+    let versions = core_version_options(releases, &platform);
+    if versions.is_empty() {
+        return Err(format!(
+            "{}: No selectable kernel versions",
+            source.display_name()
+        ));
     }
-    Err(format!(
-        "All kernel version list sources failed: {}",
-        failures.join("；")
-    ))
+    Ok(versions)
 }
 
 pub(crate) async fn fetch_core_versions_from_source(
@@ -424,13 +438,28 @@ pub(crate) fn remember_bundled_core_when_up_to_date(
     Ok(())
 }
 
-pub(crate) fn auto_install_bundled_core_if_needed(app: &tauri::AppHandle) -> Result<bool, String> {
+pub(crate) fn defer_bundled_core_install(
+    install_dir: &Path,
+    bundled_version: &str,
+    preserve_core: bool,
+) -> Result<bool, String> {
+    if !preserve_core || find_core_binary(install_dir).is_none() {
+        return Ok(false);
+    }
+    mark_bundled_core_version_handled(install_dir, bundled_version)?;
+    Ok(true)
+}
+
+pub(crate) fn auto_install_bundled_core_if_needed(app: &tauri::AppHandle, preserve_core: bool) -> Result<bool, String> {
     let install_dir = core_install_dir()?;
     let (info, archive_path) = match bundled_core_archive()? {
         Some(bundled) => bundled,
         None if find_core_binary(&install_dir).is_some() => return Ok(false),
         None => return Err("CPA kernel was not detected, and this distribution has no matching offline kernel".to_string()),
     };
+    if defer_bundled_core_install(&install_dir, &info.version, preserve_core)? {
+        return Ok(false);
+    }
     if !core_needs_bundled_install(&install_dir, &info.version) {
         remember_bundled_core_when_up_to_date(&install_dir, &info.version)?;
         return Ok(false);
@@ -492,10 +521,8 @@ pub(crate) async fn install_core_version(
 
         // Stage download, SHA-256 verification, and archive extraction BEFORE stopping the running core.
         let staged_result = tauri::async_runtime::block_on(stage_core_version_inner(
-            &app,
             &window,
             state.inner(),
-            gui_config_state.inner(),
             token,
             version,
             &proxy_url,
@@ -674,7 +701,9 @@ fn emit_current_core_status(app: &tauri::AppHandle, process_state: &CoreProcessS
 
 #[tauri::command]
 pub(crate) async fn start_core_process(app: tauri::AppHandle) -> Result<CoreStatus, String> {
-    run_core_command(app, start_core_process_with_state).await
+    let status = run_core_command(app.clone(), start_core_process_with_state).await?;
+    emit_core_status(&app, &status);
+    Ok(status)
 }
 
 pub(crate) fn start_core_process_with_state(
@@ -694,7 +723,9 @@ pub(crate) fn start_core_process_with_state(
 
 #[tauri::command]
 pub(crate) async fn stop_core_process(app: tauri::AppHandle) -> Result<CoreStatus, String> {
-    run_core_command(app, stop_core_process_with_state).await
+    let status = run_core_command(app.clone(), stop_core_process_with_state).await?;
+    emit_core_status(&app, &status);
+    Ok(status)
 }
 
 pub(crate) fn stop_core_process_with_state(
@@ -708,7 +739,15 @@ pub(crate) fn stop_core_process_with_state(
 
 #[tauri::command]
 pub(crate) async fn restart_core_process(app: tauri::AppHandle) -> Result<CoreStatus, String> {
-    run_core_command(app, restart_core_process_with_state).await
+    let status = run_core_command(app.clone(), restart_core_process_with_state).await?;
+    emit_core_status(&app, &status);
+    Ok(status)
+}
+
+pub(crate) async fn restart_core_for_proxy(app: tauri::AppHandle) -> Result<CoreStatus, String> {
+    let status = run_core_command_without_proxy(app.clone(), restart_core_process_with_state).await?;
+    emit_core_status(&app, &status);
+    Ok(status)
 }
 
 pub(crate) fn restart_core_process_with_state(
@@ -730,10 +769,8 @@ pub(crate) fn restart_core_process_with_state(
 }
 
 pub(crate) async fn stage_core_version_inner(
-    app: &tauri::AppHandle,
     window: &tauri::Window,
     state: &CoreDownloadState,
-    gui_config_state: &GuiConfigState,
     token: CancellationToken,
     version: Option<String>,
     proxy_url: &str,
@@ -743,23 +780,15 @@ pub(crate) async fn stage_core_version_inner(
     let platform = current_core_platform()?;
     let client = http_client(proxy_url, &custom_mirrors)?;
     state.progress(window, "Check version", 0, None, true);
-    let requested_source = download_source.clone();
-    let (release, resolved_source) = fetch_release_cancelable(
-        &client,
-        version.as_deref(),
-        &token,
-        download_source,
-        &custom_mirrors,
-    )
-    .await?;
+    let (release, resolved_source) =
+        fetch_release_cancelable(&client, version.as_deref(), &token, download_source).await?;
     let asset = select_release_asset(&release, &platform)?;
-    let download_candidates = core_download_candidates(
+    let download_url = core_download_url(
         &release.tag_name,
         asset,
-        resolved_source,
+        &resolved_source,
         configured_gitcode_core_repository(),
-        &custom_mirrors,
-    );
+    )?;
 
     let install_dir = core_install_dir()?;
     let base_dir = core_base_dir()?;
@@ -775,10 +804,10 @@ pub(crate) async fn stage_core_version_inner(
         .ok_or_else(|| format!("Invalid asset filename: {}", asset.name))?;
     let archive_path = download_dir.join(archive_file_name);
 
-    let (downloaded, successful_source) = download_asset(
+    let downloaded = download_asset(
         &client,
         asset,
-        &download_candidates,
+        &download_url,
         &archive_path,
         window,
         state,
@@ -786,12 +815,6 @@ pub(crate) async fn stage_core_version_inner(
     )
     .await?;
     validate_downloaded_asset(asset, &downloaded)?;
-    persist_automatic_download_source_switch(
-        app,
-        gui_config_state,
-        &requested_source,
-        &successful_source,
-    )?;
 
     ensure_not_cancelled(&token, Some(&archive_path))?;
     state.progress(
@@ -908,8 +931,9 @@ pub(crate) async fn fetch_release(
     client: &reqwest::Client,
     version: Option<&str>,
     source: VersionDownloadCandidate,
-    custom_mirrors: &[String],
 ) -> Result<(GithubRelease, VersionDownloadCandidate), String> {
+    let gitcode_repository = configured_gitcode_core_repository();
+    validate_version_download_source(&source, gitcode_repository.is_some())?;
     if let Some(version) = version {
         return Ok((
             release_from_tag_for_repositories(
@@ -920,30 +944,27 @@ pub(crate) async fn fetch_release(
             source,
         ));
     }
-    let gitcode_repository = configured_gitcode_core_repository();
-    let mut failures = Vec::new();
-    for candidate in
-        version_download_source_candidates(source, gitcode_repository.is_some(), custom_mirrors)
-    {
-        let result = match candidate.source {
-            VersionDownloadSource::Gitcode => {
-                fetch_release_from_gitcode(
-                    client,
-                    gitcode_repository.expect("GitCode candidate requires a configured repository"),
-                )
-                .await
-            }
-            VersionDownloadSource::Github
-            | VersionDownloadSource::GhProxy
-            | VersionDownloadSource::GhFast
-            | VersionDownloadSource::Custom => fetch_release_from_github(client, &candidate).await,
-        };
-        match result {
-            Ok(release) => return Ok((release, candidate)),
-            Err(error) => failures.push(format!("{}: {error}", candidate.display_name())),
+    let result = match source.source {
+        VersionDownloadSource::Gitcode => {
+            fetch_release_from_gitcode(
+                client,
+                gitcode_repository.expect("GitCode candidate requires a configured repository"),
+            )
+            .await
         }
-    }
-    Err(format!("All kernel version check sources failed: {}", failures.join("；")))
+        VersionDownloadSource::Github
+        | VersionDownloadSource::GhProxy
+        | VersionDownloadSource::GhFast
+        | VersionDownloadSource::Custom => fetch_release_from_github(client, &source).await,
+    };
+    result
+        .map(|release| (release, source.clone()))
+        .map_err(|error| {
+            format!(
+                "{} kernel version check failed: {error}",
+                source.display_name()
+            )
+        })
 }
 
 pub(crate) async fn fetch_release_from_github(
@@ -1099,37 +1120,21 @@ pub(crate) fn release_from_tag_for_repositories(
         ("windows", "aarch64", "zip"),
     ]
     .into_iter()
-    .map(|(os, arch, extension)| {
+    .filter_map(|(os, arch, extension)| {
         let name = format!("CLIProxyAPI_{version}_{os}_{arch}.{extension}");
         let github_url = format!("{RELEASE_DOWNLOAD_PREFIX}{tag}/{name}");
         let gitcode_url = gitcode_repository
             .map(|repository| gitcode_release_attachment_url(repository, &tag, &name));
-        let (browser_download_url, fallback_download_urls) = match source.source {
-            VersionDownloadSource::Gitcode => match gitcode_url {
-                Some(gitcode_url) => (gitcode_url, vec![github_url]),
-                None => (github_url, Vec::new()),
-            },
-            VersionDownloadSource::GhProxy | VersionDownloadSource::GhFast => {
-                let mirror_url = version_source_url(source, &github_url);
-                let mut fallbacks = vec![github_url];
-                fallbacks.extend(gitcode_url);
-                (mirror_url, fallbacks)
-            }
-            VersionDownloadSource::Github => (github_url, gitcode_url.into_iter().collect()),
-            VersionDownloadSource::Custom => {
-                let mirror_url = version_source_url(source, &github_url);
-                let mut fallbacks = vec![github_url];
-                fallbacks.extend(gitcode_url);
-                (mirror_url, fallbacks)
-            }
+        let browser_download_url = match source.source {
+            VersionDownloadSource::Gitcode => gitcode_url?,
+            _ => version_source_url(source, &github_url),
         };
-        GithubAsset {
+        Some(GithubAsset {
             browser_download_url,
-            fallback_download_urls,
             name,
             size: None,
             digest: None,
-        }
+        })
     })
     .collect();
     GithubRelease {
@@ -1138,44 +1143,30 @@ pub(crate) fn release_from_tag_for_repositories(
     }
 }
 
-pub(crate) fn core_download_candidates(
+pub(crate) fn core_download_url(
     tag: &str,
     asset: &GithubAsset,
-    preferred: VersionDownloadCandidate,
+    source: &VersionDownloadCandidate,
     gitcode_repository: Option<&str>,
-    custom_mirrors: &[String],
-) -> Vec<(VersionDownloadCandidate, String)> {
+) -> Result<String, String> {
+    validate_version_download_source(source, gitcode_repository.is_some())?;
     let tag = normalize_version(tag);
-    let generated_github_url = format!("{RELEASE_DOWNLOAD_PREFIX}{tag}/{}", asset.name);
-    let provided_urls = std::iter::once(&asset.browser_download_url)
-        .chain(asset.fallback_download_urls.iter())
-        .collect::<Vec<_>>();
-    let github_url = provided_urls
-        .iter()
-        .find(|url| core_download_source_name(url) == "GitHub")
-        .map(|url| (*url).clone())
-        .unwrap_or(generated_github_url);
-    let gitcode_url = provided_urls
-        .iter()
-        .find(|url| core_download_source_name(url) == "GitCode")
-        .map(|url| (*url).clone())
-        .or_else(|| {
-            gitcode_repository
-                .map(|repository| gitcode_release_attachment_url(repository, &tag, &asset.name))
-        });
-    version_download_source_candidates(preferred, gitcode_url.is_some(), custom_mirrors)
-        .into_iter()
-        .filter_map(|candidate| {
-            let url = match candidate.source {
-                VersionDownloadSource::Github => github_url.clone(),
-                VersionDownloadSource::Gitcode => gitcode_url.clone()?,
-                VersionDownloadSource::GhProxy
-                | VersionDownloadSource::GhFast
-                | VersionDownloadSource::Custom => version_source_url(&candidate, &github_url),
-            };
-            Some((candidate, url))
-        })
-        .collect()
+    if source.source == VersionDownloadSource::Gitcode {
+        return Ok(gitcode_release_attachment_url(
+            gitcode_repository.expect("validated GitCode repository"),
+            &tag,
+            &asset.name,
+        ));
+    }
+    let github_url = if asset
+        .browser_download_url
+        .starts_with(RELEASE_DOWNLOAD_PREFIX)
+    {
+        asset.browser_download_url.clone()
+    } else {
+        format!("{RELEASE_DOWNLOAD_PREFIX}{tag}/{}", asset.name)
+    };
+    Ok(version_source_url(source, &github_url))
 }
 
 pub(crate) fn release_tag_from_url(url: &reqwest::Url) -> Option<String> {
@@ -1193,7 +1184,20 @@ pub(crate) fn is_app_update_available(current: &str, latest: &str) -> Result<boo
         semver::Version::parse(value.trim().trim_start_matches('v'))
             .map_err(|error| format!("Failed to parse version {value}: {error}"))
     };
-    Ok(parse(latest)? > parse(current)?)
+    let current_version = parse(current)?;
+    let latest_version = parse(latest)?;
+    if latest_version > current_version {
+        return Ok(true);
+    }
+    // Allow updating from a prerelease / PR / dev build to a stable release with equal or greater base version
+    if !current_version.pre.is_empty()
+        && latest_version.pre.is_empty()
+        && (latest_version.major, latest_version.minor, latest_version.patch)
+            >= (current_version.major, current_version.minor, current_version.patch)
+    {
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -1240,7 +1244,6 @@ pub(crate) fn parse_release_assets(html: &str) -> Vec<GithubAsset> {
             assets.push(GithubAsset {
                 name: name.to_string(),
                 browser_download_url,
-                fallback_download_urls: Vec::new(),
                 size: None,
                 digest,
             });
@@ -1270,10 +1273,9 @@ pub(crate) async fn fetch_release_cancelable(
     version: Option<&str>,
     token: &CancellationToken,
     source: VersionDownloadCandidate,
-    custom_mirrors: &[String],
 ) -> Result<(GithubRelease, VersionDownloadCandidate), String> {
     tokio::select! {
-        result = fetch_release(client, version, source, custom_mirrors) => result,
+        result = fetch_release(client, version, source) => result,
         _ = token.cancelled() => Err("Download canceled".to_string()),
     }
 }
@@ -1398,51 +1400,32 @@ pub(crate) fn core_release_asset_name(version: &str, platform: &CorePlatform) ->
 pub(crate) async fn download_asset(
     client: &reqwest::Client,
     asset: &GithubAsset,
-    download_candidates: &[(VersionDownloadCandidate, String)],
+    url: &str,
     archive_path: &Path,
     window: &tauri::Window,
     state: &CoreDownloadState,
     token: &CancellationToken,
-) -> Result<(DownloadedArchive, VersionDownloadCandidate), String> {
-    let mut failures = Vec::new();
-    for (index, (candidate, url)) in download_candidates.iter().enumerate() {
-        if index > 0 {
-            state.progress(
-                window,
-                &format!("Download failed; switching to {}", candidate.display_name()),
-                0,
-                asset.size,
-                true,
-            );
-        }
-        let result = download_asset_inner(
-            client,
-            url,
-            archive_path,
-            asset.size,
-            asset.digest.as_deref(),
-            window,
-            state,
-            token,
-        )
-        .await;
-        match result {
-            Ok(downloaded) => return Ok((downloaded, candidate.clone())),
-            Err(error) if token.is_cancelled() => {
-                let _ = fs::remove_file(archive_path);
-                return Err(error);
-            }
-            Err(error) => {
-                let _ = fs::remove_file(archive_path);
-                failures.push(error);
-            }
-        }
-    }
-    if failures.is_empty() {
+) -> Result<DownloadedArchive, String> {
+    let result = download_asset_inner(
+        client,
+        url,
+        archive_path,
+        asset.size,
+        asset.digest.as_deref(),
+        window,
+        state,
+        token,
+    )
+    .await;
+    if result.is_err() {
         let _ = fs::remove_file(archive_path);
-        return Err("Kernel release has no available download URL".to_string());
     }
-    Err(format!("All kernel download sources failed: {}", failures.join("；")))
+    result.map_err(|error| {
+        format!(
+            "{} kernel download failed: {error}",
+            core_download_source_name(url)
+        )
+    })
 }
 
 pub(crate) fn core_download_source_name(url: &str) -> String {
@@ -1642,12 +1625,12 @@ fn core_management_address(listen_host: &str, port: u16) -> Result<SocketAddr, S
     Ok(SocketAddr::new(ip, port))
 }
 
+#[derive(Debug)]
 pub(crate) enum CoreStartupFailure {
     ShuttingDown,
     Exited(std::process::ExitStatus),
     Spawn(String),
     StatusCheck(io::Error),
-    TimedOut(u16),
 }
 
 impl CoreStartupFailure {
@@ -1674,9 +1657,6 @@ impl std::fmt::Display for CoreStartupFailure {
             Self::Exited(status) => write!(formatter, "CPA kernel exited immediately after startup: {status}"),
             Self::Spawn(error) => formatter.write_str(error),
             Self::StatusCheck(error) => write!(formatter, "Failed to check CPA kernel startup status: {error}"),
-            Self::TimedOut(port) => {
-                write!(formatter, "CPA kernel startup timed out: management port {port} was not listening within 10 seconds")
-            }
         }
     }
 }
@@ -1816,15 +1796,16 @@ pub(crate) fn start_core_process_inner(
         }
         return Err("CPA kernel is already running".to_string());
     }
-    let management_address = core_management_address(&gui_config.host, gui_config.port)?;
+    let config_path = merge_core_config_for_start(&install_dir, gui_config)?;
+    let effective_config = read_installed_core_config_settings()?;
+    let management_address = core_management_address(&effective_config.host, effective_config.port)?;
     if !wait_for_core_port_release(management_address) {
         return Err(format!(
             "Port {} is in use by another program. Change the port and try again",
-            gui_config.port
+            effective_config.port
         ));
     }
 
-    let config_path = merge_core_config_for_start(&install_dir, gui_config)?;
     let config_path = path_to_string(&config_path);
     let log_path = core_start_log_path(&install_dir, &gui_config.auth_dir)?;
     let start_once = || {
@@ -1898,7 +1879,8 @@ pub(crate) fn wait_for_core_management_port(
     address: SocketAddr,
     process_state: &CoreProcessState,
 ) -> Result<(), CoreStartupFailure> {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Readiness is reported by the kernel itself: keep waiting while the process is alive.
+    // Only an exit, a failed status check, or application shutdown aborts the wait.
     loop {
         if process_state.is_shutting_down() {
             return Err(CoreStartupFailure::ShuttingDown);
@@ -1909,10 +1891,114 @@ pub(crate) fn wait_for_core_management_port(
         if TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok() {
             return Ok(());
         }
-        if Instant::now() >= deadline {
-            return Err(CoreStartupFailure::TimedOut(address.port()));
-        }
         thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod core_startup_tests {
+    use super::*;
+
+    const SLOW_STARTUP_DELAY: Duration = Duration::from_secs(14);
+
+    #[test]
+    #[ignore]
+    fn core_startup_sleep_helper() {
+        thread::sleep(Duration::from_secs(180));
+    }
+
+    fn core_child_sleep_command() -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                "core_runtime::core_startup_tests::core_startup_sleep_helper",
+                "--nocapture",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    #[test]
+    fn exiting_during_core_startup_cancels_the_port_wait() {
+        let state = std::sync::Arc::new(CoreProcessState::new(true));
+        let mut child = spawn_core_child(core_child_sleep_command()).unwrap();
+        let child_id = child.id();
+        let exiting_state = state.clone();
+        let exit = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            exiting_state.shutting_down.store(true, Ordering::Release);
+        });
+
+        let started = Instant::now();
+        let result = wait_for_core_management_port(
+            &mut child,
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            &state,
+        );
+        drop(child);
+        exit.join().unwrap();
+
+        assert!(matches!(result, Err(CoreStartupFailure::ShuttingDown)));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(!is_process_alive(child_id));
+    }
+
+    #[test]
+    fn kernel_exit_during_startup_is_reported_without_waiting() {
+        let state = CoreProcessState::new(false);
+        let mut child = spawn_core_child(core_child_sleep_command()).unwrap();
+        thread::sleep(Duration::from_millis(200));
+        terminate_child(&mut child).unwrap();
+
+        let started = Instant::now();
+        let result = wait_for_core_management_port(
+            &mut child,
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            &state,
+        );
+
+        assert!(matches!(result, Err(CoreStartupFailure::Exited(_))));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn slow_kernel_startup_keeps_waiting_until_the_kernel_is_ready() {
+        let state = std::sync::Arc::new(CoreProcessState::new(false));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+
+        // The kernel stays "booted but not listening" for longer than the previously
+        // hardcoded 10-second timeout, then reports readiness on its own.
+        let mut child = spawn_core_child(core_child_sleep_command()).unwrap();
+        let wait_state = state.clone();
+        let waiter = thread::spawn(move || {
+            wait_for_core_management_port(&mut child, address, &wait_state)
+        });
+
+        thread::sleep(SLOW_STARTUP_DELAY);
+        let bound = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let bound_slot = bound.clone();
+        let server = thread::spawn(move || {
+            let listener = std::net::TcpListener::bind(address).unwrap();
+            *bound_slot.lock().unwrap() = Some(listener.local_addr().unwrap());
+            let _ = listener.accept();
+            drop(listener);
+        });
+
+        let started = Instant::now();
+        let result = waiter.join().unwrap();
+        assert!(
+            result.is_ok(),
+            "startup wait aborted before the kernel reported readiness: {result:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        drop(server);
+        assert!(bound.lock().unwrap().is_some());
     }
 }
 
@@ -2614,6 +2700,7 @@ pub(crate) fn core_processes_ready(process_ids: &[u32], address: SocketAddr) -> 
 pub(crate) fn adopt_existing_core_processes(
     process_state: &CoreProcessState,
     config: &GuiConfigFile,
+    preserve_core: bool,
 ) -> Result<Vec<u32>, String> {
     let install_dir = core_install_dir()?;
     let Some(binary_path) = find_core_binary(&install_dir) else {
@@ -2634,7 +2721,7 @@ pub(crate) fn adopt_existing_core_processes(
                 Err("CPA kernel is not ready for adoption".to_string())
             }
         });
-        if ready.is_err() {
+        if ready.is_err() && !preserve_core {
             process_state.adopt_process_ids(&binary_path, process_ids)?;
             stop_core_process_inner(process_state)?;
             return Ok(Vec::new());
@@ -2647,6 +2734,47 @@ pub(crate) fn adopt_existing_core_processes(
         .collect())
 }
 
+pub(crate) fn prepare_core_for_app_update(process_state: &CoreProcessState) -> Result<(), String> {
+    let _guard = lock_core_operation(process_state)?;
+    let mut child = process_state.child.lock().map_err(|error| error.to_string())?;
+    if let Some(child) = child.as_mut() {
+        child.detach_for_update()?;
+    }
+    process_state.preserve_on_exit.store(true, Ordering::Release);
+    Ok(())
+}
+
+impl CoreChild {
+    pub(crate) fn detach_for_update(&mut self) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        return Err("Updating without restarting the kernel is not supported on Linux".to_string());
+
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::JobObjects::{
+                JobObjectExtendedLimitInformation, SetInformationJobObject,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            };
+            let information: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            let configured = unsafe {
+                SetInformationJobObject(
+                    self.job as _, JobObjectExtendedLimitInformation,
+                    &information as *const _ as *const _,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            };
+            if configured == 0 {
+                return Err(format!("Failed to preserve the running kernel: {}", io::Error::last_os_error()));
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.detached = true;
+            Ok(())
+        }
+    }
+}
+
 pub(crate) fn shutdown_managed_core(
     process_state: &CoreProcessState,
     gui_config_state: &GuiConfigState,
@@ -2656,7 +2784,7 @@ pub(crate) fn shutdown_managed_core(
             .ok()
             .and_then(|install_dir| find_core_binary(&install_dir))
             .is_some_and(|binary_path| is_core_running(&binary_path));
-    if was_running {
+    if was_running && !process_state.preserve_on_exit.load(Ordering::Acquire) {
         if let Err(error) = stop_core_process_inner(process_state) {
             eprintln!("Failed to stop CPA kernel on exit: {error}");
         }

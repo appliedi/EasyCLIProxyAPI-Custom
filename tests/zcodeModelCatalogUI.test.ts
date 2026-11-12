@@ -31,7 +31,7 @@ function createEditor() {
     dialogSource.indexOf("  const restoreSelectedDefaults =")
   );
   const transpiler = new Bun.Transpiler({ loader: "tsx" });
-  const createCallbacks = new Function("setModels", "selectedId", "selectedModel", transpiler.transformSync(`
+  const createCallbacks = new Function("setModels", "selectedId", "selectedModel", "setError", "setNotice", transpiler.transformSync(`
     ${callbacks}
     return { updateSelectedConfig, toggleReasoningLevel };
   `));
@@ -40,7 +40,9 @@ function createEditor() {
       models = updater(models);
     },
     "selected",
-    models[0]
+    models[0],
+    () => {},
+    () => {}
   ) as {
     updateSelectedConfig: (updater: (previous: ZCodeModelConfig) => ZCodeModelConfig) => void;
     toggleReasoningLevel: (level: string) => void;
@@ -116,26 +118,10 @@ describe("ZCode model catalog editing", () => {
     expect(manualSnapshot).toContain("let effective_cw = cw.or(default_config.context_window);");
   });
 
-  it("requires reasoning-specific rejection evidence for calibration", () => {
-    const predicate = usageSource.slice(
-      usageSource.indexOf("let is_effort_failure ="),
-      usageSource.indexOf("if is_effort_failure {")
-    );
-    expect(predicate).toContain("failure_status == Some(400) || failure_status == Some(422)");
-    expect(predicate).toContain("mentions_reasoning && rejects_parameter");
-    const mentionsReasoning = predicate.match(/let mentions_reasoning = ([\s\S]*?);/)?.[1];
-    const rejectsParameter = predicate.match(/let rejects_parameter = ([\s\S]*?);/)?.[1];
-    expect(mentionsReasoning).toBeDefined();
-    expect(rejectsParameter).toBeDefined();
-    const evaluate = (expression: string, body: string) => new Function(
-      "lower", `return ${expression.replaceAll(".contains(", ".includes(")};`
-    )(body.toLowerCase()) as boolean;
-    const isRejection = (body: string) => evaluate(mentionsReasoning!, body) && evaluate(rejectsParameter!, body);
-    for (const body of ["unsupported image format", "invalid API key", "reasoning request exceeded quota", "thinking timed out"]) {
-      expect(isRejection(body)).toBe(false);
-    }
-    for (const body of ["unsupported reasoning", "unsupported effort", "thinking not supported", "invalid thought parameter", "Invalid reasoning_effort: xhigh"]) {
-      expect(isRejection(body)).toBe(true);
-    }
+  it("uses catalog defaults without inferring capabilities from request failures", () => {
+    expect(catalogSource).toContain("infer_zcode_model_knowledge_with_catalog(&option.name, &catalog)");
+    expect(catalogSource).not.toContain("query_model_usage_calibration");
+    expect(configurationSource).not.toContain("infer_zcode_model_knowledge_with_calibration");
+    expect(usageSource).not.toContain("failed_reasoning_levels");
   });
 });

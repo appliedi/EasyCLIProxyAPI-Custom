@@ -155,7 +155,6 @@ const PORTABLE_APP_BINARY: &str = "EasyCLIProxyAPI";
 const CORE_INSTALL_PROGRESS_EVENT: &str = "core-install-progress";
 const CORE_STATUS_EVENT: &str = "core-status-changed";
 const CONFIG_FILES_CHANGED_EVENT: &str = "config-files-changed";
-const VERSION_DOWNLOAD_SOURCE_CHANGED_EVENT: &str = "version-download-source-changed";
 static VERSION_SOURCE_DETECTION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 const WINDOWS_CLOSE_REQUEST_EVENT: &str = "windows-close-requested";
@@ -183,6 +182,7 @@ const DEFAULT_MAX_RETRY_CREDENTIALS: u32 = 0;
 const DEFAULT_MAX_RETRY_INTERVAL: i64 = 30;
 const DEFAULT_STREAMING_BOOTSTRAP_RETRIES: u32 = 0;
 const DEFAULT_DISABLE_COOLING: bool = true;
+const DEFAULT_TRANSIENT_ERROR_COOLDOWN_SECONDS: i64 = -1;
 const DEFAULT_LOGS_MAX_TOTAL_SIZE_MB: u32 = 0;
 const DEFAULT_ERROR_LOGS_MAX_FILES: u32 = 10;
 const DEFAULT_REDIS_USAGE_QUEUE_RETENTION_SECONDS: u32 = 60;
@@ -282,6 +282,8 @@ fn normalize_app_locale(locale: &str) -> &'static str {
     let normalized = locale.trim().to_ascii_lowercase();
     if normalized.starts_with("ja") {
         "ja"
+    } else if normalized.starts_with("ru") {
+        "ru"
     } else if normalized == "zh-tw"
         || normalized == "zh-hk"
         || normalized == "zh-mo"
@@ -326,6 +328,7 @@ struct CoreProcessState {
     starting: AtomicBool,
     shutting_down: AtomicBool,
     shutdown_complete: AtomicBool,
+    preserve_on_exit: AtomicBool,
 }
 
 #[derive(Default)]
@@ -483,6 +486,9 @@ struct AppUpdateInfo {
     published_at: String,
     current_build_at: Option<String>,
     auto_update_supported: bool,
+    preserve_core_supported: bool,
+    download_url: Option<String>,
+    download_file_name: Option<String>,
     download_size_bytes: Option<u64>,
     unsupported_reason: Option<String>,
     update_channel: String,
@@ -543,6 +549,7 @@ struct PendingAppUpdate {
 #[serde(rename_all = "camelCase")]
 struct AppUpdateTask {
     running: bool,
+    preserve_core: bool,
     cancellable: bool,
     phase: String,
     target_version: Option<String>,
@@ -558,6 +565,7 @@ impl Default for AppUpdateTask {
             running: false,
             cancellable: false,
             phase: "idle".to_string(),
+            preserve_core: false,
             target_version: None,
             downloaded_bytes: 0,
             total_bytes: None,
@@ -593,6 +601,8 @@ struct PortableUpdateDescriptor {
     ack_path: PathBuf,
     work_dir: PathBuf,
     target_version: String,
+    #[serde(default)]
+    preserve_core: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -607,6 +617,8 @@ struct MacosUpdateDescriptor {
     ack_path: PathBuf,
     work_dir: PathBuf,
     target_version: String,
+    #[serde(default)]
+    preserve_core: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -688,7 +700,14 @@ struct GuiConfigFile {
     request_retry: u32,
     max_retry_credentials: u32,
     max_retry_interval: i64,
+    transient_error_cooldown_seconds: i64,
     streaming_bootstrap_retries: u32,
+    #[serde(
+        default,
+        rename = "reverse-proxy",
+        skip_serializing_if = "Option::is_none"
+    )]
+    reverse_proxy: Option<crate::reverse_proxy::ReverseProxyConfig>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -794,34 +813,21 @@ fn version_source_url(source: &VersionDownloadCandidate, github_url: &str) -> St
         .unwrap_or_else(|| github_url.to_string())
 }
 
-fn version_download_source_candidates(
-    preferred: VersionDownloadCandidate,
+fn validate_version_download_source(
+    source: &VersionDownloadCandidate,
     gitcode_available: bool,
-    custom_mirrors: &[String],
-) -> Vec<VersionDownloadCandidate> {
-    let mut candidates = vec![
-        preferred,
-        VersionDownloadCandidate::builtin(VersionDownloadSource::Github),
-        VersionDownloadCandidate::builtin(VersionDownloadSource::Gitcode),
-        VersionDownloadCandidate::builtin(VersionDownloadSource::GhProxy),
-        VersionDownloadCandidate::builtin(VersionDownloadSource::GhFast),
-    ];
-    candidates.retain(|candidate| {
-        gitcode_available || candidate.source != VersionDownloadSource::Gitcode
-    });
-    candidates.extend(
-        custom_mirrors
-            .iter()
-            .map(|url| VersionDownloadCandidate::custom(url)),
-    );
-    candidates
-        .into_iter()
-        .fold(Vec::new(), |mut sources, source| {
-            if !sources.contains(&source) {
-                sources.push(source);
-            }
-            sources
-        })
+) -> Result<(), String> {
+    if source.source == VersionDownloadSource::Gitcode && !gitcode_available {
+        return Err("The selected GitCode source is not available for this operation".to_string());
+    }
+    if source.source == VersionDownloadSource::Custom {
+        let url = source
+            .custom_url
+            .as_deref()
+            .ok_or("No custom mirror is selected")?;
+        normalize_custom_download_mirror_url(url)?;
+    }
+    Ok(())
 }
 
 fn normalize_custom_download_mirror_url(value: &str) -> Result<String, String> {
@@ -999,7 +1005,9 @@ impl Default for GuiConfigFile {
             request_retry: DEFAULT_REQUEST_RETRY,
             max_retry_credentials: DEFAULT_MAX_RETRY_CREDENTIALS,
             max_retry_interval: DEFAULT_MAX_RETRY_INTERVAL,
+            transient_error_cooldown_seconds: DEFAULT_TRANSIENT_ERROR_COOLDOWN_SECONDS,
             streaming_bootstrap_retries: DEFAULT_STREAMING_BOOTSTRAP_RETRIES,
+            reverse_proxy: None,
         }
     }
 }
@@ -1041,7 +1049,9 @@ struct GuiConfigPresence {
     request_retry: Option<u32>,
     max_retry_credentials: Option<u32>,
     max_retry_interval: Option<i64>,
+    transient_error_cooldown_seconds: Option<i64>,
     streaming_bootstrap_retries: Option<u32>,
+    reverse_proxy: Option<crate::reverse_proxy::ReverseProxyConfig>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1627,7 +1637,14 @@ struct GuiRetrySettings {
     request_retry: u32,
     max_retry_credentials: u32,
     max_retry_interval: i64,
+    #[allow(dead_code)]
+    #[serde(default = "default_transient_error_cooldown_seconds")]
+    transient_error_cooldown_seconds: i64,
     streaming_bootstrap_retries: u32,
+}
+
+fn default_transient_error_cooldown_seconds() -> i64 {
+    DEFAULT_TRANSIENT_ERROR_COOLDOWN_SECONDS
 }
 
 #[derive(Deserialize)]
@@ -1698,6 +1715,7 @@ struct CoreConfigSettings {
     request_retry: u32,
     max_retry_credentials: u32,
     max_retry_interval: i64,
+    transient_error_cooldown_seconds: i64,
     streaming_bootstrap_retries: u32,
     #[allow(dead_code)]
     #[serde(skip_serializing)]
@@ -1932,6 +1950,7 @@ impl AppUpdateState {
             running: true,
             cancellable: true,
             phase: "downloading".to_string(),
+            preserve_core: inner.task.preserve_core,
             target_version: Some(pending.version.clone()),
             downloaded_bytes: 0,
             total_bytes: Some(pending.asset.size_bytes),
@@ -1983,6 +2002,7 @@ impl CoreProcessState {
             starting: AtomicBool::new(starting),
             shutting_down: AtomicBool::new(false),
             shutdown_complete: AtomicBool::new(false),
+            preserve_on_exit: AtomicBool::new(false),
         }
     }
 
@@ -1991,7 +2011,7 @@ impl CoreProcessState {
     }
 
     fn ensure_active(&self) -> Result<(), String> {
-        if self.is_shutting_down() {
+        if self.is_shutting_down() || self.preserve_on_exit.load(Ordering::Acquire) {
             Err("Application is exiting; kernel operation canceled".to_string())
         } else {
             Ok(())
@@ -2195,6 +2215,7 @@ impl GuiConfigState {
             config.request_retry = settings.request_retry;
             config.max_retry_credentials = settings.max_retry_credentials;
             config.max_retry_interval = settings.max_retry_interval;
+            config.transient_error_cooldown_seconds = settings.transient_error_cooldown_seconds;
             config.streaming_bootstrap_retries = settings.streaming_bootstrap_retries;
             Ok(())
         })
@@ -2217,6 +2238,7 @@ impl GuiConfigState {
             config.request_retry = settings.request_retry;
             config.max_retry_credentials = settings.max_retry_credentials;
             config.max_retry_interval = settings.max_retry_interval;
+            config.transient_error_cooldown_seconds = settings.transient_error_cooldown_seconds;
             config.streaming_bootstrap_retries = settings.streaming_bootstrap_retries;
             Ok(())
         })
@@ -2299,33 +2321,6 @@ impl GuiConfigState {
             config.prefer_gitcode_downloads = candidate.source == VersionDownloadSource::Gitcode;
             Ok(())
         })
-    }
-
-    fn switch_download_source_after_failure(
-        &self,
-        expected_source: &VersionDownloadCandidate,
-        fallback_source: &VersionDownloadCandidate,
-    ) -> Result<Option<GuiConfigFile>, String> {
-        let mut current = self
-            .inner
-            .lock()
-            .map_err(|_| "GUI configuration status lock is poisoned".to_string())?;
-        if current.selected_download_candidate() != *expected_source
-            || expected_source == fallback_source
-        {
-            return Ok(None);
-        }
-
-        let mut config = current.clone();
-        config.download_source = fallback_source.source;
-        if let Some(url) = &fallback_source.custom_url {
-            config.active_custom_download_mirror = url.clone();
-        }
-        config.prefer_gitcode_downloads = fallback_source.source == VersionDownloadSource::Gitcode;
-        sanitize_gui_config(&mut config)?;
-        write_gui_config(&config)?;
-        *current = config.clone();
-        Ok(Some(config))
     }
 
     fn set_window_geometry(
@@ -2416,6 +2411,7 @@ impl GuiConfigState {
             config.request_retry = settings.request_retry;
             config.max_retry_credentials = settings.max_retry_credentials;
             config.max_retry_interval = settings.max_retry_interval;
+            config.transient_error_cooldown_seconds = settings.transient_error_cooldown_seconds;
             config.streaming_bootstrap_retries = settings.streaming_bootstrap_retries;
             if apply_external_proxy {
                 apply_external_core_proxy_override(config, settings)?;
@@ -2480,6 +2476,7 @@ impl From<&GuiConfigFile> for CoreConfigSettings {
             request_retry: config.request_retry,
             max_retry_credentials: config.max_retry_credentials,
             max_retry_interval: config.max_retry_interval,
+            transient_error_cooldown_seconds: config.transient_error_cooldown_seconds,
             streaming_bootstrap_retries: config.streaming_bootstrap_retries,
             management_secret_key: Some(config.management_secret_key.clone()),
         }
@@ -2534,8 +2531,6 @@ struct GithubRelease {
 struct GithubAsset {
     name: String,
     browser_download_url: String,
-    #[serde(default)]
-    fallback_download_urls: Vec<String>,
     size: Option<u64>,
     digest: Option<String>,
 }
@@ -2793,7 +2788,6 @@ fn main() {
 
             network_proxy::start_monitor(app.handle().clone());
             core_recovery::start(app.handle().clone());
-            start_codex_model_catalog_sync(app.handle().clone());
             agent_usage::start_background_sync(app.handle().clone());
 
             let usage_app = app.handle().clone();
@@ -2842,7 +2836,8 @@ fn main() {
                     }
                 }
 
-                match auto_install_bundled_core_if_needed(&core_app) {
+                let preserve_core = env::args_os().any(|arg| arg == "--preserve-core");
+                match auto_install_bundled_core_if_needed(&core_app, preserve_core) {
                     Ok(true) => eprintln!("Automatically installed or upgraded to the CPA kernel version bundled with the application"),
                     Ok(false) => {}
                     Err(error) => {
@@ -2857,6 +2852,7 @@ fn main() {
                 let adopted_process_ids = match adopt_existing_core_processes(
                     process_state.inner(),
                     &config,
+                    preserve_core,
                 ) {
                     Ok(process_ids) => process_ids,
                     Err(error) => {
@@ -2890,6 +2886,14 @@ fn main() {
                 }
 
                 process_state.set_starting(false);
+
+                let proxy_app = core_app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let manager = proxy_app.state::<reverse_proxy::ReverseProxyManagerState>();
+                    if let Err(error) = manager.restore(proxy_app.clone()).await {
+                        eprintln!("Failed to restore reverse proxy listener: {error}");
+                    }
+                });
 
                 if let Ok(status) =
                     current_core_status(Some(process_state.inner()), Some(config.port))
@@ -2968,6 +2972,7 @@ fn main() {
             uninstall_pi_provider,
             check_codex_oauth_login,
             update_codex_model_catalog,
+            refresh_managed_codex_model_catalog,
             get_deepseek_harness_model_catalog_editor,
             save_deepseek_harness_model_catalog_editor,
             get_codex_model_catalog_editor,

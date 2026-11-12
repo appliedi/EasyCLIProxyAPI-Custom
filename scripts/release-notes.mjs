@@ -6,8 +6,9 @@ import { validateAppVersion } from './version.mjs';
 export const releaseNotesLanguages = [
   { locale: 'zh-CN', label: '简体中文', missing: '暂未提供该版本的简体中文更新说明。' },
   { locale: 'zh-TW', label: '繁體中文', missing: '暫未提供此版本的繁體中文更新說明。' },
-  { locale: 'en', label: 'English', missing: 'Release notes for this version are not available in English.' },
   { locale: 'ja', label: '日本語', missing: 'このバージョンの日本語の更新内容はありません。' },
+  { locale: 'en', label: 'English', missing: 'Release notes for this version are not available in English.' },
+  { locale: 'ru', label: 'Русский', missing: 'Примечания к выпуску этой версии на русском языке недоступны.' },
 ];
 
 // Only explicitly authored translations are published. Missing languages stay missing.
@@ -50,7 +51,9 @@ export function validateReleaseNotes(notes) {
 
 export function releaseNotesBody(notes) {
   validateReleaseNotes(notes);
-  const order = ['en', 'zh-CN', 'zh-TW', 'ja'];
+  // The GitHub Release page shows English then Simplified Chinese only; every other authored
+  // locale still reaches the app through the portable update manifest's releaseNotes map.
+  const order = ['en', 'zh-CN'];
   const authored = order.filter((locale) => notes[locale]?.trim());
   const published = authored.length ? authored : ['en'];
   const languages = published.map((locale) => releaseNotesLanguages.find((language) => language.locale === locale));

@@ -1,5 +1,119 @@
 use super::*;
 
+/// Picks the default reasoning effort from configured levels.
+///
+/// Follows the established convention: `xhigh` > `max` > `high`, otherwise
+/// the first configured level. Returns `None` when no levels are configured.
+pub(crate) fn default_reasoning_effort(levels: &[String]) -> Option<String> {
+    ["xhigh", "max", "high"]
+        .iter()
+        .find_map(|preferred| {
+            levels
+                .iter()
+                .find(|level| level.eq_ignore_ascii_case(preferred))
+                .cloned()
+        })
+        .or_else(|| levels.first().cloned())
+}
+
+/// WorkBuddy: reasoning capability block on a managed model entry.
+///
+/// Only fills missing keys, so a user-tuned default effort survives
+/// re-applying the configuration. Models without configured levels are
+/// left untouched.
+pub(crate) fn update_workbuddy_reasoning_fields(entry: &mut serde_json::Value, levels: &[String]) {
+    if levels.is_empty() {
+        return;
+    }
+    let entry = entry.as_object_mut().expect("model entry must be an object");
+    entry
+        .entry("supportsReasoning")
+        .or_insert_with(|| serde_json::json!(true));
+    entry
+        .entry("onlyReasoning")
+        .or_insert_with(|| serde_json::json!(true));
+    let reasoning = entry.remove("reasoning").unwrap_or(serde_json::Value::Null);
+    let mut object = reasoning
+        .as_object()
+        .cloned()
+        .unwrap_or_else(|| serde_json::Map::new());
+    object
+        .entry("canDisableThinking")
+        .or_insert_with(|| serde_json::json!(false));
+    object
+        .entry("defaultEffort")
+        .or_insert_with(|| serde_json::json!(default_reasoning_effort(levels)));
+    object
+        .entry("supportedEfforts")
+        .or_insert_with(|| serde_json::json!(levels));
+    entry.insert("reasoning".to_string(), serde_json::Value::Object(object));
+}
+
+/// OpenCode: reasoning capability on a managed model entry.
+///
+/// The top-level `reasoning` boolean is what OpenCode renders as
+/// "supports reasoning"; `capabilities.reasoning` is a runtime structure
+/// and must not be used. `variants` exposes one entry per configured
+/// level and `request.variant` pins the default effort. Only fills
+/// missing keys, preserving hand-tuned variants.
+pub(crate) fn update_opencode_reasoning_fields(entry: &mut serde_json::Value, levels: &[String]) {
+    if levels.is_empty() {
+        return;
+    }
+    let object = entry.as_object_mut().expect("model entry must be an object");
+    object
+        .entry("reasoning".to_string())
+        .or_insert_with(|| serde_json::json!(true));
+    let variants = object
+        .entry("variants".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let variants = variants
+        .as_object_mut()
+        .expect("variants must be an object");
+    for level in levels {
+        let variant = variants
+            .entry(level.clone())
+            .or_insert_with(|| serde_json::json!({}));
+        variant
+            .as_object_mut()
+            .expect("variant must be an object")
+            .entry("reasoning_effort".to_string())
+            .or_insert_with(|| serde_json::json!(level));
+    }
+    let request = object
+        .entry("request".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    request
+        .as_object_mut()
+        .expect("request must be an object")
+        .entry("variant".to_string())
+        .or_insert_with(|| serde_json::json!(default_reasoning_effort(levels)));
+}
+
+/// DeepSeek Harness: reasoningEfforts map on a managed model entry.
+///
+/// Keys are the selectable levels; values are what gets sent upstream.
+/// Only fills missing keys, preserving hand-tuned mappings.
+pub(crate) fn update_harness_reasoning_fields(entry: &mut serde_norway::Value, levels: &[String]) {
+    if levels.is_empty() {
+        return;
+    }
+    let mapping = entry
+        .as_mapping_mut()
+        .expect("harness model entry must be a mapping");
+    let efforts = mapping
+        .entry(yaml_key("reasoningEfforts"))
+        .or_insert_with(|| serde_norway::Value::Mapping(serde_norway::Mapping::new()));
+    let efforts = efforts
+        .as_mapping_mut()
+        .expect("reasoningEfforts must be a mapping");
+    for level in levels {
+        efforts
+            .entry(yaml_key(level))
+            .or_insert_with(|| serde_norway::Value::String(level.clone()));
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn build_agent_updates(
     client: AgentClient,
@@ -579,7 +693,9 @@ pub(crate) fn build_deepseek_harness_models(
                         .map_err(|_| "Failed to serialize Harness model input types")?,
                 );
             }
-            Ok(serde_norway::Value::Mapping(entry))
+            let mut entry = serde_norway::Value::Mapping(entry);
+            update_harness_reasoning_fields(&mut entry, &model.reasoning_levels);
+            Ok(entry)
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok(serde_norway::Value::Sequence(entries))
@@ -1286,12 +1402,55 @@ pub(crate) fn claude_desktop_inference_model(
     if let Some(tier) = claude_desktop_family_tier(route_model) {
         entry.insert("anthropicFamilyTier".to_string(), serde_json::json!(tier));
         entry.insert("isFamilyDefault".to_string(), serde_json::json!(true));
+        let listed = if use_source { source_model } else { route_model };
+        if !is_recognized_claude_model_id(listed) {
+            if let Some(behaves_as) = claude_desktop_behaves_as(tier) {
+                entry.insert("behavesAs".to_string(), serde_json::json!(behaves_as));
+            }
+        }
     }
     if enable_1m {
         entry.insert("supports1m".to_string(), serde_json::json!(true));
         entry.insert("prefer1m".to_string(), serde_json::json!(true));
     }
     serde_json::Value::Object(entry)
+}
+
+// Claude Desktop resolves a listed model's effort levels by looking the
+// behavesAs id up in its own table (eyn in its app.asar), keyed on the
+// lowercased id with a date suffix and an "anthropic." prefix removed.
+// These are that table's keys: opus 5, sonnet 5 and fable 5.1 report the
+// full low/medium/high/xhigh/max ladder, while haiku 4.5 reports thinking
+// modes and no effort ladder at all. An id the table has no entry for gets
+// no effort picker, so a "newer" sounding name such as claude-opus-5-5 is
+// worse than useless here. A route that is already a real Claude model
+// needs no mapping, and older Desktop builds ignore the key.
+pub(crate) fn claude_desktop_behaves_as(tier: &str) -> Option<&'static str> {
+    match tier {
+        "opus" => Some("claude-opus-5"),
+        "sonnet" => Some("claude-sonnet-5"),
+        "haiku" => Some("claude-haiku-4-5"),
+        "fable" => Some("claude-fable-5-1"),
+        _ => None,
+    }
+}
+
+// A Claude model id Desktop and Claude Code both recognize:
+// claude-<tier>-<digits>(-<digits>)*. Our generated route ids carry a
+// trailing word (`claude-opus-5-cpa`), which is not recognized.
+fn is_recognized_claude_model_id(name: &str) -> bool {
+    let lowered = name.trim().to_ascii_lowercase();
+    let Some(rest) = lowered.strip_prefix("claude-") else { return false };
+    let mut parts = rest.split('-');
+    let Some(tier) = parts.next() else { return false };
+    if !matches!(tier, "opus" | "sonnet" | "haiku" | "fable" | "mythos") {
+        return false;
+    }
+    let Some(version) = parts.next() else { return false };
+    if version.is_empty() || !version.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    parts.all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
 }
 
 pub(crate) fn claude_desktop_family_tier(route_model: &str) -> Option<&'static str> {
@@ -3746,7 +3905,9 @@ pub(crate) fn opencode_model_entry(
         );
     }
 
-    serde_json::Value::Object(entry)
+    let mut entry = serde_json::Value::Object(entry);
+    update_opencode_reasoning_fields(&mut entry, &model.reasoning_levels);
+    entry
 }
 
 pub(crate) fn build_opencode_agent_config(
@@ -3882,6 +4043,7 @@ pub(crate) fn build_zcode_agent_config(
         rule.get("providerId").and_then(serde_json::Value::as_str)
             != Some(MANAGED_AGENT_PROVIDER_ID)
     });
+    let catalog = crate::usage::load_model_capabilities_snapshot();
     let mut manual_updates = Vec::new();
     for option in ordered {
         let manual = existing_manual_rules.get(&option.name);
@@ -3890,7 +4052,7 @@ pub(crate) fn build_zcode_agent_config(
         let entry = rule.as_object_mut().ok_or("ZCode model rule must be an object")?;
         entry.insert("providerId".to_string(), serde_json::json!(MANAGED_AGENT_PROVIDER_ID));
         entry.insert("modelId".to_string(), serde_json::json!(option.name));
-        let (inferred_cw, inferred_mot, _, _, _) = zcode::infer_zcode_model_knowledge_with_calibration(&option.name);
+        let (inferred_cw, inferred_mot, _, _, _) = zcode::infer_zcode_model_knowledge_with_catalog(&option.name, &catalog);
         let config_obj = ensure_json_object_entry(entry, "config");
         {
             let properties = ensure_json_object_entry(config_obj, "properties");
@@ -3914,10 +4076,11 @@ pub(crate) fn build_zcode_agent_config(
         }
         let specs = ensure_json_object_entry(config_obj, "optionSpecs");
         if let Some(mot) = inferred_mot {
-            specs.entry("maxOutputTokens").or_insert_with(|| serde_json::json!({
-                "max": mot,
-                "map": "{\"max_tokens\": maxOutputTokens}",
-            }));
+            specs.entry("maxOutputTokens").or_insert_with(|| serde_json::json!({ "max": mot }));
+        }
+        if let Some(mot_obj) = specs.get_mut("maxOutputTokens").and_then(serde_json::Value::as_object_mut) { mot_obj.remove("map"); }
+        if manual.is_some() && !specs.contains_key("maxOutputTokens") {
+            specs.insert("maxOutputTokens".to_string(), serde_json::json!({ "max": zcode::ZCODE_MANUAL_MAX_OUTPUT_TOKENS_FALLBACK }));
         }
         if !option.reasoning_levels.is_empty() {
             let is_generated_map = |m: &str| {

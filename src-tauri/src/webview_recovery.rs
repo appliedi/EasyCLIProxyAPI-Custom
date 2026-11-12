@@ -53,6 +53,18 @@ fn client_size(width: i32, height: i32, minimized: bool) -> Option<tauri::Physic
         .then(|| tauri::PhysicalSize::new(width as u32, height as u32))
 }
 
+// windows_sys is a cfg(windows) dependency, so these paths must not be expanded
+// on other targets; the predicate itself stays target-independent and testable.
+#[cfg(windows)]
+fn is_minimized_resize_message(message: u32, wparam: usize) -> bool {
+    message == windows_sys::Win32::UI::WindowsAndMessaging::WM_SIZE
+        && wparam == windows_sys::Win32::UI::WindowsAndMessaging::SIZE_MINIMIZED as usize
+}
+
+fn is_minimized_resize_codes(message: u32, wparam: usize, size: u32, minimized: u32) -> bool {
+    message == size && wparam == minimized as usize
+}
+
 #[cfg(windows)]
 mod native {
     use super::*;
@@ -144,20 +156,34 @@ mod native {
         _: usize,
         data: usize,
     ) -> LRESULT {
-        let _ = catch_unwind(AssertUnwindSafe(|| {
+        let handled = catch_unwind(AssertUnwindSafe(|| -> Option<LRESULT> {
             let app = &*(data as *const tauri::AppHandle);
             if message == WM_NCDESTROY {
                 stop(app);
                 WTSUnRegisterSessionNotification(hwnd);
                 RemoveWindowSubclass(hwnd, Some(events), ID);
                 drop(Box::from_raw(data as *mut tauri::AppHandle));
+            } else if is_minimized_resize_message(message, wparam) {
+                // Tao's undecorated WM_NCCALCSIZE leaves a non-zero iconic client rect at
+                // (-32000, -32000), and tauri-runtime-wry resizes child WebViews on every
+                // Resized event without filtering SIZE_MINIMIZED. Handled here and not
+                // forwarded, so the iconic dimensions never reach Tao and the main WebView
+                // keeps its real bounds across minimize/restore.
+                crate::window_activity::sync(app);
+                return Some(0);
             } else if matches!(
                 message,
                 WM_WTSSESSION_CHANGE | WM_DISPLAYCHANGE | WM_DPICHANGED | WM_SETTINGCHANGE
             ) {
                 request(app);
             }
-        }));
+            None
+        }))
+        .ok()
+        .flatten();
+        if let Some(result) = handled {
+            return result;
+        }
         DefSubclassProc(hwnd, message, wparam, lparam)
     }
 
@@ -225,6 +251,7 @@ mod native {
         }
         let handle = app.clone();
         tauri::async_runtime::spawn(async move {
+            // The recovery nudge waits for the WebView environment to settle.
             tokio::time::sleep(Duration::from_millis(250)).await;
             let app = handle.clone();
             if let Err(error) = handle.run_on_main_thread(move || refresh(&app)) {
@@ -448,6 +475,63 @@ mod tests {
         assert_eq!(client_size(0, 1032, false), None);
         assert_eq!(client_size(1920, -1, false), None);
         assert_eq!(client_size(1920, 1032, true), None);
+    }
+
+    #[test]
+    fn iconic_minimized_client_rect_is_rejected() {
+        // GetClientRect reports the iconic client rect (e.g. 175x19) right after
+        // WM_SIZE(SIZE_MINIMIZED); it must never become the WebView bounds.
+        assert_eq!(client_size(175, 19, true), None);
+        assert_eq!(
+            client_size(175, 19, false),
+            Some(tauri::PhysicalSize::new(175, 19))
+        );
+    }
+
+    #[test]
+    fn minimized_resize_is_handled_without_forwarding() {
+        // Values from the Win32 headers; windows_sys is a Windows-only dependency.
+        const WM_SIZE: u32 = 0x0005;
+        const WM_DPICHANGED: u32 = 0x02E0;
+        const SIZE_RESTORED: u32 = 0;
+        const SIZE_MINIMIZED: u32 = 1;
+
+        assert!(is_minimized_resize_codes(
+            WM_SIZE,
+            SIZE_MINIMIZED as usize,
+            WM_SIZE,
+            SIZE_MINIMIZED
+        ));
+        assert!(!is_minimized_resize_codes(
+            WM_SIZE,
+            SIZE_RESTORED as usize,
+            WM_SIZE,
+            SIZE_MINIMIZED
+        ));
+        assert!(!is_minimized_resize_codes(
+            WM_DPICHANGED,
+            0,
+            WM_SIZE,
+            SIZE_MINIMIZED
+        ));
+    }
+
+    #[test]
+    fn minimized_resize_filter_matches_only_size_minimized_messages() {
+        // Values from the Win32 headers; windows_sys is a Windows-only dependency.
+        const WM_SIZE: u32 = 0x0005;
+        const WM_DPICHANGED: u32 = 0x02E0;
+        const SIZE_RESTORED: u32 = 0;
+        const SIZE_MINIMIZED: u32 = 1;
+        const SIZE_MAXIMIZED: u32 = 2;
+
+        let matches = |message, wparam| {
+            is_minimized_resize_codes(message, wparam, WM_SIZE, SIZE_MINIMIZED)
+        };
+        assert!(matches(WM_SIZE, SIZE_MINIMIZED as usize));
+        assert!(!matches(WM_SIZE, SIZE_RESTORED as usize));
+        assert!(!matches(WM_SIZE, SIZE_MAXIMIZED as usize));
+        assert!(!matches(WM_DPICHANGED, SIZE_MINIMIZED as usize));
     }
 
     #[test]

@@ -1688,3 +1688,55 @@ fn rollback_removes_files_added_by_the_failed_update_and_keeps_user_files() {
     fs::remove_dir_all(root).unwrap();
 }
 
+
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn update_preserves_core_after_managed_child_is_dropped() {
+    let state = CoreProcessState::new(false);
+    let pid = state.store_child(spawn_core_child(core_child_sleep_command()).unwrap()).unwrap();
+    prepare_core_for_app_update(&state).unwrap();
+    assert!(state.preserve_on_exit.load(Ordering::Acquire));
+    assert!(state.ensure_active().is_err());
+    drop(state);
+    thread::sleep(Duration::from_millis(200));
+    let survived = is_process_alive(pid);
+    let _ = terminate_process_id(pid);
+    assert!(survived, "preserved core exited with its managed handle");
+}
+
+#[test]
+fn ordinary_exit_still_terminates_managed_core() {
+    let child = spawn_core_child(core_child_sleep_command()).unwrap();
+    let pid = child.id();
+    drop(child);
+    assert!(!is_process_alive(pid));
+}
+
+#[test]
+fn preserving_an_installed_core_defers_only_the_current_bundle() {
+    let root = agent_test_home("preserve-bundled-core");
+    fs::create_dir_all(&root).unwrap();
+    assert!(!defer_bundled_core_install(&root, "v8.0.52", true).unwrap());
+    assert!(core_needs_bundled_install(&root, "v8.0.52"));
+    fs::write(root.join(core_binary_name()), b"running-core").unwrap();
+    assert!(!defer_bundled_core_install(&root, "v8.0.52", false).unwrap());
+    assert!(core_needs_bundled_install(&root, "v8.0.52"));
+    assert!(defer_bundled_core_install(&root, "v8.0.52", true).unwrap());
+    assert!(!core_needs_bundled_install(&root, "v8.0.52"));
+    assert!(core_needs_bundled_install(&root, "v8.0.53"));
+    assert_eq!(fs::read(root.join(core_binary_name())).unwrap(), b"running-core");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_core_child_has_private_process_group() {
+    let child = spawn_core_child(core_child_sleep_command()).unwrap();
+    let pid = child.id() as libc::pid_t;
+    let group = unsafe { libc::getpgid(pid) };
+    let parent_group = unsafe { libc::getpgrp() };
+    drop(child);
+    assert_eq!(group, pid);
+    assert_ne!(group, parent_group);
+    assert!(!is_process_alive(pid as u32));
+}

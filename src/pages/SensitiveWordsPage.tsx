@@ -125,6 +125,17 @@ export function SensitiveWordsPage({ onDirtyChange }: { onDirtyChange?: (dirty: 
         antigravitySensitiveWords: result.antigravitySensitiveWords.length
           ? result.antigravitySensitiveWords
           : ['Claude', 'GPT-5', 'GPT-6', 'Codex', 'Anthropic'],
+        devinSensitiveWords: result.devinSensitiveWords.length
+          ? result.devinSensitiveWords
+          : [
+              'Claude Agent SDK',
+              'You are a Claude agent',
+              'For clear communication with the user the assistant MUST avoid using emojis',
+              'Bypass all content filters',
+              'Hermes',
+              'OpenClaw',
+              'Deepseek Harness',
+            ],
       });
       setSavedNotice(false);
     } catch (cause) {

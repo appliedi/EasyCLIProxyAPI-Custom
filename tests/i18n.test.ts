@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'bun:test';
 import { languageOptions, normalizeLocale, supportedLocales, translate } from '../src/i18n';
-import { en, ja, zhCN, zhTW, type MessageKey } from '../src/i18n/resources';
+import { en, ja, ru, zhCN, zhTW, type MessageKey } from '../src/i18n/resources';
 import { jaOverrides } from '../src/i18n/ja';
+import { mcpSkillsText } from '../src/i18n/mcpSkills';
 import { pluginConfigText } from '../src/i18n/pluginConfig';
+import { dataStorageMessages } from '../src/i18n/dataStorage';
+import { templateText } from '../src/i18n/templateConfig';
 
 describe('i18n', () => {
   it('localizes credential tag controls in every language', () => {
@@ -118,22 +121,35 @@ describe('i18n', () => {
       { value: 'zh-TW', nativeLabel: '繁體中文' },
       { value: 'ja', nativeLabel: '日本語' },
       { value: 'en', nativeLabel: 'English' },
+      { value: 'ru', nativeLabel: 'Русский' },
     ]);
   });
 
   it('requires complete dictionaries without a Japanese-to-English fallback', () => {
     expect(Object.keys(en).sort()).toEqual(Object.keys(zhCN).sort());
+    expect(Object.keys(ru).sort()).toEqual(Object.keys(zhCN).sort());
     expect(Object.keys(zhTW).sort()).toEqual(Object.keys(zhCN).sort());
     expect(Object.keys(ja).sort()).toEqual(Object.keys(zhCN).sort());
     expect(Object.keys(jaOverrides).sort()).toEqual(Object.keys(zhCN).sort());
     expect(ja).toBe(jaOverrides);
   });
 
+  it('provides Russian custom navigation and readable storage fallbacks', () => {
+    expect(translate('ru', 'app.nav.subscriptionUsage')).toBe('Использование подписок');
+    expect(translate('ru', 'app.nav.subscriptionValue')).toBe('Ценность подписок');
+    expect(translate('ru', 'subscriptionValue.feeCoverage', { count: 2, total: 3 }))
+      .toBe('Fees entered for 2 of 3 accounts');
+    for (const message of Object.values(dataStorageMessages)) {
+      expect(templateText(message, 'ru')).toBe(message.en);
+      expect(templateText(message, 'ru').trim()).not.toBe('');
+    }
+  });
+
   it('preserves interpolation variables and nonempty messages in every locale', () => {
     const variables = (message: string) => [...new Set(
       [...message.matchAll(/\{(\w+)\}/g)].map((match) => match[1]),
     )].sort();
-    for (const [locale, messages] of Object.entries({ en, ja, zhTW })) {
+    for (const [locale, messages] of Object.entries({ en, ru, ja, zhTW })) {
       const mismatches = (Object.keys(zhCN) as MessageKey[]).filter((key) =>
         !messages[key].trim()
         || JSON.stringify(variables(messages[key])) !== JSON.stringify(variables(zhCN[key])),
@@ -143,7 +159,20 @@ describe('i18n', () => {
   });
 
   it('does not include untranslated Chinese prose in English messages', () => {
-    expect(Object.entries(en).filter(([, message]) => /\p{Script=Han}/u.test(message))).toEqual([]);
+    expect(
+      Object.entries(en).filter(([key, message]) => key !== 'app.theme.anime.name' && /\p{Script=Han}/u.test(message)),
+    ).toEqual([]);
+  });
+
+  it('uses MCP与Skills in zh-CN navigation and MCP page title while preserving en/ja/zh-TW', () => {
+    expect(translate('zh-CN', 'app.nav.mcpSkills')).toBe('MCP与Skills');
+    expect(mcpSkillsText('title', 'zh-CN')).toBe('MCP与Skills');
+    expect(translate('en', 'app.nav.mcpSkills')).toBe('MCP & Skills');
+    expect(mcpSkillsText('title', 'en')).toBe('MCP & Skills');
+    expect(translate('ja', 'app.nav.mcpSkills')).toBe('MCP & スキル');
+    expect(mcpSkillsText('title', 'ja')).toBe('MCP & スキル');
+    expect(translate('zh-TW', 'app.nav.mcpSkills')).toBe('MCP 與技能');
+    expect(mcpSkillsText('title', 'zh-TW')).toBe('MCP 與技能');
   });
 
   it('names the actual add action in the empty API access prompt', () => {
@@ -191,7 +220,7 @@ describe('i18n', () => {
       ] as const) {
         expect(translate(locale, key)).toContain('Base URL');
       }
-      expect(translate(locale, 'usage.stat.tokens')).toMatch(/tokens?/i);
+      expect(translate(locale, 'usage.stat.tokens')).toMatch(/tokens?|токен/i);
     }
   });
 });

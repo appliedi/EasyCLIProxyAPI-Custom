@@ -52,14 +52,14 @@ describe('Kimi monthly quotas', () => {
   it('renders monthly quotas and resets in cards and expandable credential panels', () => {
     const quota = { status: 'success' as const, rows: quotaRowsFor('kimi', payload) };
     const file = { name: 'kimi.json', provider: 'kimi' };
-    for (const content of [
-      <QuotaCard file={file} quota={quota} onRefresh={() => {}} />,
-      <AuthFileQuotaPanel file={file} quota={quota} disabled={false} compact dense onRefresh={() => {}} />,
-    ]) {
+    for (const [content, expectedPercent] of [
+      [<QuotaCard file={file} quota={quota} onRefresh={() => {}} />, '74.7%'],
+      [<AuthFileQuotaPanel file={file} quota={quota} disabled={false} compact dense onRefresh={() => {}} />, '75%'],
+    ] as const) {
       const html = renderToStaticMarkup(<I18nProvider>{content}</I18nProvider>);
       expect(html).toContain('Monthly total quota');
       expect(html).toContain('Monthly coding quota');
-      expect(html).toContain('75%');
+      expect(html).toContain(expectedPercent);
       expect(html).toContain('40%');
       expect(html).toContain('10/22');
       expect(html).toContain('10/23');

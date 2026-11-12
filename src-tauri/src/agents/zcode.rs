@@ -93,35 +93,27 @@ use super::*;
 use crate::GuiConfigState;
 
 
-pub(crate) fn infer_zcode_model_knowledge_with_calibration(model_id: &str) -> (Option<u64>, Option<u64>, bool, bool, Vec<String>) {
-    let calibration = crate::usage::query_model_usage_calibration(model_id);
-    let target_name = calibration.as_ref()
-        .and_then(|c| c.canonical_response_model.as_deref())
-        .unwrap_or(model_id);
-
-    // 1. Directly infer full recommended capabilities for the model (first priority)
-    let (mut cw, mot, img, pdf, mut rl) = infer_zcode_model_knowledge(target_name);
-
-    if let Some(calib) = calibration {
-        // 2. Adjust context window if higher real tokens were observed
-        if let Some(observed_tokens) = calib.max_observed_input_tokens {
-            if let Some(ref mut c) = cw {
-                if observed_tokens > *c {
-                    *c = observed_tokens.next_power_of_two();
-                }
-            }
-        }
-
-        // 3. Automatically remove levels that failed in real requests
-        if !calib.failed_reasoning_levels.is_empty() {
-            rl.retain(|level| !calib.failed_reasoning_levels.iter().any(|f| f.eq_ignore_ascii_case(level)));
-        }
+// Model defaults must not depend on request history: a routed response or a
+// rejected request does not establish a model's context limit or capabilities.
+pub(crate) fn infer_zcode_model_knowledge_with_catalog(
+    model_id: &str,
+    catalog: &[crate::usage::ModelCapabilities],
+) -> (Option<u64>, Option<u64>, bool, bool, Vec<String>) {
+    let (mut cw, mut mot, img, pdf, rl) = infer_zcode_model_knowledge(model_id);
+    if let Some(capabilities) = crate::usage::find_model_capabilities(catalog, model_id) {
+        cw = cw.or(capabilities.context_window);
+        mot = mot.or(capabilities.max_output_tokens);
     }
-
     (cw, mot, img, pdf, rl)
 }
 
 pub(crate) const ZCODE_CPA_REASONING_MAP: &str = "reasoningLevel == \"none\" || reasoningLevel == \"disabled\" ? {\"thinking\": {\"type\": \"disabled\"}} : {\"thinking\": {\"type\": \"adaptive\"}, \"output_config\": {\"effort\": reasoningLevel}}";
+
+/// ZCode requires `optionSpecs.maxOutputTokens` on manual model rules. When the
+/// value is unknown the writers fall back to this default instead of dropping the
+/// field: an omitted `maxOutputTokens` fails Zod validation of the whole
+/// provider config and makes ZCode discard every custom provider in memory.
+pub(crate) const ZCODE_MANUAL_MAX_OUTPUT_TOKENS_FALLBACK: u64 = 128_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -213,12 +205,14 @@ fn parse_zcode_rule_properties(rule: &Value) -> (Option<u64>, Option<u64>, bool,
 fn parse_zcode_rule_reasoning(rule: &Value) -> (Option<Vec<String>>, Option<String>) {
     let option_specs = rule.get("config").and_then(|c| c.get("optionSpecs"));
     let reasoning = option_specs.and_then(|o| o.get("reasoningLevel"));
-    // A present empty or disabled setting is an explicit override; only an
-    // absent setting should inherit the catalog's reasoning levels.
-    let values = reasoning.map(|r| r.get("values").and_then(Value::as_array)
-        .map(|arr| arr.iter().filter_map(Value::as_str).map(String::from).collect::<Vec<_>>())
-        .unwrap_or_default());
-    let map = reasoning.and_then(|r| r.get("map")).and_then(Value::as_str).map(String::from);
+    let values = reasoning.map(|r| {
+        r.get("values").and_then(Value::as_array)
+            .map(|arr| arr.iter().filter_map(Value::as_str).map(String::from).collect::<Vec<_>>())
+            .unwrap_or_default()
+    });
+    let map = reasoning.and_then(|r| r.get("map")).and_then(Value::as_str)
+        .filter(|_| values.as_ref().is_some_and(|levels| !levels.is_empty()))
+        .map(String::from);
     (values, map)
 }
 
@@ -248,7 +242,12 @@ fn build_zcode_rule_object(model_id: &str, config: &ZCodeModelConfig, existing: 
     if let Some(mot) = config.max_output_tokens {
         let mot_obj = ensure_json_object_entry(&mut option_specs, "maxOutputTokens");
         mot_obj.insert("max".into(), serde_json::json!(mot));
-        mot_obj.insert("map".into(), serde_json::json!("{\"max_tokens\": maxOutputTokens}"));
+        mot_obj.remove("map");
+    } else if config.is_manual {
+        option_specs.insert(
+            "maxOutputTokens".into(),
+            serde_json::json!({ "max": ZCODE_MANUAL_MAX_OUTPUT_TOKENS_FALLBACK }),
+        );
     } else {
         option_specs.remove("maxOutputTokens");
     }
@@ -347,9 +346,10 @@ pub(crate) fn zcode_editor_snapshot(
     let mut editor_models = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
 
+    let catalog = crate::usage::load_model_capabilities_snapshot();
     for option in available_models {
         seen_ids.insert(option.name.clone());
-        let (inferred_cw, inferred_mot, inferred_img, inferred_pdf, inferred_rl) = infer_zcode_model_knowledge_with_calibration(&option.name);
+        let (inferred_cw, inferred_mot, inferred_img, inferred_pdf, inferred_rl) = infer_zcode_model_knowledge_with_catalog(&option.name, &catalog);
 
         let effective_default_cw = match option.context_window {
             Some(500_000) | None => inferred_cw.or(option.context_window),

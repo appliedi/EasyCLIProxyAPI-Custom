@@ -2,6 +2,7 @@ import type { McpServer } from '../services/mcpSkills';
 import type { ZCodeCatalogEditorSnapshot } from '../services/zcodeModelCatalog';
 import type { ZCodeSubagentConfigSnapshot } from '../services/zcodeSubagent';
 import { isThemeSelection, type ThemeSelection } from '../themes/types';
+import type { AppUpdateInfo } from '../services/appUpdates';
 import { applyTemplateChanges, readTemplatePath, sameTemplateValue, type TemplateConfigChange } from '../services/templateConfig';
 import { requestBucketRangeLabel } from '../services/authFileRequests';
 import { createPluginMock, type PluginWebviewMockState } from './pluginMock';
@@ -513,11 +514,15 @@ function createState(scenario: BrowserMockScenario) {
         en: '## Browser Mock release\n\n- Added UI mock mode',
       },
       publishedAt: isoHoursAgo(18),
+      currentBuildAt: null,
       autoUpdateSupported: true,
+      preserveCoreSupported: true,
+      downloadUrl: 'https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/download/v0.3.0/EasyCLIProxyAPI-v0.3.0-Windows-amd64.zip',
+      downloadFileName: 'EasyCLIProxyAPI-v0.3.0-Windows-amd64.zip',
       downloadSizeBytes: 48 * 1024 * 1024,
       unsupportedReason: null,
       updateChannel: 'stable',
-    },
+    } as AppUpdateInfo,
     appUpdateTask: {
       running: false,
       cancellable: false,
@@ -902,6 +907,9 @@ function managementResponse(state: BrowserMockState, payload: JsonObject) {
     return clone(file);
   }
   if (method === 'GET' && path === '/credentials/models') return mockModelDefinitions();
+  if (method === 'POST' && path === '/models/refresh') {
+    return { ok: true, status: 'ok', changed_providers: [], catalog: [], codex_catalog: [], devin_catalog: [], sources: [], catalogs: [] };
+  }
   if (method === 'GET' && path.startsWith('/routing/model-definitions/')) return mockModelDefinitions();
   if (method === 'GET' && path === '/config/oauth/excluded-models') {
     return clone(state.oauthExcludedModels);
@@ -1257,6 +1265,34 @@ export function createBrowserMockRuntime(
     locator: 'C:\\Users\\demo\\AppData\\Local\\EasyCLIProxyAPI-Custom\\storage.json',
     pending: null, lastResult: null, lastError: null,
   };
+  const applyMockUpdateChannel = (channel: string) => {
+    const normalized = channel.trim() || 'stable';
+    state.appUpdateInfo.updateChannel = normalized;
+    if (normalized.startsWith('preview')) {
+      const tag = normalized === 'preview' ? 'preview-20261104-1623' : normalized;
+      state.appUpdateInfo.latestVersion = '0.3.0-preview.202611041623';
+      state.appUpdateInfo.currentBuildAt = isoHoursAgo(42);
+      state.appUpdateInfo.releaseUrl = `https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/tag/${tag}`;
+      state.appUpdateInfo.downloadFileName = 'EasyCLIProxyAPI-v0.3.0-preview.202611041623-Windows-amd64.zip';
+      state.appUpdateInfo.downloadUrl = `https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/download/${tag}/${state.appUpdateInfo.downloadFileName}`;
+    } else {
+      state.appUpdateInfo.latestVersion = '0.3.0';
+      state.appUpdateInfo.currentBuildAt = null;
+      state.appUpdateInfo.releaseUrl = 'https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/latest';
+      state.appUpdateInfo.downloadFileName = 'EasyCLIProxyAPI-v0.3.0-Windows-amd64.zip';
+      state.appUpdateInfo.downloadUrl = `https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/download/v0.3.0/${state.appUpdateInfo.downloadFileName}`;
+    }
+  };
+  if (typeof window !== 'undefined') {
+    const params = new URLSearchParams(window.location.search);
+    const mockChannel = params.get('mockChannel');
+    if (mockChannel) applyMockUpdateChannel(mockChannel);
+    const mockAutoUpdate = params.get('mockAutoUpdate');
+    if (mockAutoUpdate === '0' || mockAutoUpdate === 'false') {
+      state.appUpdateInfo.autoUpdateSupported = false;
+      state.appUpdateInfo.unsupportedReason = 'This application is not a portable version that supports automatic upgrades. Manually download the first supported version';
+    }
+  }
   let usageViewPreferences: Record<string, string> = {};
   let agentUsageCleared = false;
   let privacyMode: boolean | null = null;
@@ -1495,18 +1531,22 @@ export function createBrowserMockRuntime(
       }
 
       case 'check_app_update': return clone(state.appUpdateInfo);
+      case 'refresh_managed_codex_model_catalog': return false;
       case 'get_app_update_task': return clone(state.appUpdateTask);
       case 'get_update_channel': return state.appUpdateInfo.updateChannel ?? 'stable';
+      case 'list_update_channels': return ['stable', 'preview', 'preview-20261104-1623'];
       case 'set_update_channel': {
         const channel = String(payload.channel ?? 'stable');
-        state.appUpdateInfo.updateChannel = channel;
-        return channel;
+        applyMockUpdateChannel(channel);
+        return state.appUpdateInfo.updateChannel;
       }
       case 'start_app_update': {
+        if (payload.preserveCore && !state.appUpdateInfo.preserveCoreSupported) throw new Error('Preserving the core is unsupported');
         Object.assign(state.appUpdateTask, {
           running: true,
           cancellable: true,
           phase: 'downloading',
+          preserveCore: payload.preserveCore === true,
           targetVersion: state.appUpdateInfo.latestVersion,
           downloadedBytes: 18 * 1024 * 1024,
           totalBytes: state.appUpdateInfo.downloadSizeBytes,
@@ -1544,7 +1584,6 @@ export function createBrowserMockRuntime(
       case 'get_version_source_settings': return clone(state.versionSource);
       case 'set_download_source': {
         state.versionSource.source = readString(payload.source) || 'github';
-        emit('version-download-source-changed', state.versionSource);
         return clone(state.versionSource);
       }
       case 'add_custom_download_mirror': {
