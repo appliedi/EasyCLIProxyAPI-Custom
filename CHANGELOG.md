@@ -12,6 +12,7 @@ Every functional change must update **Unreleased** in the same commit or pull re
 
 - Custom versions now mirror the upstream desktop release they are built on: upstream `0.3.117` becomes custom `1.3.117`. The leading 1 marks this distribution, sorts above every 0.4.x release so existing installs update normally, and keeps our tags from colliding with upstream's `v0.*` tags.
 - Fork-only releases between upstream releases use numeric build metadata (`1.3.117+1`), which Windows shows as 1.3.117.1. Added `app_update_comparison_orders_fork_revisions` to lock in updater ordering. The scheme is documented in the [merge guide](docs/upstream-merges.md#versioning). The first `+N` release still needs a preview run to confirm GitHub tag and asset names containing `+`.
+- Rewrote the README to describe what this distribution adds over upstream (Subscription Usage with priority and affinity, Subscription Value, storage, the installer, the update channel and carried fixes), with screenshots taken from mock data.
 - The prepared 0.4.4 integration of upstream v0.3.99 was never published. Its changes ship in this release, and its release notes were folded into the 1.3.117 notes.
 
 ### Upstream integration: v0.3.117
