@@ -23,7 +23,7 @@ Use separate refs for upstream releases: our `v*` tags trigger our releases and 
 | Upstream commit | `4f0ba66a63435b45246f16c759091a52551c314c` |
 | Core version | `8.0.78` |
 | Custom pre-merge checkpoint | `375bcbbf577de02911f4f329de1c7fdf92cebe08` (unreleased 0.4.4 on v0.3.99) |
-| Merge commit | MERGE_COMMIT_PLACEHOLDER |
+| Merge commit | `f989956e487176d0eb43f154bc1b4869e5267648` |
 
 See the [v0.3.117 integration report](upstream-0.3.117-validation.md) for the current preparation and validation status. The unreleased 0.4.4 integration of v0.3.99 (merge `fed5a368b95dfa7c1a0005dfd96f500cb543bd98`) is documented in the [v0.3.99 report](upstream-0.3.99-validation.md), and the 0.4.3 release in the [v0.3.76 report](upstream-0.3.76-validation.md).
 

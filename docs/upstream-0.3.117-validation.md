@@ -1,6 +1,6 @@
 # Upstream v0.3.117 integration
 
-Custom **1.3.117** incorporates upstream `4f0ba66a63435b45246f16c759091a52551c314c` (tag `v0.3.117`, Nov 19, 2026) on top of the unreleased 0.4.4 integration of v0.3.99 (`375bcbbf577de02911f4f329de1c7fdf92cebe08`), preserving both parents. The pinned core is upstream's 8.0.78. The only newer upstream work at merge time was one commit on `dev` (`0badaee0`, ACP account addition), which is not part of a release.
+Custom **1.3.117** incorporates upstream `4f0ba66a63435b45246f16c759091a52551c314c` (tag `v0.3.117`, Nov 19, 2026) in merge `f989956e487176d0eb43f154bc1b4869e5267648` on top of the unreleased 0.4.4 integration of v0.3.99 (`375bcbbf577de02911f4f329de1c7fdf92cebe08`), preserving both parents. The pinned core is upstream's 8.0.78. The only newer upstream work at merge time was one commit on `dev` (`0badaee0`, ACP account addition), which is not part of a release.
 
 ## Merge decisions
 
