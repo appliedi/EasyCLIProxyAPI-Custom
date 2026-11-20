@@ -427,8 +427,30 @@ pub(crate) fn restore_agent_prompt_proxies(app: tauri::AppHandle) {
         };
 
         for (client, preferred) in targets {
-            if let Err(error) = ensure_client_proxy_listener(&client, preferred, Some(&app)).await {
-                eprintln!("Failed to restore system prompt proxy for {client}: {error}");
+            let bound = match ensure_client_proxy_listener(&client, preferred, Some(&app)).await {
+                Ok(bound) => bound,
+                Err(error) => {
+                    eprintln!("Failed to restore system prompt proxy for {client}: {error}");
+                    continue;
+                }
+            };
+            // An occupied saved port makes the listener fall back to another port. The agent
+            // configuration still names the saved one, so move it like the save path does.
+            if bound != preferred {
+                let old_origin = format!("http://127.0.0.1:{preferred}");
+                let new_origin = format!("http://127.0.0.1:{bound}");
+                let synced = match app.path().home_dir() {
+                    Ok(home) => match crate::AGENT_CONFIG_FILE_LOCK.lock() {
+                        Ok(_file_guard) => {
+                            sync_configured_agent_origin(&client, &home, &old_origin, &new_origin)
+                        }
+                        Err(_) => Err("Agent configuration file lock is poisoned".to_string()),
+                    },
+                    Err(_) => Err("Failed to get user directory".to_string()),
+                };
+                if let Err(error) = synced {
+                    eprintln!("Failed to move {client} to system prompt proxy port {bound}: {error}");
+                }
             }
         }
     });
@@ -598,9 +620,17 @@ fn try_extract_zcode_installed_prompt(home: &Path) -> Option<String> {
     }
     let content = fs::read_to_string(&resources).ok()?;
     let prefix_pos = content.find("\"You are ZCode, an interactive agent\"")?;
-    let window_start = prefix_pos.saturating_sub(256);
-    let window_end = (prefix_pos + 4096).min(content.len());
-    let slice = &content[window_start..window_end];
+    // Byte offsets can land inside a multibyte character; move each edge to the nearest
+    // character boundary so slicing the installed bundle can never panic.
+    let mut window_start = prefix_pos.saturating_sub(256);
+    while !content.is_char_boundary(window_start) {
+        window_start -= 1;
+    }
+    let mut window_end = (prefix_pos + 4096).min(content.len());
+    while !content.is_char_boundary(window_end) {
+        window_end += 1;
+    }
+    let slice = content.get(window_start..window_end)?;
 
     let cli_prefix = extract_js_string_literal_after(slice, "sJa=")
         .unwrap_or_else(|| "You are ZCode, an interactive agent".to_string());
@@ -1440,7 +1470,9 @@ fn maybe_gunzip(bytes: &[u8], headers: &hyper::HeaderMap) -> Option<Vec<u8>> {
     if !is_gzip {
         return Some(bytes.to_vec());
     }
-    let mut decoder = GzDecoder::new(bytes);
+    // Bound the decompression itself: read at most one byte past the limit so a small
+    // gzip body cannot expand without limit before the size check rejects it.
+    let mut decoder = GzDecoder::new(bytes).take(MAX_REWRITE_BODY_BYTES as u64 + 1);
     let mut decoded = Vec::new();
     decoder.read_to_end(&mut decoded).ok()?;
     if decoded.len() > MAX_REWRITE_BODY_BYTES {
@@ -2502,6 +2534,20 @@ mod tests {
     use flate2::Compression;
     use std::io::Write;
     use std::sync::Arc;
+
+    #[test]
+    fn gunzip_stops_at_the_rewrite_limit_instead_of_expanding_fully() {
+        let gzip = |len: usize| {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+            encoder.write_all(&vec![b'a'; len]).unwrap();
+            encoder.finish().unwrap()
+        };
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(CONTENT_ENCODING, hyper::header::HeaderValue::from_static("gzip"));
+        let at_limit = maybe_gunzip(&gzip(MAX_REWRITE_BODY_BYTES), &headers).unwrap();
+        assert_eq!(at_limit.len(), MAX_REWRITE_BODY_BYTES);
+        assert!(maybe_gunzip(&gzip(MAX_REWRITE_BODY_BYTES + 1), &headers).is_none());
+    }
 
     fn sample_cfg(
         default_prompt: Option<(&str, PromptRewriteMode, bool)>,

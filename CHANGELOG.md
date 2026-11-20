@@ -33,6 +33,8 @@ Every functional change must update **Unreleased** in the same commit or pull re
 - Model alias and agent YAML saves wrote new entries in JSON flow style (`- {"name": ...}`) since upstream v0.3.109. They are now written in normal block YAML with comments preserved, which also fixes Claude Desktop alias routing and Codex thinking-alias detection that read the flow output incorrectly.
 - On Windows, Antigravity usage compared file paths as text, so mixed separators could double-count legacy rows or wrongly retire chunked sessions. Paths are now compared by component.
 - ZCode kept a deleted model as its default when the requested model had disappeared, and did not refill an existing empty manual reasoning list. Both are fixed.
+- The system prompt proxy now bounds gzip decompression at the rewrite limit instead of expanding the whole body first. Opening the ZCode prompt editor can no longer panic when the installed bundle has a multibyte character at the extraction window edge. When a saved prompt proxy port is taken at startup, the agent's configured URL now follows the replacement port.
+- Known upstream issues deferred to a later release: Responses requests with several leading system messages only have the first rewritten in Replace mode, and a failed reverse-proxy reconfiguration can misreport the listener state.
 - Settings at 1240px and wider no longer leave half-width orphan cards in the Routing and Upstreams tabs after upstream moved the retry card and added list fields.
 - Fixed Windows temp-folder cleanup in new upstream tests by closing SQLite handles first. Updated stale upstream tests to current intentional behavior (retry card in Routing, catalog-scoped ZCode visibility, the ACP OAuth tab, and the current sensitive word rule count).
 
