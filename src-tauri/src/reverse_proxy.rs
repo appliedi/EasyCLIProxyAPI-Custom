@@ -263,9 +263,20 @@ fn attach_saved_proxy_config(
     base_dir: &Path,
 ) -> Result<crate::GuiConfigFile, String> {
     let config_path = base_dir.join(crate::GUI_CONFIG_FILE);
+    // Only a missing file starts from defaults. A read or parse failure must not let a
+    // proxy save overwrite every other saved GUI setting with fresh defaults.
     let mut gui_config = match std::fs::read_to_string(&config_path) {
-        Ok(content) => toml::from_str::<crate::GuiConfigFile>(&content).unwrap_or_default(),
-        Err(_) => crate::GuiConfigFile::default(),
+        Ok(content) => toml::from_str::<crate::GuiConfigFile>(&content)
+            .map_err(|error| format!("Failed to parse GUI configuration: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            crate::GuiConfigFile::default()
+        }
+        Err(error) => {
+            return Err(format!(
+                "Failed to read GUI configuration {}: {error}",
+                config_path.display()
+            ));
+        }
     };
     gui_config.reverse_proxy = Some(config);
     crate::core_config::write_gui_config_to_path(&gui_config, &config_path)?;
@@ -2081,6 +2092,22 @@ mod tests {
             cert_path: "/tls/cert.pem".to_string(),
             key_path: "/tls/key.pem".to_string(),
         }
+    }
+
+    #[test]
+    fn test_saving_proxy_config_refuses_to_replace_an_unreadable_gui_config() {
+        let home = crate::unique_test_temp_path("cpa-gui-reverse-proxy-malformed");
+        std::fs::create_dir_all(&home).unwrap();
+        let gui_config_path = home.join("config.toml");
+        let malformed = "port = \"not a number\"\n[storage]\nkeep = true\n";
+        std::fs::write(&gui_config_path, malformed).unwrap();
+
+        let Err(error) = crate::reverse_proxy::attach_saved_proxy_config(test_saved_proxy_config(), &home) else {
+            panic!("a malformed GUI configuration must not be replaced");
+        };
+        assert!(error.contains("Failed to parse GUI configuration"), "{error}");
+        assert_eq!(std::fs::read_to_string(&gui_config_path).unwrap(), malformed);
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
