@@ -32,6 +32,7 @@ import {
   RefreshCw,
   Search,
   Settings2,
+  SlidersHorizontal,
   X,
 } from 'lucide-react';
 import antigravityIcon from '../assets/icons/antigravity.svg';
@@ -331,7 +332,7 @@ export function AuthFileManagementPage({ initialProvider }: { initialProvider?: 
     setOauthModelSaving(true);
     setOauthModelError('');
     try {
-      await saveOAuthModelSettings(settings, oauthExcludedRules);
+      await saveOAuthModelSettings(settings, oauthExcludedRules, managementApi, { syncCredentials: true });
       showNotice(settings.target.scope === 'credential'
         ? { key: 'authFiles.models.credentialUpdated', variables: { name: shownNameFor(settings.target.name) } }
         : { key: 'authFiles.models.updated', variables: { provider: settings.target.label } });
@@ -625,8 +626,13 @@ export function AuthFileManagementPage({ initialProvider }: { initialProvider?: 
               const health = authFileHealth(file);
               const cooldownSnapshot = normalizeAuthFileCooldowns(file.cooldowns, receivedAtMs, observedAt);
               const hasCooldown = Boolean(cooldownSnapshot?.records?.length);
-              const showCooldown = hasCooldown || cooldownSnapshot?.records === null;
-              const statusLabel = hasCooldown && !health.disabled ? t('authFiles.list.cooling') : t(health.label === 'authFiles.health.active' ? 'authFiles.list.available' : health.label);
+              // A suspension is terminal, so it keeps its own strip even without
+              // cooldown data; its long prose belongs on that line, not in the badge.
+              const suspended = health.suspension !== undefined;
+              const showCooldown = hasCooldown || cooldownSnapshot?.records === null || suspended;
+              const statusLabel = hasCooldown && !health.disabled ? t('authFiles.list.cooling')
+                : health.label === 'authFiles.health.active' ? t('authFiles.list.available')
+                  : suspended ? t('authFiles.status.disabled') : t(health.label);
               const expanded = expandedFiles.has(key);
               const detailsId = `auth-file-details-${encodeURIComponent(key)}`;
               const cooldownResetIndex = authFileCooldownResetIndex(file);
@@ -691,6 +697,7 @@ export function AuthFileManagementPage({ initialProvider }: { initialProvider?: 
                     <div className="auth-list-icon-actions">
                       <button type="button" className="secondary-button small-button" onClick={() => void refreshQuota(file)} disabled={busy || disabled || !quotaProvider || quota.status === 'loading'} title={t('authFiles.quota.refresh')}><RefreshCw size={14} className={quota.status === 'loading' ? 'spin' : ''} aria-hidden="true" />{t('authFiles.action.refreshQuota')}</button>
                       <button type="button" className="secondary-button small-button" onClick={() => setSettingsName(name)} disabled={busy || resettingCooldown || !isOAuthCredentialFile(file)} title={t(isOAuthCredentialFile(file) ? 'authFiles.settings.title' : 'authFiles.fileOnly')}>{t('authFiles.action.settings')}</button>
+                      <button type="button" className="secondary-button small-button" onClick={() => void openOauthModelSettings({ provider: providerKey(file), label: providerName(file), scope: 'credential', name })} disabled={busy || resettingCooldown || !isOAuthCredentialFile(file)} title={t('authFiles.models.settings')}><SlidersHorizontal size={14} aria-hidden="true" />{t('authFiles.models.excludeButton')}</button>
                       <button type="button" className="secondary-button small-button" onClick={() => setModelViewName(name)} disabled={busy || !providerKey(file)} title={t('authFiles.models.viewTitle')}>{t('authFiles.action.models')}</button>
                       <button type="button" className="secondary-button small-button" onClick={() => void copyName(name)} disabled={busy} title={t('authFiles.copyName')}>{copied === name ? <Check size={14} aria-hidden="true" /> : null}{t('authFiles.action.copy')}</button>
                       <button type="button" className="danger-button small-button" onClick={() => void deleteFile(file)} disabled={busy || resettingCooldown || isRuntimeOnly(file)} title={t('common.delete')}>{t('common.delete')}</button>
@@ -766,6 +773,7 @@ export function AuthFileManagementPage({ initialProvider }: { initialProvider?: 
                 </label>
               )}
               <span>{t(oauthModelTarget.scope === 'credential' ? 'authFiles.models.description' : 'authFiles.models.globalDescription', { provider: oauthModelTarget.label })}</span>
+              {oauthModelTarget.scope === 'provider' ? <small className="auth-model-sync-hint" style={{ display: 'block', marginTop: '4px', color: 'var(--text-tertiary)' }}>{t('authFiles.models.syncHint')}</small> : null}
             </div>
             <button type="button" className="icon-button quiet" onClick={closeOauthModels} disabled={oauthModelSaving} title={t('common.close')} aria-label={t('common.close')}><X size={18} aria-hidden="true" /></button>
           </div>

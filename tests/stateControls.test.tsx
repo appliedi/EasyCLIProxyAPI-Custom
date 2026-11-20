@@ -10,7 +10,7 @@ import { Notice } from '../src/components/Notice';
 
 const root = join(import.meta.dir, '..', 'src');
 const emptyHooks = [
-  'management-empty', 'config-empty-list', 'config-unavailable', 'plugin-empty', 'usage-empty', 'usage-initial-loading', 'usage-analysis-empty',
+  'ecpa-tag-picker-empty', 'ecpa-plugin-empty', 'management-empty', 'config-empty-list', 'config-unavailable', 'plugin-empty', 'usage-empty', 'usage-initial-loading', 'usage-analysis-empty',
   'core-health-empty', 'codex-session-empty', 'config-search-empty', 'model-transfer-empty', 'thinking-model-empty', 'agent-model-empty',
 ];
 const emptyExceptions: Record<string, string> = {
@@ -40,7 +40,7 @@ const roleExceptions: Record<string, [number, number, string]> = {
   'components/AuthFileBatchDialog.tsx': [0, 2, 'Selection and tag-search hints inside the batch form.'],
   'components/CredentialTagManager.tsx': [0, 2, 'Tag list empty/search hint and batch-operation result count.'],
   'components/DataStoragePanel.tsx': [0, 1, 'Pending-operation region contains destination and restart/cancel controls.'],
-  'components/routing/RoutingPanel.tsx': [0, 1, 'Compact live/paused badge in the routing diagram heading.'],
+  'components/routing/RoutingSnapshot.tsx': [0, 1, 'Compact live/paused badge in the routing diagram heading.'],
   'components/WindowFrame.tsx': [1, 0, 'Compact native titlebar error indicator.'],
   'pages/McpSkillsPage.tsx': [5, 0, 'Two retry strips embedded in the lists and three inline row-error indicators; preserve per-row alert ownership.'],
   'pages/routing/PolicyStrip.tsx': [1, 0, 'TTL field validation linked by aria-describedby.'],
@@ -59,9 +59,10 @@ const roleExceptions: Record<string, [number, number, string]> = {
   'pages/AgentsPage.tsx': [1, 4, 'Model hints and field validation linked by aria-describedby.'],
   'pages/ApiAccessPage.tsx': [0, 1, 'Model summary count.'],
   'pages/CodexSubagentConfigDialog.tsx': [1, 1, 'Role passed to EmptyState for the load error and loading placeholder.'],
-  'pages/ConfigPanel.tsx': [2, 6, 'Reserved status slots, dirty badges, search count and disabled text.'],
+  'pages/ConfigPanel.tsx': [10, 6, 'Reserved status slots, dirty badges, search count, disabled text and field-level validation errors.'],
   'pages/CoreHealthPanel.tsx': [1, 1, 'Role passed to EmptyState for the load error and loading placeholder.'],
   'pages/Kernel.tsx': [0, 1, 'Runtime state badge.'],
+  'pages/AcpAccessPage.tsx': [0, 2, 'Provider connection badge and API switch state badge.'],
   'pages/PluginInstallDialog.tsx': [1, 0, 'Field-level version error.'],
   'pages/PluginResourcePage.tsx': [0, 1, 'Loading text.'],
   'pages/PluginSettingsPanel.tsx': [0, 1, 'Loading text.'],

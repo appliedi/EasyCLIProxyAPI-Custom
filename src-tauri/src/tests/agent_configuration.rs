@@ -525,6 +525,74 @@ fn claude_desktop_omits_unsupported_context_window_when_1m_is_off() {
 }
 
 #[test]
+fn claude_desktop_inference_entries_use_recognized_route_ids_without_behaves_as() {
+    let mappings = ClaudeDesktopModelMappings {
+        opus: "upstream-large".into(),
+        sonnet: "upstream-medium".into(),
+        haiku: "upstream-small".into(),
+        ..ClaudeDesktopModelMappings::all("")
+    };
+    let profile = build_claude_desktop_profile(
+        None, "http://127.0.0.1:8317", DEFAULT_API_KEY, "upstream-large", &[], Some(&mappings),
+    ).unwrap();
+    let profile: serde_json::Value = serde_json::from_str(&profile).unwrap();
+    let entries = profile["inferenceModels"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    for (entry, (name, tier, source)) in entries.iter().zip([
+        ("claude-opus-5", "opus", "upstream-large"),
+        ("claude-sonnet-5", "sonnet", "upstream-medium"),
+        ("claude-haiku-4-5", "haiku", "upstream-small"),
+    ]) {
+        assert_eq!(entry["name"], name);
+        assert_eq!(entry["labelOverride"], source);
+        assert_eq!(entry["anthropicFamilyTier"], tier);
+        assert_eq!(entry["isFamilyDefault"], true);
+        assert!(entry.get("behavesAs").is_none());
+    }
+}
+
+#[test]
+fn claude_desktop_inference_entries_preserve_native_and_untiered_ids() {
+    for (route, source, name) in [
+        (CLAUDE_DESKTOP_OPUS_MODEL_ID, "claude-opus-4-6", "claude-opus-4-6"),
+        ("custom-route", "upstream-model", "custom-route"),
+    ] {
+        let entry = claude_desktop_inference_model(route, source, false, &[]);
+        assert_eq!(entry["name"], name);
+        assert!(entry.get("behavesAs").is_none());
+    }
+}
+
+#[test]
+fn claude_desktop_config_update_does_not_restore_behaves_as() {
+    let home = agent_test_home("desktop-removed-model-fields");
+    let paths = config_paths("claude-desktop", &home).unwrap();
+    let path = paths[2].clone();
+    let before = serde_json::json!({"inferenceModels": [{
+        "name": "claude-opus-5",
+        "labelOverride": "old-source",
+        "anthropicFamilyTier": "sonnet",
+        "isFamilyDefault": false,
+        "behavesAs": "claude-opus-5",
+        "customExtension": {"keep": true}
+    }]});
+    let entry = claude_desktop_inference_model(CLAUDE_DESKTOP_OPUS_MODEL_ID, "new-source", false, &[]);
+    let generated = serde_json::json!({"inferenceModels": [entry]});
+    let after = prepare_config_updates(
+        "claude-desktop",
+        &paths,
+        &vec![(path.clone(), Some(serde_json::to_vec(&before).unwrap()))],
+        &[AgentFileUpdate { path, after: generated.to_string() }],
+        false,
+    ).unwrap();
+    let actual: serde_json::Value = serde_json::from_slice(after[0].1.as_ref().unwrap()).unwrap();
+    let mut expected = generated;
+    expected["inferenceModels"][0]["customExtension"] = before["inferenceModels"][0]["customExtension"].clone();
+    assert_eq!(actual, expected);
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
 fn codex_agent_config_uses_managed_provider_without_losing_comments() {
     let rendered = build_codex_agent_config(
         Some("# keep this comment\napproval_policy = \"on-request\"\n"),
@@ -1481,6 +1549,171 @@ fn zcode_agent_config_preserves_other_providers_and_uses_anthropic_messages() {
 }
 
 #[test]
+fn zcode_agent_config_backfills_manual_rule_max_output_tokens() {
+    // ZCode rejects the whole provider config when a manual model rule omits
+    // optionSpecs.maxOutputTokens, so the writer must backfill the fallback
+    // while preserving values the user already configured.
+    let models = test_agent_models(&["custom-unknown-model", "custom-unknown-other"]);
+    let existing = r#"{"schemaVersion":1,"config":{"providerConfigRules":{"providerRules":[{"providerId":"cpa-gui","providerName":"EasyCLIProxyAPI","enabled":true,"config":{"group":"standard-personal","access":{"type":"api-key","apiKey":"old"},"api":{"type":"anthropic-messages","baseUrl":"http://127.0.0.1:8317/v1"},"personalModelIds":["custom-unknown-model","custom-unknown-other"],"modelOrder":["custom-unknown-model","custom-unknown-other"]}}]},"modelConfigRules":{"providerModelRules":[],"manualProviderModelRules":[{"providerId":"cpa-gui","modelId":"custom-unknown-model","config":{"enabled":true,"optionSpecs":{"reasoningLevel":{"values":["low","high"],"map":"reasoningLevel == \"none\" ? {} : {}"}},"properties":{"contextWindow":128000}}},{"providerId":"cpa-gui","modelId":"custom-unknown-other","config":{"enabled":true,"optionSpecs":{"maxOutputTokens":{"max":96000},"reasoningLevel":{"values":["low"],"map":"reasoningLevel == \"none\" ? {} : {}"}},"properties":{"contextWindow":128000}}}]}}}"#;
+    let rendered = build_zcode_agent_config(
+        Some(existing),
+        "http://127.0.0.1:8317/v1",
+        DEFAULT_API_KEY,
+        "custom-unknown-model",
+        &models,
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    let manual_rules = value["config"]["modelConfigRules"]["manualProviderModelRules"].as_array().unwrap();
+    let backfilled = manual_rules.iter().find(|rule| rule["modelId"] == "custom-unknown-model").unwrap();
+    assert_eq!(backfilled["config"]["optionSpecs"]["maxOutputTokens"], serde_json::json!({ "max": 128_000 }));
+    let preserved = manual_rules.iter().find(|rule| rule["modelId"] == "custom-unknown-other").unwrap();
+    assert_eq!(preserved["config"]["optionSpecs"]["maxOutputTokens"], serde_json::json!({ "max": 96000 }));
+    // Provider (smart) rules keep maxOutputTokens optional in ZCode's schema.
+    let provider_rules = value["config"]["modelConfigRules"]["providerModelRules"].as_array().unwrap();
+    assert!(provider_rules.is_empty());
+}
+
+#[test]
+fn zcode_agent_config_omits_non_positive_context_and_max_output_tokens() {
+    // ZCode validates contextWindow and optionSpecs.maxOutputTokens.max as positive
+    // integers. A single non-positive value makes ZCode reject the whole personal
+    // provider config and fall back to an empty in-memory config, so every custom
+    // provider disappears from the model picker. Models such as image generators
+    // report no limits, which must be omitted instead of written as 0.
+    let home = agent_test_home("zcode-non-positive-limits");
+    let path = home.join(".zcode/v2/provider_config.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut models = test_agent_models(&["gpt-image-test"]);
+    models[0].context_window = Some(0);
+    let rendered = build_zcode_agent_config(
+        None,
+        "http://127.0.0.1:8317/v1",
+        DEFAULT_API_KEY,
+        "gpt-image-test",
+        &models,
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    let rules = value["config"]["modelConfigRules"]["providerModelRules"].as_array().unwrap();
+    let rule = rules.iter().find(|rule| rule["modelId"] == "gpt-image-test").unwrap();
+    assert!(
+        rule["config"]["properties"].get("contextWindow").is_none(),
+        "non-positive contextWindow must be omitted: {:?}",
+        rule
+    );
+    assert!(
+        rule["config"]
+            .get("optionSpecs")
+            .and_then(|specs| specs.get("maxOutputTokens"))
+            .is_none(),
+        "unknown maxOutputTokens must be omitted for provider rules: {:?}",
+        rule
+    );
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn zcode_agent_config_repairs_zero_manual_token_limits() {
+    // A manual rule that already carries max: 0 / contextWindow: 0 (for example,
+    // persisted by an earlier sync) must be repaired to positive values; otherwise
+    // ZCode discards the whole provider config on the next load.
+    let models = test_agent_models(&["custom-image-model"]);
+    let existing = r#"{"schemaVersion":1,"config":{"providerConfigRules":{"providerRules":[{"providerId":"cpa-gui","providerName":"EasyCLIProxyAPI","enabled":true,"config":{"group":"standard-personal","access":{"type":"api-key","apiKey":"old"},"api":{"type":"anthropic-messages","baseUrl":"http://127.0.0.1:8317/v1"},"personalModelIds":["custom-image-model"],"modelOrder":["custom-image-model"]}}]},"modelConfigRules":{"providerModelRules":[],"manualProviderModelRules":[{"providerId":"cpa-gui","modelId":"custom-image-model","config":{"enabled":true,"optionSpecs":{"maxOutputTokens":{"max":0},"reasoningLevel":{"values":["low"],"map":"reasoningLevel == \"none\" ? {} : {}"}},"properties":{"contextWindow":0}}}]}}}"#;
+    let rendered = build_zcode_agent_config(
+        Some(existing),
+        "http://127.0.0.1:8317/v1",
+        DEFAULT_API_KEY,
+        "custom-image-model",
+        &models,
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    let rules = value["config"]["modelConfigRules"]["manualProviderModelRules"].as_array().unwrap();
+    let rule = rules.iter().find(|rule| rule["modelId"] == "custom-image-model").unwrap();
+    let max = rule["config"]["optionSpecs"]["maxOutputTokens"]["max"].as_u64().unwrap();
+    assert!(max > 0, "manual maxOutputTokens.max must be positive, got {max}");
+    let context_window = rule["config"]["properties"]["contextWindow"].as_u64().unwrap();
+    assert!(context_window > 0, "manual contextWindow must be positive, got {context_window}");
+}
+
+#[test]
+fn zcode_reasoning_levels_are_deduplicated_and_trimmed() {
+    let levels = vec![
+        "low".to_string(),
+        " low ".to_string(),
+        String::new(),
+        "high".to_string(),
+        "low".to_string(),
+    ];
+    assert_eq!(
+        crate::agents::sanitize_reasoning_levels(&levels),
+        vec!["low".to_string(), "high".to_string()]
+    );
+}
+
+#[test]
+fn zcode_agent_config_prunes_removed_models_without_reordering() {
+    // Disabled or deleted gateway models vanish from /v1/models but used to
+    // stay in personalModelIds/modelOrder forever, so ZCode kept listing them.
+    let models = test_agent_models(&["live-a", "live-b"]);
+    let existing = r#"{"schemaVersion":1,"config":{"providerConfigRules":{"providerRules":[{"providerId":"cpa-gui","providerName":"EasyCLIProxyAPI","enabled":true,"config":{"group":"standard-personal","access":{"type":"api-key","apiKey":"old"},"api":{"type":"anthropic-messages","baseUrl":"http://127.0.0.1:8317/v1"},"personalModelIds":["live-a","gone-b","live-a"],"modelOrder":["gone-b","live-a"]}}]},"modelConfigRules":{"providerModelRules":[],"manualProviderModelRules":[]}}}"#;
+    let rendered = build_zcode_agent_config(
+        Some(existing),
+        "http://127.0.0.1:8317/v1",
+        DEFAULT_API_KEY,
+        "live-a",
+        &models,
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    let provider = value["config"]["providerConfigRules"]["providerRules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|rule| rule["providerId"] == "cpa-gui")
+        .unwrap();
+    assert_eq!(provider["config"]["modelOrder"], serde_json::json!(["live-a"]));
+    assert_eq!(provider["config"]["personalModelIds"], serde_json::json!(["live-a"]));
+}
+
+#[test]
+fn zcode_agent_config_falls_back_to_an_available_default_model() {
+    let models = test_agent_models(&["live-a", "live-b"]);
+    let rendered = build_zcode_agent_config(
+        None,
+        "http://127.0.0.1:8317/v1",
+        DEFAULT_API_KEY,
+        "gone-c",
+        &models,
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    assert_eq!(value["config"]["defaultModelSelection"]["modelId"], "live-a");
+}
+
+#[test]
+fn zcode_agent_config_backfills_empty_manual_reasoning_levels() {
+    // Manual rules must keep a non-empty reasoningLevel.values list; an empty
+    // list makes ZCode reject the whole provider config.
+    let models = test_agent_models(&["manual-empty-reasoning"]);
+    let existing = r#"{"schemaVersion":1,"config":{"providerConfigRules":{"providerRules":[{"providerId":"cpa-gui","providerName":"EasyCLIProxyAPI","enabled":true,"config":{"group":"standard-personal","access":{"type":"api-key","apiKey":"old"},"api":{"type":"anthropic-messages","baseUrl":"http://127.0.0.1:8317/v1"},"personalModelIds":["manual-empty-reasoning"],"modelOrder":["manual-empty-reasoning"]}}]},"modelConfigRules":{"providerModelRules":[],"manualProviderModelRules":[{"providerId":"cpa-gui","modelId":"manual-empty-reasoning","config":{"enabled":true,"optionSpecs":{"maxOutputTokens":{"max":128000},"reasoningLevel":{"values":[],"map":"reasoningLevel == \"none\" ? {} : {}"}},"properties":{"contextWindow":128000}}}]}}}"#;
+    let rendered = build_zcode_agent_config(
+        Some(existing),
+        "http://127.0.0.1:8317/v1",
+        DEFAULT_API_KEY,
+        "manual-empty-reasoning",
+        &models,
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    let rules = value["config"]["modelConfigRules"]["manualProviderModelRules"].as_array().unwrap();
+    let rule = rules.iter().find(|rule| rule["modelId"] == "manual-empty-reasoning").unwrap();
+    let levels = rule["config"]["optionSpecs"]["reasoningLevel"]["values"].as_array().unwrap();
+    assert!(!levels.is_empty(), "manual reasoningLevel.values must not be empty");
+}
+
+#[test]
 fn zcode_desktop_and_cli_share_the_provider_configuration() {
     let home = agent_test_home("zcode-shared-provider-config");
     let paths = agent_config_paths(AgentClient::ZCode, &home);
@@ -1667,9 +1900,17 @@ fn zcode_catalog_editor_preserves_native_rule_fields_and_empty_visibility() {
         assert_eq!(rules.len(), 2);
         assert_eq!(rules.iter().find(|rule| rule["modelId"] == "temporarily-unavailable"), Some(&absent_rule));
         let saved_rule = rules.iter().find(|rule| rule["modelId"] == "custom-model").unwrap();
-        assert!(saved_rule["config"]["optionSpecs"].get("maxOutputTokens").is_none());
+        if section == "manualProviderModelRules" {
+            // ZCode requires maxOutputTokens on manual rules; the writer must
+            // backfill the fallback instead of dropping the field.
+            assert_eq!(saved_rule["config"]["optionSpecs"]["maxOutputTokens"], serde_json::json!({ "max": 128_000 }));
+        } else {
+            assert!(saved_rule["config"]["optionSpecs"].get("maxOutputTokens").is_none());
+        }
+        // Since upstream 7944f03d the save request is the complete current catalog, so a
+        // visible id absent from it is treated as disabled or deleted. Its rule is kept above.
         assert_eq!(value["config"]["providerConfigRules"]["providerRules"][0]["config"]["personalModelIds"],
-            serde_json::json!(["temporarily-unavailable"]));
+            serde_json::json!([]));
     }
     fs::remove_dir_all(home).unwrap();
 }
@@ -1748,7 +1989,20 @@ fn zcode_catalog_preserves_explicit_context_and_reasoning_settings() {
             let saved = save_zcode_editor(&home, &models, ZCodeCatalogEditorSaveRequest {
                 models: snapshot.models, model_order: snapshot.model_order,
             }).unwrap();
-            assert_eq!(saved.models[0].configuration.reasoning_levels, expected_levels);
+            // ZCode rejects an empty reasoningLevel.values list and drops the whole provider
+            // config, so an explicit empty selection is written as the manual fallback ladder
+            // or, for catalog rules, as no spec (the catalog levels apply again on reload).
+            let expected_saved = if !expected_levels.is_empty() {
+                expected_levels.clone()
+            } else if section == "manualProviderModelRules" {
+                crate::agents::ZCODE_MANUAL_REASONING_LEVELS_FALLBACK
+                    .iter()
+                    .map(|level| (*level).to_string())
+                    .collect()
+            } else {
+                models[0].reasoning_levels.clone()
+            };
+            assert_eq!(saved.models[0].configuration.reasoning_levels, expected_saved);
             assert_eq!(saved.models[0].configuration.context_window, Some(500_000));
         }
     }
@@ -2365,7 +2619,7 @@ async fn codex_configuration_uses_public_v1_model_ids_for_selection_and_files() 
                 r#"{"models":[{"id":"public-model","context_window":1048576,"supported_reasoning_levels":["low","medium","high"],"default_reasoning_level":"medium"},{"id":"client-only-model","context_window":1048576}]}"#
             } else {
                 assert_eq!(path, "/v8/management/config.yaml");
-                "config-version: 8\n"
+                "config-version: 8\napi-keys:\n  codex:\n    - name: test-provider\n      models:\n        - name: another-model\n          max-context-length: 64000\n      keys: [{api-key: upstream-test-key}]\n"
             };
             write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
             paths.push(path);
@@ -2394,6 +2648,29 @@ async fn codex_configuration_uses_public_v1_model_ids_for_selection_and_files() 
     assert_eq!(public_model["max_context_window"], 1_048_576);
     assert_eq!(public_model["default_reasoning_level"], "medium");
     assert_eq!(public_model["supported_reasoning_levels"].as_array().unwrap().len(), 3);
+    let configured_model = catalog["models"].as_array().unwrap().iter().find(|model| model["slug"] == "another-model").unwrap();
+    assert_eq!(configured_model["context_window"], 64_000);
+    assert_eq!(configured_model["max_context_window"], 64_000);
+
+    // The manual homepage refresh writes both enriched metadata and configured
+    // context limits to the existing managed catalog, removing stale entries.
+    let home = agent_test_home("codex-manual-catalog-refresh");
+    apply_agent_configuration(
+        AgentClient::Codex, &home, port, "public-test-key", "public-model",
+        &test_agent_models(&["public-model", "stale-model"]),
+        Some(&test_codex_models(&["public-model", "stale-model"])),
+    ).unwrap();
+    assert!(sync_codex_model_catalog_if_configured(
+        &home, port, "public-test-key", &prepared.models, prepared.codex_catalog.as_deref().unwrap(),
+    ).unwrap());
+    let written: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(codex_model_catalog_path(&home)).unwrap(),
+    ).unwrap();
+    assert_eq!(written, catalog);
+    assert!(!sync_codex_model_catalog_if_configured(
+        &home, port, "public-test-key", &prepared.models, prepared.codex_catalog.as_deref().unwrap(),
+    ).unwrap());
+    fs::remove_dir_all(home).unwrap();
 }
 
 #[test]
@@ -2880,16 +3157,46 @@ fn claude_desktop_aliases_expose_role_routes_only() {
         Some(MANAGED_CLAUDE_HAIKU_ALIAS_DISPLAY_NAME)
     );
     assert!(!rendered.contains("models: [{"));
-    assert!(rendered.contains("\n      - name: gpt-5.6-sol\n"));
-    assert!(rendered.contains(&format!("\n        alias: {CLAUDE_DESKTOP_OPUS_MODEL_ID}\n")));
+    assert!(models.iter().any(|model| {
+        let identity = configured_model_identity(model).unwrap();
+        identity.1 == "gpt-5.6-sol" && identity.2.is_none()
+    }));
+    assert!(rendered.contains("\n      - name: gpt-5.6-sol\n"), "{rendered}");
     assert!(
-        rendered.contains("\n        display-name: EasyCLIProxyAPI managed Claude Opus mapping\n")
+        rendered.contains(&format!("\n        alias: {CLAUDE_DESKTOP_OPUS_MODEL_ID}\n")),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("\n        display-name: EasyCLIProxyAPI managed Claude Opus mapping\n"),
+        "{rendered}"
     );
     assert_eq!(
         ensure_claude_desktop_model_aliases_in_yaml(&rendered, &mappings, &available_models,)
             .unwrap(),
         rendered
     );
+}
+
+#[test]
+fn claude_desktop_aliases_replace_legacy_suffixed_routes() {
+    let mut input = "openai-compatibility:\n  - name: CPA\n    base-url: https://example.com/v1\n    models:\n      - name: upstream-model\n".to_string();
+    for (alias, display_name) in [
+        ("claude-opus-5-cpa", MANAGED_CLAUDE_OPUS_ALIAS_DISPLAY_NAME),
+        ("claude-sonnet-5-cpa", MANAGED_CLAUDE_SONNET_ALIAS_DISPLAY_NAME),
+        ("claude-haiku-4-5-cpa", MANAGED_CLAUDE_HAIKU_ALIAS_DISPLAY_NAME),
+    ] {
+        input.push_str(&format!("      - name: upstream-model\n        alias: {alias}\n        display-name: {display_name}\n"));
+    }
+    let mappings = ClaudeDesktopModelMappings::all("upstream-model");
+    let models = test_agent_models(&["upstream-model"]);
+    let rendered = ensure_claude_desktop_model_aliases_in_yaml(&input, &mappings, &models).unwrap();
+    let value: serde_norway::Value = serde_norway::from_str(&rendered).unwrap();
+    let root = value.as_mapping().unwrap();
+    for name in ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"] {
+        assert_eq!(configured_model_client_identity(root, name), Some(("upstream-model".into(), name.into())));
+        assert!(configured_model_client_identity(root, &format!("{name}-cpa")).is_none());
+    }
+    assert_eq!(ensure_claude_desktop_model_aliases_in_yaml(&rendered, &mappings, &models).unwrap(), rendered);
 }
 
 #[test]
@@ -2958,7 +3265,7 @@ fn claude_desktop_aliases_support_claude_oauth_models() {
     let mappings = ClaudeDesktopModelMappings::all("claude-sonnet-4-6");
     let available_models = test_agent_models(&["claude-sonnet-4-6"]);
     let definitions = vec![OAuthModelDefinitions {
-        channel: oauth_alias_channel("claude").unwrap(),
+        channel: "claude".to_string(),
         models: vec![CodexModelDefinition {
             id: "claude-sonnet-4-6".to_string(),
             display_name: None,
@@ -2997,7 +3304,7 @@ fn claude_desktop_aliases_support_xai_oauth_models() {
     let mappings = ClaudeDesktopModelMappings::all("grok-4");
     let available_models = test_agent_models(&["grok-4"]);
     let definitions = vec![OAuthModelDefinitions {
-        channel: oauth_alias_channel("xai").unwrap(),
+        channel: "xai".to_string(),
         models: vec![CodexModelDefinition {
             id: "grok-4".to_string(),
             display_name: None,
@@ -3569,4 +3876,275 @@ fn default_tauri_capability_grants_app_version() {
         permissions.iter().any(|entry| entry.as_str() == Some("core:app:allow-version")),
         "src-tauri/capabilities/default.json must include core:app:allow-version"
     );
+}
+
+#[test]
+fn runtime_catalog_reasoning_levels_reach_workbuddy_opencode_and_harness() {
+    let mut models = parse_agent_model_options(&serde_json::json!({
+        "data": [
+            {"id": "reasoning-model", "object": "model", "created": 0, "owned_by": "test"},
+            {"id": "plain-model", "object": "model", "created": 0, "owned_by": "test"}
+        ]
+    }))
+    .unwrap();
+    assert!(models.iter().all(|model| model.reasoning_levels.is_empty()));
+    let runtime = codex_catalog::parse_runtime_models(&serde_json::json!({
+        "models": [{
+            "slug": "REASONING-MODEL",
+            "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}]
+        }]
+    }))
+    .unwrap();
+    codex_catalog::merge_runtime_reasoning_levels(&mut models, &runtime);
+    assert_eq!(models[0].reasoning_levels, ["low", "high"]);
+    assert!(models[1].reasoning_levels.is_empty());
+
+    let workbuddy = build_workbuddy_agent_config(
+        None,
+        "http://127.0.0.1:8317/v1",
+        "key",
+        "reasoning-model",
+        &models,
+    )
+    .unwrap();
+    let workbuddy = parse_workbuddy_config(Some(&workbuddy)).unwrap();
+    let entry = &workbuddy["models"][0];
+    assert_eq!(entry["name"], "CPA / reasoning-model");
+    assert_eq!(entry["supportsReasoning"], true);
+    assert_eq!(entry["onlyReasoning"], true);
+    assert_eq!(entry["reasoning"]["defaultEffort"], "high");
+    assert_eq!(entry["reasoning"]["supportedEfforts"], serde_json::json!(["low", "high"]));
+
+    let opencode = build_opencode_agent_config(
+        None,
+        "http://127.0.0.1:8317/v1",
+        "key",
+        "reasoning-model",
+        &models,
+    )
+    .unwrap();
+    let opencode: serde_json::Value = serde_json::from_str(&opencode).unwrap();
+    let entry = &opencode["provider"]["cpa-gui"]["models"]["reasoning-model"];
+    assert_eq!(entry["reasoning"], true);
+    assert_eq!(entry["variants"]["low"]["reasoning_effort"], "low");
+    assert_eq!(entry["variants"]["high"]["reasoning_effort"], "high");
+    assert_eq!(entry["request"]["variant"], "high");
+
+    let harness = build_deepseek_harness_models(&models, "reasoning-model").unwrap();
+    assert_eq!(harness[0]["reasoningEfforts"]["low"].as_str(), Some("low"));
+    assert_eq!(harness[0]["reasoningEfforts"]["high"].as_str(), Some("high"));
+    assert!(harness[1].get("reasoningEfforts").is_none());
+}
+
+#[tokio::test]
+async fn prepared_reasoning_metadata_uses_the_client_catalog_and_tolerates_optional_failures() {
+    use std::io::{Read, Write};
+
+    for client in [AgentClient::WorkBuddy, AgentClient::OpenCode, AgentClient::DeepSeekHarness] {
+        for available in [true, false] {
+            if client == AgentClient::WorkBuddy && !available {
+                continue;
+            }
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = std::thread::spawn(move || {
+                let request_count = if client == AgentClient::DeepSeekHarness { 3 } else { 2 };
+                let mut paths = Vec::new();
+                for _ in 0..request_count {
+                    let (mut socket, _) = listener.accept().unwrap();
+                    socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                    let mut request = Vec::new();
+                    let mut buffer = [0; 2048];
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        let count = socket.read(&mut buffer).unwrap();
+                        assert!(count > 0);
+                        request.extend_from_slice(&buffer[..count]);
+                    }
+                    let request = String::from_utf8(request).unwrap();
+                    let path = request.split_whitespace().nth(1).unwrap().to_string();
+                    let (status, body) = match path.as_str() {
+                        "/v1/models" => (
+                            "200 OK",
+                            r#"{"data":[{"id":"reasoning-model","object":"model","created":0,"owned_by":"test"}]}"#,
+                        ),
+                        "/v1/models?client_version=0.162.1" => {
+                            assert!(request.to_ascii_lowercase().contains("authorization: bearer reasoning-test-key\r\n"));
+                            if available {
+                                (
+                                    "200 OK",
+                                    r#"{"models":[{"slug":"REASONING-MODEL","context_window":128000,"supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}]}]}"#,
+                                )
+                            } else {
+                                ("503 Service Unavailable", r#"{"error":"catalog unavailable"}"#)
+                            }
+                        }
+                        "/v8/management/config.yaml" => ("200 OK", "config-version: 8\n"),
+                        _ => panic!("unexpected request path: {path}"),
+                    };
+                    write!(socket, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                    paths.push(path);
+                }
+                assert_eq!(paths.iter().filter(|path| path.contains("client_version=")).count(), 1);
+            });
+            let config = GuiConfigFile {
+                port,
+                management_secret_key: "management-test-key".into(),
+                api_keys: vec![GuiApiKeyEntry {
+                    key: "reasoning-test-key".into(),
+                    remark: String::new(),
+                }],
+                ..GuiConfigFile::default()
+            };
+            let prepared = fetch_prepared_agent_models(client, &config).await;
+            server.join().unwrap();
+            let prepared = prepared.unwrap();
+            assert_eq!(prepared.models.len(), 1);
+            assert_eq!(prepared.models[0].name, "reasoning-model");
+            let expected = if available { vec!["low", "high"] } else { Vec::new() };
+            assert_eq!(prepared.models[0].reasoning_levels, expected);
+        }
+    }
+}
+
+#[test]
+fn reasoning_emitters_preserve_custom_fields_and_ignore_empty_levels() {
+    let levels = vec!["low".to_string(), "high".to_string()];
+    let mut workbuddy = serde_json::json!({
+        "supportsReasoning": false,
+        "onlyReasoning": false,
+        "reasoning": {
+            "canDisableThinking": true,
+            "defaultEffort": "low",
+            "supportedEfforts": ["low"]
+        }
+    });
+    let original_workbuddy = workbuddy.clone();
+    let mut opencode = serde_json::json!({
+        "reasoning": false,
+        "variants": {"low": {"reasoning_effort": "minimal"}},
+        "request": {"variant": "low"}
+    });
+    let mut harness: serde_norway::Value = serde_norway::from_str("reasoningEfforts:\n  low: minimal\n").unwrap();
+    for _ in 0..2 {
+        update_workbuddy_reasoning_fields(&mut workbuddy, &levels);
+        update_opencode_reasoning_fields(&mut opencode, &levels);
+        update_harness_reasoning_fields(&mut harness, &levels);
+    }
+    assert_eq!(workbuddy, original_workbuddy);
+    assert_eq!(opencode["reasoning"], false);
+    assert_eq!(opencode["variants"]["low"]["reasoning_effort"], "minimal");
+    assert_eq!(opencode["variants"]["high"]["reasoning_effort"], "high");
+    assert_eq!(opencode["request"]["variant"], "low");
+    assert_eq!(harness["reasoningEfforts"]["low"].as_str(), Some("minimal"));
+    assert_eq!(harness["reasoningEfforts"]["high"].as_str(), Some("high"));
+    for original in [serde_json::json!({}), workbuddy] {
+        let mut entry = original.clone();
+        update_workbuddy_reasoning_fields(&mut entry, &[]);
+        assert_eq!(entry, original);
+    }
+    for original in [serde_json::json!({}), opencode] {
+        let mut entry = original.clone();
+        update_opencode_reasoning_fields(&mut entry, &[]);
+        assert_eq!(entry, original);
+    }
+    for original in [serde_norway::Value::Mapping(serde_norway::Mapping::new()), harness] {
+        let mut entry = original.clone();
+        update_harness_reasoning_fields(&mut entry, &[]);
+        assert_eq!(entry, original);
+    }
+}
+
+#[test]
+fn opencode_managed_models_declare_top_level_reasoning_and_variants() {
+    let models = vec![AgentModelOption {
+        name: "tc-glm-5.3-flash".into(),
+        alias: None,
+        is_alias: false,
+        context_window: Some(128_000),
+        input_modalities: None,
+        reasoning_levels: vec!["max".into(), "xhigh".into(), "high".into()],
+        harness_metadata: None,
+    }];
+    let config = build_opencode_agent_config(
+        None,
+        "http://127.0.0.1:8317/v1",
+        "key",
+        "tc-glm-5.3-flash",
+        &models,
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&config).unwrap();
+    let entry = &value["provider"]["cpa-gui"]["models"]["tc-glm-5.3-flash"];
+    // Top-level boolean only: capabilities.reasoning is dropped by OpenCode at runtime.
+    assert_eq!(entry["reasoning"], true);
+    assert!(entry.get("capabilities").is_none());
+    assert_eq!(entry["variants"]["max"]["reasoning_effort"], "max");
+    assert_eq!(entry["variants"]["xhigh"]["reasoning_effort"], "xhigh");
+    assert_eq!(entry["variants"]["high"]["reasoning_effort"], "high");
+    assert_eq!(entry["request"]["variant"], "xhigh");
+    // Models without configured levels keep the previous minimal shape.
+    let plain = vec![AgentModelOption {
+        name: "plain-model".into(),
+        alias: None,
+        is_alias: false,
+        context_window: Some(128_000),
+        input_modalities: None,
+        reasoning_levels: Vec::new(),
+        harness_metadata: None,
+    }];
+    let config = build_opencode_agent_config(
+        None,
+        "http://127.0.0.1:8317/v1",
+        "key",
+        "plain-model",
+        &plain,
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&config).unwrap();
+    let entry = &value["provider"]["cpa-gui"]["models"]["plain-model"];
+    assert!(entry.get("reasoning").is_none());
+    assert!(entry.get("variants").is_none());
+    assert!(entry.get("request").is_none());
+}
+
+#[test]
+fn harness_managed_models_declare_reasoning_efforts() {
+    let models = vec![AgentModelOption {
+        name: "tc-glm-5.3-flash".into(),
+        alias: None,
+        is_alias: false,
+        context_window: Some(128_000),
+        input_modalities: None,
+        reasoning_levels: vec!["max".into(), "xhigh".into(), "high".into()],
+        harness_metadata: None,
+    }];
+    let rendered = build_deepseek_harness_models(&models, "tc-glm-5.3-flash").unwrap();
+    let entry = &rendered[0];
+    let id = entry.get("id").and_then(serde_norway::Value::as_str).unwrap();
+    assert_eq!(id, "tc-glm-5.3-flash");
+    let efforts = entry.get("reasoningEfforts").unwrap();
+    assert_eq!(
+        efforts.get("max").and_then(serde_norway::Value::as_str),
+        Some("max")
+    );
+    assert_eq!(
+        efforts.get("xhigh").and_then(serde_norway::Value::as_str),
+        Some("xhigh")
+    );
+    assert_eq!(
+        efforts.get("high").and_then(serde_norway::Value::as_str),
+        Some("high")
+    );
+    // Without configured levels the field is absent.
+    let plain = vec![AgentModelOption {
+        name: "plain-model".into(),
+        alias: None,
+        is_alias: false,
+        context_window: Some(128_000),
+        input_modalities: None,
+        reasoning_levels: Vec::new(),
+        harness_metadata: None,
+    }];
+    let rendered = build_deepseek_harness_models(&plain, "plain-model").unwrap();
+    assert!(rendered[0].get("reasoningEfforts").is_none());
 }

@@ -6,6 +6,51 @@ Every functional change must update **Unreleased** in the same commit or pull re
 
 ## Unreleased
 
+## 1.3.117 — 2026-11-20
+
+### Versioning
+
+- Custom versions now mirror the upstream desktop release they are built on: upstream `0.3.117` becomes custom `1.3.117`. The leading 1 marks this distribution, sorts above every 0.4.x release so existing installs update normally, and keeps our tags from colliding with upstream's `v0.*` tags.
+- Fork-only releases between upstream releases use numeric build metadata (`1.3.117+1`), which Windows shows as 1.3.117.1. Added `app_update_comparison_orders_fork_revisions` to lock in updater ordering. The scheme is documented in the [merge guide](docs/upstream-merges.md#versioning). The first `+N` release still needs a preview run to confirm GitHub tag and asset names containing `+`.
+- Rewrote the README to describe what this distribution adds over upstream (Subscription Usage with priority and affinity, Subscription Value, storage, the installer, the update channel and carried fixes), with screenshots taken from mock data.
+- The prepared 0.4.4 integration of upstream v0.3.99 was never published. Its changes ship in this release, and its release notes were folded into the 1.3.117 notes.
+
+### Upstream integration: v0.3.117
+
+- Merged upstream desktop **v0.3.117**, commit `4f0ba66a63435b45246f16c759091a52551c314c`, on top of the unreleased v0.3.99 integration (`375bcbbf`). The pinned official core advances from **8.0.63** to **8.0.78**, matching upstream's pin. The official Windows amd64 archive matches the published SHA-256 `9b87222ccc4e9705193fcfe6ebb1fcd08154987b30d43e80cd03326bbc875831`.
+- Incorporated ACP access for Antigravity, background automatic updates, sensitive word rules, per-agent system prompt editing, custom theme import, the Live Routing redesign, the model price editor, plugin OAuth account lists, skipped-release notes, and many usage, ZCode, Codex and Claude Desktop fixes.
+- Retained Subscription Usage, Subscription Value and effective-dated fees, storage locations and backups, account priority and affinity controls, the Windows installer, fork-owned desktop updates and catalogs, and the stable-release CI guards.
+- Resolved 18 conflicted files. The release workflow keeps Windows-only builds and still runs `bun test` before packaging, and it now uses upstream's shared prebuilt frontend job. Locale files combine both sides. Routing, plugin and ZCode dialogs keep upstream's redesigns with our shared controls and theme tokens. Custom README, Cargo versioning and settings categories (sensitive words plus storage) are kept.
+
+### Ownership and behavior decisions
+
+- The new background updater resolves desktop updates only through our validated `appliedi/EasyCLIProxyAPI-Custom` manifest; core updates stay official.
+- Sensitive word cloud rules now download from this repository instead of upstream, matching how the model catalog works. The bundled rules fix an upstream typo that rewrote `codex` as "Antigratity Assistant" in Antigravity prompts.
+- Adopted upstream's ZCode validity rule: ZCode rejects an empty `reasoningLevel.values` list and discards the whole provider configuration. Manual models with no levels are written with a low/medium/high list; catalog models drop the spec. This replaces our earlier preservation of explicitly empty reasoning lists on write. The editor still shows the empty selection before saving.
+- Adopted upstream's removal of `behavesAs` from Claude Desktop model entries (our 0.4.4 tests had added it).
+
+### Fixes to inherited upstream problems
+
+- Model alias and agent YAML saves wrote new entries in JSON flow style (`- {"name": ...}`) since upstream v0.3.109. They are now written in normal block YAML with comments preserved, which also fixes Claude Desktop alias routing and Codex thinking-alias detection that read the flow output incorrectly.
+- On Windows, Antigravity usage compared file paths as text, so mixed separators could double-count legacy rows or wrongly retire chunked sessions. Paths are now compared by component.
+- ZCode kept a deleted model as its default when the requested model had disappeared, and did not refill an existing empty manual reasoning list. Both are fixed.
+- The system prompt proxy now bounds gzip decompression at the rewrite limit instead of expanding the whole body first. Opening the ZCode prompt editor can no longer panic when the installed bundle has a multibyte character at the extraction window edge. When a saved prompt proxy port is taken at startup, the agent's configured URL now follows the replacement port. Saving reverse proxy settings no longer replaces an unreadable or malformed `config.toml` with defaults; only a missing file starts fresh.
+- Known upstream issues deferred to a later release: Responses requests with several leading system messages only have the first rewritten in Replace mode, and a failed reverse-proxy reconfiguration can misreport the listener state.
+- Settings at 1240px and wider no longer leave half-width orphan cards in the Routing and Upstreams tabs after upstream moved the retry card and added list fields.
+- Fixed Windows temp-folder cleanup in new upstream tests by closing SQLite handles first. Updated stale upstream tests to current intentional behavior (retry card in Routing, catalog-scoped ZCode visibility, the ACP OAuth tab, and the current sensitive word rule count).
+
+### Design system and localization
+
+- New upstream screens use our shared controls: ACP access, automatic updates, Live Routing, theme import, the model price drawer and the system prompt dialog now use the shared Switch, buttons, Notice, EmptyState and radius tokens, and their styles live in CSS layers. Two narrowly scoped exceptions follow existing precedents: routing node rows act as their own controls, and "ECPA" is treated as product text.
+- Added complete Russian and Japanese translations for ACP and the new pricing keys, with no English fallbacks.
+
+### Validation
+
+- `bun run check` passed. `bun test`: **1,494 passed, 32 skipped, 2 failed**. The two failures are upstream's new macOS DMG packaging tests, which need Python, and Python is not installed on this Windows machine. This fork does not ship macOS builds.
+- Full Windows Rust suite: **1,422 passed, 0 failed, 24 ignored**. Pure upstream v0.3.117 fails 54 tests on the same machine.
+- The isolated 8.0.78 core API suite passed 28 tests, and the priority/affinity routing integration passed.
+- Browser checks passed for Subscription Usage, Subscription Value, storage, settings (all ten categories) and automatic updates. Eight other upstream browser suites fail identically on pure upstream and are recorded in the [validation report](docs/upstream-0.3.117-validation.md).
+
 ## 0.4.3 — 2026-11-05
 
 ### Review follow-up

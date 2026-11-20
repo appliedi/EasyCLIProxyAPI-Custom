@@ -299,7 +299,7 @@ pub(crate) fn merge_runtime_context_windows(
     }
 }
 
-pub(crate) fn merge_zcode_reasoning_levels(
+pub(crate) fn merge_runtime_reasoning_levels(
     models: &mut [AgentModelOption],
     runtime_models: &[CodexRuntimeModel],
 ) {
@@ -308,6 +308,55 @@ pub(crate) fn merge_zcode_reasoning_levels(
             .find(|runtime| runtime.slug.eq_ignore_ascii_case(&model.name))
         {
             model.reasoning_levels = runtime.reasoning_levels.clone().unwrap_or_default();
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn merge_zcode_reasoning_levels(
+    models: &mut [AgentModelOption],
+    runtime_models: &[CodexRuntimeModel],
+) {
+    merge_runtime_reasoning_levels(models, runtime_models);
+}
+
+/// The Codex client catalog clones its default template onto every model it does
+/// not know, so custom openai-compatibility providers inherit this context window
+/// instead of their real limit.
+pub(crate) const CPA_RUNTIME_CONTEXT_PLACEHOLDER: u64 = 500_000;
+
+/// Replaces unknown context windows with authoritative values imported from the
+/// external model capability catalog (models.dev / LiteLLM).
+pub(crate) fn merge_external_model_capabilities(models: &mut [AgentModelOption]) {
+    let Ok(connection) = crate::usage::open_usage_database() else {
+        return;
+    };
+    let Ok(capabilities) = crate::usage::load_model_capabilities(&connection) else {
+        return;
+    };
+    apply_model_capabilities(models, &capabilities);
+}
+
+pub(crate) fn apply_model_capabilities(
+    models: &mut [AgentModelOption],
+    capabilities: &[crate::usage::ModelCapabilities],
+) {
+    for model in models.iter_mut() {
+        let unknown = model
+            .context_window
+            .is_none_or(|context_window| context_window == CPA_RUNTIME_CONTEXT_PLACEHOLDER);
+        if !unknown {
+            continue;
+        }
+        let Some(capabilities) = crate::usage::find_model_capabilities(capabilities, &model.name)
+        else {
+            continue;
+        };
+        if let Some(context_window) = capabilities.context_window {
+            model.context_window = Some(context_window);
+        }
+        if model.input_modalities.is_none() && !capabilities.input_modalities.is_empty() {
+            model.input_modalities = Some(capabilities.input_modalities.clone());
         }
     }
 }
@@ -855,7 +904,7 @@ fn apply_runtime_reasoning_levels(model: &mut Map<String, Value>, runtime: &Code
 
 fn disable_fallback_capabilities(model: &mut Map<String, Value>) {
     model.insert("prefer_websockets".to_string(), Value::Bool(false));
-    model.insert("supports_search_tool".to_string(), Value::Bool(false));
+    model.insert("supports_search_tool".to_string(), Value::Bool(true));
     model.insert(
         "web_search_tool_type".to_string(),
         Value::String("text".to_string()),
@@ -1036,6 +1085,45 @@ fn is_allowed_reasoning_level(level: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn external_capabilities_replace_the_codex_default_template_placeholder() {
+        let mut entry = crate::usage::ModelCapabilities::default();
+        entry.model = "GLM-5.3-Flash".to_string();
+        entry.context_window = Some(1_000_000);
+        entry.input_modalities = vec!["text".to_string(), "image".to_string()];
+        let capabilities = vec![entry];
+        let option = |name: &str, context_window: Option<u64>| AgentModelOption {
+            name: name.to_string(),
+            alias: None,
+            is_alias: false,
+            context_window,
+            input_modalities: None,
+            harness_metadata: None,
+            reasoning_levels: Vec::new(),
+        };
+        let mut models = vec![
+            // Placeholder cloned from the Codex client catalog default template.
+            option("GLM-5.3-Flash", Some(CPA_RUNTIME_CONTEXT_PLACEHOLDER)),
+            // A real runtime value must survive untouched.
+            option("gemini-3.8-flash", Some(1_048_576)),
+            // Models missing from the external catalog keep the placeholder.
+            option("SCNet-Max", Some(CPA_RUNTIME_CONTEXT_PLACEHOLDER)),
+            // A missing context window is also filled when the catalog knows it.
+            option("glm-5.3-flash", None),
+        ];
+
+        apply_model_capabilities(&mut models, &capabilities);
+
+        assert_eq!(models[0].context_window, Some(1_000_000));
+        assert_eq!(
+            models[0].input_modalities,
+            Some(vec!["text".to_string(), "image".to_string()])
+        );
+        assert_eq!(models[1].context_window, Some(1_048_576));
+        assert_eq!(models[2].context_window, Some(CPA_RUNTIME_CONTEXT_PLACEHOLDER));
+        assert_eq!(models[3].context_window, Some(1_000_000));
+    }
+
     fn reasoning_efforts(model: &Map<String, Value>) -> Vec<String> {
         model
             .get("supported_reasoning_levels")
@@ -1137,8 +1225,8 @@ mod tests {
         validate_embedded_catalog().unwrap();
         let state = catalog_state().unwrap().read().unwrap();
         let sources = &state.sources;
-        assert_eq!(sources.templates.len(), 11);
-        assert_eq!(sources.revision, 8);
+        assert_eq!(sources.templates.len(), 12);
+        assert_eq!(sources.revision, 9);
         let embedded: Value = serde_json::from_str(MODEL_CATALOG_JSON).unwrap();
         assert!(embedded.get("fallback_model").is_none());
         let fallback: Value = serde_json::from_str(FALLBACK_MODEL_JSON).unwrap();
@@ -1164,6 +1252,7 @@ mod tests {
         assert_eq!(sources.fallback["visibility"], "none");
         assert_eq!(sources.fallback["default_reasoning_summary"], "auto");
         assert_eq!(sources.fallback["supports_parallel_tool_calls"], false);
+        assert_eq!(sources.fallback["supports_search_tool"], true);
         assert_eq!(sources.fallback["truncation_policy"]["mode"], "bytes");
 
         let official_slugs = [
@@ -1177,6 +1266,7 @@ mod tests {
             "gpt-5.6-terra",
             "gpt-5.6-luna",
             "gpt-5.5",
+            "gpt-oss-120b-medium",
             "codex-auto-review",
         ];
         assert!(official_slugs
@@ -1594,7 +1684,7 @@ mod tests {
             assert!(sources.template_for_slug(slug).is_none(), "{slug}");
             let runtime = runtime(serde_json::json!({"data":[{"id":slug}]}));
             let models = output_models(&prepare_catalog_with_sources(&runtime, &sources).unwrap());
-            assert_eq!(models[0]["supports_search_tool"], false);
+            assert_eq!(models[0]["supports_search_tool"], true);
         }
     }
 
@@ -1781,7 +1871,7 @@ mod tests {
             model["base_instructions"],
             "You are Codex, a model-neutral coding agent."
         );
-        assert_eq!(model["supports_search_tool"], false);
+        assert_eq!(model["supports_search_tool"], true);
         assert_eq!(
             model["service_tiers"],
             serde_json::json!([{
@@ -1833,7 +1923,7 @@ mod tests {
             "include_skills_usage_instructions": false,
             "include_plugin_usage_instructions": false,
             "include_apps_usage_instructions": false,
-            "supports_search_tool": false,
+            "supports_search_tool": true,
             "use_responses_lite": false,
             "guardian": null,
             "node_repl_auto_review_required": false,
@@ -2098,6 +2188,44 @@ mod tests {
             .find(|level| level["effort"] == "high")
             .unwrap();
         assert_eq!(high["description"], fallback_descriptions);
+    }
+
+    #[test]
+    fn third_party_models_default_to_tool_search_without_touching_official_templates() {
+        let sources = parse_sources(MODEL_CATALOG_JSON).unwrap();
+        let mut models: Vec<Value> = sources
+            .templates
+            .keys()
+            .map(|slug| serde_json::json!({"id":slug}))
+            .collect();
+        models.extend([
+            serde_json::json!({"id":"third-party-model", "supports_search_tool":false}),
+            serde_json::json!({"id":"vendor/third-party-model"}),
+        ]);
+        let runtime = runtime(serde_json::json!({"models":models}));
+        let catalog = prepare_catalog_with_sources(&runtime, &sources).unwrap();
+        for model in output_models(&catalog) {
+            let slug = model["slug"].as_str().unwrap();
+            if let Some(template) = sources.template_for_slug(slug) {
+                assert_eq!(
+                    model.get("supports_search_tool"),
+                    template.value.get("supports_search_tool"),
+                    "{slug}"
+                );
+            } else {
+                assert_eq!(model["supports_search_tool"], true, "{slug}");
+            }
+        }
+    }
+
+    #[test]
+    fn fallback_templates_without_a_tool_search_field_default_to_enabled() {
+        let mut sources = test_sources();
+        sources.fallback.remove("supports_search_tool");
+        let runtime = runtime(serde_json::json!({"models":[{"id":"C"}]}));
+        let catalog = prepare_catalog_with_sources(&runtime, &sources).unwrap();
+        let model = &output_models(&catalog)[0];
+        assert_eq!(model["supports_search_tool"], true);
     }
 
     #[test]

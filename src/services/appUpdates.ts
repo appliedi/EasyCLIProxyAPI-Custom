@@ -7,9 +7,13 @@ export type AppUpdateInfo = {
   updateAvailable: boolean;
   releaseUrl: string;
   releaseNotes: Partial<Record<AppLocale, string>> | null;
+  skippedReleaseNotes?: { version: string; releaseNotes: Partial<Record<AppLocale, string>> }[];
   publishedAt: string;
   currentBuildAt: string | null;
   autoUpdateSupported: boolean;
+  preserveCoreSupported?: boolean;
+  downloadUrl: string | null;
+  downloadFileName: string | null;
   downloadSizeBytes: number | null;
   unsupportedReason: string | null;
   updateChannel: string;
@@ -17,6 +21,7 @@ export type AppUpdateInfo = {
 
 export type AppUpdateTask = {
   running: boolean;
+  preserveCore?: boolean;
   cancellable: boolean;
   phase: AppUpdatePhase;
   targetVersion: string | null;
@@ -45,8 +50,8 @@ export const checkAppUpdate = (): Promise<AppUpdateInfo> =>
 export const getAppUpdateTask = (): Promise<AppUpdateTask> =>
   invoke<AppUpdateTask>('get_app_update_task');
 
-export const startAppUpdate = (): Promise<void> =>
-  invoke<void>('start_app_update');
+export const startAppUpdate = (preserveCore = false): Promise<void> =>
+  invoke<void>('start_app_update', { preserveCore });
 
 export const cancelAppUpdate = (): Promise<void> =>
   invoke<void>('cancel_app_update');

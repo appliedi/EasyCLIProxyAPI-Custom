@@ -902,6 +902,13 @@ button.oauth-account-count:focus-visible {
   color: var(--error-color);
 }
 
+/* Selection is shared by toggle actions and checkbox-style button choices. */
+:root .secondary-button:is(.active, .selected) {
+  border-color: var(--primary-color);
+  background: var(--ui-accent-soft);
+  color: var(--primary-color);
+}
+
 /* Quota Progress Bar Polish */
 .real-quota-track {
   height: 8px;

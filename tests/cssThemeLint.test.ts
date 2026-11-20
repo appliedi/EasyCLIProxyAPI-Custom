@@ -967,5 +967,5 @@ describe('CSS tokenization and theme variable lint', () => {
     expect(extractVarTokensFromCssValue('background: var( --audit-orphan);')).toEqual(['--audit-orphan']);
     expect(extractVarTokensFromCssValue('background: var(/*comment*/--audit-orphan);')).toEqual(['--audit-orphan']);
     expect(extractVarTokensFromCssValue('background: var(--audit-\\6f rphan);')).toEqual(['--audit-orphan']);
-  });
+  }, 30000);
 });

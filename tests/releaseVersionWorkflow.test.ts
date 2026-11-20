@@ -29,4 +29,10 @@ describe('release version resolution workflow', () => {
       expect(readFileSync(output,'utf8')).toBe('version=1.2.3\ntag=v1.2.3\n');
     } finally { rmSync(directory,{recursive:true,force:true}); }
   });
+
+  it('validates all contributors and retargeted pull requests', () => {
+    const releaseWorkflow = Bun.YAML.parse(readFileSync('.github/workflows/release.yml', 'utf8')) as any;
+    expect(releaseWorkflow.jobs.version.if).toBeUndefined();
+    expect(releaseWorkflow.on.pull_request.types).toContain('edited');
+  });
 });

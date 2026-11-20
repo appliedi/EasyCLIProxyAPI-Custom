@@ -1212,6 +1212,36 @@ export const reorderProviderRecords = (
   return next;
 };
 
+export const isModelExcluded = (record: Record<string, unknown>, modelName: string) => {
+  const normalized = modelName.trim().toLowerCase();
+  return Array.isArray(record['excluded-models']) && record['excluded-models'].some((rule) => {
+    const value = String(rule).trim();
+    return value === '*' || modelMatchesRule(modelName, value) || value.toLowerCase() === normalized;
+  });
+};
+
+export const providerSupportsModelExclusions = (section: ProviderSection) => !definitionFor(section).openAi;
+
+export const providerRecordWithModelEnabledState = (
+  section: ProviderSection,
+  record: Record<string, unknown>,
+  modelName: string,
+  enabled: boolean,
+) => {
+  if (!providerSupportsModelExclusions(section)) return null;
+  const normalized = modelName.trim().toLowerCase();
+  if (!normalized) return stripResponseFields(record);
+  const nextRecord = stripResponseFields(record);
+  const excludedModels = Array.isArray(nextRecord['excluded-models'])
+    ? nextRecord['excluded-models'].map(String).filter((model) => model.trim())
+    : [];
+  const withoutModel = excludedModels.filter((model) => model.trim().toLowerCase() !== normalized);
+  if (!enabled) withoutModel.push(modelName.trim());
+  if (withoutModel.length > 0) nextRecord['excluded-models'] = withoutModel;
+  else delete nextRecord['excluded-models'];
+  return nextRecord;
+};
+
 export const providerRecordWithDisabledState = (
   section: ProviderSection,
   record: Record<string, unknown>,
@@ -1555,6 +1585,27 @@ export function ApiAccessPage() {
     }
   };
 
+  const toggleProviderModel = async (row: ProviderRow, modelName: string, enabled: boolean) => {
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const latestRows = await providerGroupsApi.get(row.section);
+      if (!row.source) throw new Error(t('apiAccess.error.stale'));
+      const nextRecord = providerRecordWithModelEnabledState(row.section, row.record, modelName, enabled);
+      if (!nextRecord) return;
+      const nextRows = updateProviderEntry(latestRows, row.source, row.record, nextRecord);
+      await providerGroupsApi.put(row.section, nextRows);
+      await persistEntryRemarks(row.section, latestRows, nextRows);
+      await loadProviders(false);
+    } catch (requestError) {
+      setNotice(requestErrorMessage(requestError), 'error');
+      throw requestError;
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const toggleProvider = async (row: ProviderRow) => {
     setBusy(true);
     setError('');
@@ -1751,6 +1802,9 @@ export function ApiAccessPage() {
           key={providerHealthIdentity(healthDialogRow)}
           row={healthDialogRow}
           onClose={() => setHealthDialogRow(null)}
+          onModelToggle={providerSupportsModelExclusions(healthDialogRow.section)
+            ? (modelName, enabled) => toggleProviderModel(healthDialogRow, modelName, enabled)
+            : undefined}
         />
       ) : null}
       <FloatingNotice key={feedback.revision} notice={feedback.notice} onDismiss={feedback.clearNotice} />
@@ -1761,10 +1815,11 @@ export function ApiAccessPage() {
 type ProviderHealthDialogProps = {
   row: ProviderRow;
   onClose: () => void;
+  onModelToggle?: (modelName: string, enabled: boolean) => Promise<void>;
   keySelector?: ReactNode;
 };
 
-function ProviderGroupHealthDialog({ row, onClose }: ProviderHealthDialogProps) {
+function ProviderGroupHealthDialog({ row, onClose, onModelToggle }: ProviderHealthDialogProps) {
   const { t } = useI18n();
   const keys = providerGroupKeys(row.record);
   const [selected, setSelected] = useState(0);
@@ -1775,7 +1830,7 @@ function ProviderGroupHealthDialog({ row, onClose }: ProviderHealthDialogProps) 
     return { ...row, record, apiKey: readString(key, 'api-key'), apiKeys: [readString(key, 'api-key')],
       authIndex: readString(key, 'auth-index', 'authIndex'), models: modelsFromRecord(record.models) };
   }, [row, key]);
-  return <ProviderHealthDialog key={selected} row={effectiveRow} onClose={onClose} keySelector={keys.length ?
+  return <ProviderHealthDialog key={selected} row={effectiveRow} onClose={onClose} onModelToggle={onModelToggle} keySelector={keys.length ?
     <label className="provider-health-key-selector"><span>{t('apiAccess.groups.healthKey')}</span>
       <Select value={selected} onChange={(event) => setSelected(Number(event.currentTarget.value))}>
         {keys.map((entry, index) => <option key={index} value={index}>{t('apiAccess.groups.keyNumber', { number: index + 1 })} · {maskSecret(readString(entry, 'api-key'))}</option>)}
@@ -1784,7 +1839,7 @@ function ProviderGroupHealthDialog({ row, onClose }: ProviderHealthDialogProps) 
 
 type ProviderModelHealthState = { status: 'checking' } | ProviderModelHealthResult;
 
-function ProviderHealthDialog({ row, onClose, keySelector }: ProviderHealthDialogProps) {
+function ProviderHealthDialog({ row, onClose, onModelToggle, keySelector }: ProviderHealthDialogProps) {
   const { t } = useI18n();
   const configuredModels = useMemo(
     () => mergeProviderHealthModels([], row.models),
@@ -1796,6 +1851,9 @@ function ProviderHealthDialog({ row, onClose, keySelector }: ProviderHealthDialo
   const [search, setSearch] = useState('');
   const [results, setResults] = useState<Record<string, ProviderModelHealthState>>({});
   const [checkingAll, setCheckingAll] = useState(false);
+  const [modelEnabled, setModelEnabled] = useState<Record<string, boolean>>(() => Object.fromEntries(
+    configuredModels.map((model) => [model.name.toLowerCase(), !isModelExcluded(row.record, model.name)]),
+  ));
   const healthControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -1848,6 +1906,7 @@ function ProviderHealthDialog({ row, onClose, keySelector }: ProviderHealthDialo
   const checkedCount = resultValues.filter((result) => result.status !== 'checking').length;
   const healthyCount = resultValues.filter((result) => result.status === 'healthy').length;
   const failedCount = resultValues.filter((result) => result.status === 'failed').length;
+  const exhaustedCount = resultValues.filter((result) => result.status === 'budget-exhausted').length;
   const hasCheckingModel = resultValues.some((result) => result.status === 'checking');
 
   const saveResult = (result: ProviderModelHealthResult) => {
@@ -1884,6 +1943,7 @@ function ProviderHealthDialog({ row, onClose, keySelector }: ProviderHealthDialo
   const statusLabel = (state: ProviderModelHealthState | undefined) => {
     if (!state) return t('apiAccess.health.notChecked');
     if (state.status === 'checking') return t('apiAccess.health.checking');
+    if (state.status === 'budget-exhausted') return t('apiAccess.health.budgetExhausted');
     return state.status === 'healthy'
       ? t('apiAccess.health.healthy')
       : t('apiAccess.health.failed');
@@ -1914,7 +1974,7 @@ function ProviderHealthDialog({ row, onClose, keySelector }: ProviderHealthDialo
           total: models.length,
           healthy: healthyCount,
           failed: failedCount,
-        })}</span>
+        })}{exhaustedCount ? ` · ${t('apiAccess.health.budgetSummary', { count: exhaustedCount })}` : ''}</span>
         {modelError ? (
           <MessageNotice message={t('apiAccess.health.modelLoadFailed', { error: modelError })} onDismiss={() => setModelError('')} />
         ) : modelLoading ? (
@@ -1947,8 +2007,9 @@ function ProviderHealthDialog({ row, onClose, keySelector }: ProviderHealthDialo
             : checked?.responseLatencyMs !== undefined
               ? t('apiAccess.health.responseInline', { latency: checked.responseLatencyMs })
               : '';
+          const enabled = modelEnabled[model.name.toLowerCase()] ?? true;
           return (
-            <div className={`provider-health-model-row ${checked?.status === 'failed' ? 'failed' : ''}`} key={model.name}>
+            <div className={`provider-health-model-row ${checked?.status === 'failed' ? 'failed' : ''}${enabled ? '' : ' disabled'}`} key={model.name}>
               <div className="provider-health-model-name">
                 <strong title={model.name}>{model.name}</strong>
                 {error
@@ -1957,9 +2018,26 @@ function ProviderHealthDialog({ row, onClose, keySelector }: ProviderHealthDialo
                     ? <small title={model.alias || model.displayName}>{model.alias || model.displayName}</small>
                     : null}
               </div>
+              {onModelToggle ? (
+                <label className="provider-health-toggle">
+                  <span>{enabled ? t('apiAccess.status.enabled') : t('apiAccess.status.disabled')}</span>
+                  <Switch
+                    checked={enabled}
+                    disabled={checkingAll || modelLoading}
+                    onChange={() => {
+                      const nextEnabled = !enabled;
+                      setModelEnabled((current) => ({ ...current, [model.name.toLowerCase()]: nextEnabled }));
+                      void onModelToggle(model.name, nextEnabled).catch(() => {
+                        setModelEnabled((current) => ({ ...current, [model.name.toLowerCase()]: !nextEnabled }));
+                      });
+                    }}
+                    aria-label={t('apiAccess.health.toggleAria', { model: model.name, action: enabled ? t('common.disable') : t('common.enable') })}
+                  />
+                </label>
+              ) : null}
               <span
-                className={`state-pill provider-health-pill ${state?.status === 'checking' ? 'checking' : checked?.status === 'healthy' ? 'success' : checked?.status === 'failed' ? 'error' : ''}`}
-                title={latencyTitle}
+                className={`state-pill provider-health-pill provider-health-model-pill ${state?.status === 'checking' ? 'checking' : checked?.status === 'healthy' ? 'success' : checked?.status === 'failed' ? 'error' : checked?.status === 'budget-exhausted' ? 'warning' : ''}`}
+                title={checked?.status === 'budget-exhausted' ? t('apiAccess.health.budgetExhaustedDetail') : latencyTitle}
               >
                 {statusLabel(state)}
                 {latencyInline ? ` · ${latencyInline}` : ''}

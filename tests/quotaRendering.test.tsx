@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nProvider } from '../src/i18n';
 import { ProviderQuotaSummary, QuotaCard } from '../src/pages/SubscriptionUsagePage';
+import { QuotaCard as CredentialQuotaCard } from '../src/pages/QuotaPage';
 import { quotaRowsFor, formatQuotaTimestamp } from '../src/services/quotaService';
 import type { QuotaState } from '../src/services/quotaService';
 
@@ -118,5 +119,35 @@ describe('quota card rendering', () => {
     const html = render({ status: 'error', rows: [], error: 'free account cannot access quota' }, 'kimi');
     expect(html).toContain('quota-card-error');
     expect(html).not.toContain('app-notice-entry');
+  });
+
+  it('renders credential note on quota cards and shows edit trigger when onSaveNote is provided', () => {
+    const withNote = renderToStaticMarkup(
+      <I18nProvider>
+        <CredentialQuotaCard
+          file={{ name: 'codex-team.json', provider: 'codex', note: 'Team Account A' }}
+          quota={{ status: 'success', rows: [] }}
+          onRefresh={() => {}}
+          onSaveNote={() => {}}
+        />
+      </I18nProvider>,
+    );
+    expect(withNote).toContain('quota-account-note');
+    expect(withNote).toContain('Team Account A');
+    expect(withNote).toContain('quota-note-edit');
+    expect(withNote).toContain('Edit note');
+
+    const withoutNote = renderToStaticMarkup(
+      <I18nProvider>
+        <CredentialQuotaCard
+          file={{ name: 'codex-empty.json', provider: 'codex' }}
+          quota={{ status: 'success', rows: [] }}
+          onRefresh={() => {}}
+          onSaveNote={() => {}}
+        />
+      </I18nProvider>,
+    );
+    expect(withoutNote).not.toContain('quota-account-note');
+    expect(withoutNote).toContain('Add note');
   });
 });

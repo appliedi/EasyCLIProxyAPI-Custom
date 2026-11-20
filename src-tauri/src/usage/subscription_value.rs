@@ -447,6 +447,34 @@ mod tests {
     }
 
     #[test]
+    fn custom_043_upgrade_preserves_subscription_history_and_fees() {
+        let mut c = database();
+        c.execute_batch("DROP TABLE usage_events;").unwrap();
+        c.execute_batch(include_str!("../tests/fixtures/usage/custom-0.4.3-events.sql")).unwrap();
+        price(&c);
+        sync_accounts(&c, &[seed("claude", "one")]).unwrap();
+        let id = account_id("claude", "one", "");
+        save_fees(&c, "2026-08", &[FeeChange {
+            account_id: id.clone(), monthly_fee_cents: Some(20000),
+        }]).unwrap();
+        event(&c, "saved-event", "claude", "one", "test-priced", "oauth", 2);
+        let before = load_value(&c, "2026-09", &GuiConfigFile::default()).unwrap();
+        let root = std::env::temp_dir().join(format!("custom-upgrade-{}", unique_file_stamp()));
+        fs::create_dir_all(&root).unwrap();
+        migrate_usage_database(&mut c, &root).unwrap();
+        let report = load_value(&c, "2026-09", &GuiConfigFile::default()).unwrap();
+        assert_eq!(report.accounts.len(), 1);
+        assert_eq!(report.accounts[0].id, id);
+        assert_eq!(report.accounts[0].monthly_fee_cents, Some(20000));
+        assert_eq!(report.accounts[0].requests, 1);
+        assert_eq!(report.accounts[0].priced_requests, 1);
+        assert!(before.accounts[0].estimated_cost > 0.0);
+        assert_eq!(report.accounts[0].estimated_cost, before.accounts[0].estimated_cost);
+        drop(c);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn nameless_history_never_aliases_an_unknown_account() {
         for auth in ["oauth", "unknown"] {
             let c = database();

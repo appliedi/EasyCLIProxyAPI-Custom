@@ -40,7 +40,6 @@ export type QuotaRow = {
   reset?: string;
   resetAtMs?: number;
   detail?: string;
-  help?: string;
 };
 export type QuotaState = {
   status: QuotaStatus;
@@ -81,6 +80,7 @@ const CODEX_RESET_CREDITS_URL =
   'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits';
 const CODEX_RESET_CREDITS_CONSUME_URL =
   'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume';
+const CODEX_SUBSCRIPTION_URL = 'https://chatgpt.com/backend-api/subscriptions';
 const ANTIGRAVITY_CODE_ASSIST_URL =
   'https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist';
 
@@ -526,7 +526,6 @@ export const quotaRowsFor = (
         reset: absoluteResetLabel(window.resets_at ?? window.resetsAt),
         resetAtMs: quotaResetFor(window, ['resets_at', 'resetsAt']),
         detail: details.join(' · ') || undefined,
-        help: quotaText('quota.service.cloud.help'),
       });
     }
     const extraUsage = isRecord(value.extra_usage)
@@ -1044,6 +1043,18 @@ const callCodexResetCredits = async (
   return codexResetCreditDetailsFor(payload);
 };
 
+const callCodexSubscription = async (authIndex: string, accountId: string, header: Record<string, string>): Promise<string | undefined> => {
+  const payload = await requestQuotaPayload(
+    authIndex,
+    `${CODEX_SUBSCRIPTION_URL}?account_id=${encodeURIComponent(accountId)}`,
+    header, 'GET', undefined, 8_000,
+  );
+  if (!isRecord(payload)) return undefined;
+  const raw = payload.active_until ?? payload.activeUntil;
+  const ms = quotaResetInstant(raw);
+  return ms === undefined ? undefined : new Date(ms).toISOString();
+};
+
 async function callKimiQuota(file: AuthFile): Promise<{ payload: unknown; plan?: string }> {
   const authIndex = normalizeAuthIndex(file.auth_index ?? file.authIndex);
   if (!authIndex) throw new Error(quotaText('quota.service.error.missingAuthIndex'));
@@ -1154,11 +1165,17 @@ async function loadQuotaSnapshot(file: AuthFile, locale: AppLocale = getCurrentL
         resetCreditsError = quotaText('quota.claude.readError');
         return undefined;
       }) : Promise.resolve(undefined);
-    const [payload, detectedPlan, resetCreditDetails, claudeResetGrants] = await Promise.all([
+    const subscriptionPromise = provider === 'codex' && codexAccountId
+      ? callCodexSubscription(normalizeAuthIndex(file.auth_index ?? file.authIndex), codexAccountId,
+          { ...headersByProvider.codex, Accept: 'application/json' })
+          .catch(() => undefined)
+      : Promise.resolve(undefined);
+    const [payload, detectedPlan, resetCreditDetails, claudeResetGrants, liveSubscription] = await Promise.all([
       payloadPromise,
       planPromise,
       resetCreditsPromise,
       claudeGrantsPromise,
+      subscriptionPromise,
     ]);
     const rows = quotaRowsFor(provider, payload, locale);
     if (rows.length === 0) {
@@ -1184,7 +1201,8 @@ async function loadQuotaSnapshot(file: AuthFile, locale: AppLocale = getCurrentL
       creditBalance: accountCredits.balance,
       creditsUnlimited: accountCredits.unlimited,
       subscriptionActiveUntil: provider === 'devin'
-        ? readDevinQuota(payload).subscriptionActiveUntil : codexMetadata?.subscriptionActiveUntil,
+        ? readDevinQuota(payload).subscriptionActiveUntil
+        : liveSubscription ?? codexMetadata?.subscriptionActiveUntil,
       claudeResetGrants,
       resetCreditsError,
       resetCreditsApplicable: provider === 'claude' ? undefined : usageCreditDetails.applicableAvailableCount

@@ -31,6 +31,10 @@ pub(crate) fn merge_core_config_for_start(
         None
     };
     let merged = merge_core_config_yaml(&template, current.as_deref(), gui_config)?;
+    let merged = patch_core_yaml_document(&merged, |document| {
+        crate::reverse_proxy::prepare_core_start(document, gui_config.reverse_proxy.as_ref())
+    })?
+    .unwrap_or(merged);
     write_core_config_if_changed(&config_path, &merged)?;
 
     Ok(config_path)
@@ -229,7 +233,7 @@ pub(crate) fn lock_core_config_file() -> Result<std::sync::MutexGuard<'static, (
 pub(crate) fn read_installed_core_config_settings() -> Result<CoreConfigSettings, String> {
     let _config_guard = lock_core_config_file()?;
     let (_, document) = read_core_config_document()?;
-    core_config_settings_from_value(document.get())
+    core_config_settings_from_value(&document)
 }
 
 pub(crate) fn current_core_config_settings(
@@ -362,7 +366,24 @@ pub(crate) fn normalize_core_sensitive_words_settings(
     CoreSensitiveWordsSettings {
         antigravity_sensitive_words: normalize(settings.antigravity_sensitive_words),
         devin_sensitive_words: normalize(settings.devin_sensitive_words),
+        antigravity_sensitive_words_replace: normalize_sensitive_word_replacements(settings.antigravity_sensitive_words_replace),
+        devin_sensitive_words_replace: normalize_sensitive_word_replacements(settings.devin_sensitive_words_replace),
     }
+}
+
+fn normalize_sensitive_word_replacements(
+    replacements: std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut normalized = std::collections::BTreeMap::new();
+    for (target, replacement) in replacements {
+        let trimmed = target.trim();
+        if trimmed.is_empty() || (normalized.contains_key(trimmed) && target != trimmed) {
+            continue;
+        }
+        // Replacement whitespace and empty strings are meaningful to the core.
+        normalized.insert(trimmed.to_string(), replacement);
+    }
+    normalized
 }
 
 pub(crate) fn core_sensitive_words_settings_from_value(
@@ -398,16 +419,31 @@ pub(crate) fn core_sensitive_words_settings_from_value(
             })
             .collect()
     };
+    let read_replacements = |provider: &str| -> Result<std::collections::BTreeMap<String, String>, String> {
+        let Some(value) = nested_yaml_value(root, &["oauth", "providers", provider, "sensitive-words-replace"])
+            .or_else(|| nested_yaml_value(root, &[provider, "sensitive-words-replace"])) else {
+            return Ok(Default::default());
+        };
+        if value.is_null() {
+            return Ok(Default::default());
+        }
+        let invalid = || format!("{provider}.sensitive-words-replace must be a mapping of strings to strings");
+        value.as_mapping().ok_or_else(invalid)?.iter().map(|(key, value)| {
+            Ok((key.as_str().ok_or_else(invalid)?.to_string(), value.as_str().ok_or_else(invalid)?.to_string()))
+        }).collect()
+    };
     Ok(CoreSensitiveWordsSettings {
         antigravity_sensitive_words: read_words("antigravity")?,
         devin_sensitive_words: read_words("devin")?,
+        antigravity_sensitive_words_replace: read_replacements("antigravity")?,
+        devin_sensitive_words_replace: read_replacements("devin")?,
     })
 }
 
 pub(crate) fn read_core_sensitive_words_settings() -> Result<CoreSensitiveWordsSettings, String> {
     let _config_guard = lock_core_config_file()?;
     let (_, document) = read_core_config_document()?;
-    core_sensitive_words_settings_from_value(document.get())
+    core_sensitive_words_settings_from_value(&document)
 }
 
 pub(crate) fn patch_core_sensitive_words_yaml(
@@ -481,6 +517,23 @@ pub(crate) fn patch_core_sensitive_words_yaml(
                         .map(serde_norway::Value::String)
                         .collect(),
                 ),
+            )?;
+        }
+        for (provider, replacements) in [
+            ("antigravity", &settings.antigravity_sensitive_words_replace),
+            ("devin", &settings.devin_sensitive_words_replace),
+        ] {
+            let root = document.as_mapping().ok_or("Kernel configuration root must be a YAML mapping")?;
+            let current = nested_yaml_value(root, &["oauth", "providers", provider, "sensitive-words-replace"])
+                .or_else(|| nested_yaml_value(root, &[provider, "sensitive-words-replace"]));
+            if replacements.is_empty() && current.is_none_or(serde_norway::Value::is_null) {
+                continue;
+            }
+            changed |= set_core_yaml_schema_value(
+                document,
+                &[provider, "sensitive-words-replace"],
+                &["oauth", "providers", provider, "sensitive-words-replace"],
+                serde_norway::to_value(replacements).map_err(|error| format!("Failed to serialize sensitive-word replacements: {error}"))?,
             )?;
         }
         Ok(changed)
@@ -933,6 +986,15 @@ pub(crate) fn collect_yaml_value_changes(
     if original == updated {
         return Ok(());
     }
+    // A replacement map is one setting: render it atomically so removing or
+    // renaming a target does not leave stale rules in the configuration.
+    if matches!(path.iter().map(String::as_str).collect::<Vec<_>>().as_slice(),
+        ["antigravity" | "devin", "sensitive-words-replace"]
+        | ["oauth", "providers", "antigravity" | "devin", "sensitive-words-replace"]
+    ) {
+        changes.push(YamlValueChange { path: path.clone(), value: updated.clone() });
+        return Ok(());
+    }
     match (original, updated) {
         (
             serde_norway::Value::Mapping(original_mapping),
@@ -1059,13 +1121,19 @@ pub(crate) fn insert_yaml_mapping_values_at_path(
     let indent = " ".repeat(child_indent.unwrap_or(parent_indent + 2));
     let mut insertion = String::new();
     for (key, value) in entries {
-        let value = serde_json::to_string(value)
+        // Emit block YAML so new nested sections read like the rest of the
+        // file instead of as single-line JSON.
+        let mut wrapper = serde_norway::Mapping::new();
+        wrapper.insert(yaml_key(key), value.clone());
+        let block = serde_norway::to_string(&serde_norway::Value::Mapping(wrapper))
             .map_err(|error| format!("Failed to serialize kernel configuration value: {error}"))?;
-        insertion.push_str(&indent);
-        insertion.push_str(&render_yaml_mapping_key(key));
-        insertion.push_str(": ");
-        insertion.push_str(&value);
-        insertion.push_str(newline);
+        for line in block.trim_end_matches(['\r', '\n']).split('\n') {
+            if !line.is_empty() {
+                insertion.push_str(&indent);
+            }
+            insertion.push_str(line);
+            insertion.push_str(newline);
+        }
     }
     let mut updated = String::with_capacity(content.len() + insertion.len());
     updated.push_str(&content[..parent_end]);
@@ -1267,9 +1335,16 @@ pub(crate) fn yaml_edit_node_from_value(
     value: &serde_norway::Value,
 ) -> Result<yaml_edit::YamlNode, String> {
     const WRAPPER_KEY: &str = "__cpa_gui_value__";
-    let value =
-        serde_json::to_string(value).map_err(|err| format!("Failed to serialize kernel configuration value: {err}"))?;
-    let serialized = format!("{WRAPPER_KEY}: {value}\n");
+    // Serialize through a block-style YAML emitter rather than JSON: a JSON
+    // payload parses as a flow collection, and yaml-edit keeps the style of
+    // the node it is handed, so inserted or rewritten entries would land in
+    // the user's config as `{"name":...}` one-liners. yaml-edit re-indents a
+    // block node to the column of the entry that receives it, and converts it
+    // to flow form itself when the destination collection is flow-style.
+    let mut wrapper = serde_norway::Mapping::new();
+    wrapper.insert(yaml_key(WRAPPER_KEY), value.clone());
+    let serialized = serde_norway::to_string(&serde_norway::Value::Mapping(wrapper))
+        .map_err(|err| format!("Failed to serialize kernel configuration value: {err}"))?;
     let file = serialized
         .parse::<yaml_edit::YamlFile>()
         .map_err(|err| format!("Failed to parse kernel configuration value: {err}"))?;
@@ -1308,6 +1383,59 @@ pub(crate) fn core_config_uses_v8(document: &serde_norway::Value) -> bool {
                 .is_some_and(serde_norway::Value::is_mapping)
         })
         || yaml_mapping_value(root, "api-keys").is_some_and(serde_norway::Value::is_mapping)
+}
+
+/// Removes one top-level section from the kernel configuration text while
+/// keeping every other line and comment untouched. Used for sections that no
+/// longer belong in the kernel configuration, which the general value walker
+/// refuses to delete.
+pub(crate) fn remove_core_yaml_section(content: &str, section: &str) -> Result<Option<String>, String> {
+    let lines: Vec<&str> = content.split_inclusive('\n').collect();
+    let Some(first) = lines.iter().position(|line| is_root_yaml_section(line, section)) else {
+        return Ok(None);
+    };
+    let mut last = first + 1;
+    for (index, line) in lines.iter().enumerate().skip(first + 1) {
+        let body = line.trim_end_matches(['\r', '\n']);
+        if body.trim().is_empty() {
+            continue;
+        }
+        // The section owns every following line indented deeper than its key.
+        if body.len() == body.trim_start().len() {
+            break;
+        }
+        last = index + 1;
+    }
+    let start: usize = lines[..first].iter().map(|line| line.len()).sum();
+    let end: usize = lines[..last].iter().map(|line| line.len()).sum();
+    let mut updated = String::with_capacity(content.len());
+    updated.push_str(&content[..start]);
+    updated.push_str(&content[end..]);
+
+    let original = serde_norway::from_str::<serde_norway::Value>(content)
+        .map_err(|err| format!("Failed to parse kernel configuration: {err}"))?;
+    let mut expected = original.clone();
+    if let Some(mapping) = expected.as_mapping_mut() {
+        mapping.remove(serde_norway::Value::String(section.to_string()));
+    }
+    let actual = serde_norway::from_str::<serde_norway::Value>(&updated)
+        .map_err(|err| format!("Failed to validate updated kernel configuration: {err}"))?;
+    if actual != expected {
+        return Err(format!(
+            "Removing kernel configuration section {section} would change other settings; write rejected"
+        ));
+    }
+    Ok(Some(updated))
+}
+
+fn is_root_yaml_section(line: &str, section: &str) -> bool {
+    let body = line.trim_end_matches(['\r', '\n']);
+    let Some(rest) = body.strip_prefix(section) else {
+        return false;
+    };
+    // A top-level key starts at column zero and is followed by ": " or ":<end>".
+    body.len() == body.trim_start().len()
+        && (rest.starts_with(": ") || rest == ":" || rest.starts_with(":\t"))
 }
 
 pub(crate) fn core_config_declares_v8(document: &serde_norway::Value) -> bool {
@@ -1708,8 +1836,8 @@ pub(crate) fn replace_yaml_range(content: &str, start: usize, end: usize, block:
 pub(crate) fn clear_legacy_api_key_paths(document: &yaml_edit::Document) {
     use yaml_edit::path::YamlPath;
 
-    document.remove_path("auth.providers.config-api-key.api-key-entries");
-    document.remove_path("auth.providers.config-api-key.api-keys");
+    let _ = document.try_remove_path("auth.providers.config-api-key.api-key-entries");
+    let _ = document.try_remove_path("auth.providers.config-api-key.api-keys");
 }
 
 #[cfg(test)]
@@ -1728,7 +1856,7 @@ pub(crate) fn set_yaml_edit_nested_value(
     false
 }
 
-pub(crate) fn read_core_config_document() -> Result<(PathBuf, yaml_serde_edit::YamlValue), String> {
+pub(crate) fn read_core_config_document() -> Result<(PathBuf, serde_norway::Value), String> {
     let config_path = core_install_dir()?.join(CORE_CONFIG_FILE);
     if !config_path.is_file() {
         return Err("Kernel configuration has not been generated. Start the CPA kernel first".to_string());
@@ -1736,7 +1864,7 @@ pub(crate) fn read_core_config_document() -> Result<(PathBuf, yaml_serde_edit::Y
 
     let content = fs::read_to_string(&config_path)
         .map_err(|err| format!("Failed to read kernel configuration {}: {err}", path_to_string(&config_path)))?;
-    let document = yaml_serde_edit::YamlValue::parse(&content)
+    let document = serde_norway::from_str(&content)
         .map_err(|err| format!("Failed to parse kernel configuration: {err}"))?;
     Ok((config_path, document))
 }
@@ -1942,6 +2070,17 @@ pub(crate) fn core_config_settings_from_value(
         })
         .transpose()?
         .unwrap_or(0);
+    let transient_error_cooldown_seconds = v8_or_legacy(
+        &["routing", "cooldown", "transient-error-cooldown-seconds"],
+        &["transient-error-cooldown-seconds"],
+    )
+    .map(|value| {
+        value
+            .as_i64()
+            .ok_or_else(|| "transient-error-cooldown-seconds must be an integer".to_string())
+    })
+    .transpose()?
+    .unwrap_or(DEFAULT_TRANSIENT_ERROR_COOLDOWN_SECONDS);
     let streaming_bootstrap_retries = v8_or_legacy(&["requests", "streaming", "bootstrap-retries"], &["streaming", "bootstrap-retries"])
         .map(|value| {
             value
@@ -1979,6 +2118,7 @@ pub(crate) fn core_config_settings_from_value(
         request_retry,
         max_retry_credentials,
         max_retry_interval,
+        transient_error_cooldown_seconds,
         streaming_bootstrap_retries,
         management_secret_key,
     })
@@ -2173,4 +2313,42 @@ pub(crate) fn yaml_mapping_value_mut<'a>(
 
 pub(crate) fn yaml_key(key: &str) -> serde_norway::Value {
     serde_norway::Value::String(key.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_yaml_value_changes_preserves_root_sections_after_plain_scalar_apostrophe() {
+        let input = r#"plugins:
+    configs:
+        p:
+            store:
+                description: OpenCode Zen's free models.
+server:
+    port: 1
+upstream:
+    codex:
+        x: false
+"#;
+        let original = serde_norway::from_str::<serde_norway::Value>(input).unwrap();
+        let mut updated = original.clone();
+        set_core_yaml_path_value(
+            &mut updated,
+            &["upstream", "codex", "x"],
+            serde_norway::Value::Bool(true),
+        )
+        .unwrap();
+
+        let rendered = render_yaml_value_changes(input, &original, &updated)
+            .unwrap_or_else(|error| panic!("update after plain scalar apostrophe failed: {error}"));
+
+        assert_eq!(
+            rendered.lines().filter(|line| *line == "upstream:").count(),
+            1
+        );
+        let parsed = serde_norway::from_str::<serde_norway::Value>(&rendered).unwrap();
+        assert_eq!(parsed, updated);
+    }
 }

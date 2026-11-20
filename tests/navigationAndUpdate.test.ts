@@ -29,10 +29,11 @@ describe('简易模式、首页、配置与版本管理导航', () => {
 
 describe('OAuth 子页面导航', () => {
   test('OAuth 页面保留登录和认证文件，额度查询独立导航', () => {
-    expect(oauthSubpages.map((page) => page.id)).toEqual(['login', 'authFiles']);
+    expect(oauthSubpages.map((page) => page.id)).toEqual(['login', 'authFiles', 'acp']);
     expect(oauthSubpages.map((page) => page.labelKey)).toEqual([
       'oauth.title',
       'authFiles.title',
+      'oauth.acp.tab',
     ]);
   });
 });

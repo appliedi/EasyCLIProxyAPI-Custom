@@ -11,6 +11,7 @@ const refinements = readStyle('styles/ui-refinements.css');
 const home = readStyle('pages/HomeDashboard.css');
 const quota = readStyle('pages/QuotaPage.css');
 const clients = readStyle('pages/AgentClientList.css');
+const responsiveUsage = readStyle('styles/responsive-shell-usage.css');
 const declarations = (sheet: postcss.Root, selector: string, property: string, reducedMotion = false) => {
   const values: string[] = [];
   sheet.walkRules(rule => {
@@ -116,6 +117,11 @@ describe('shared UI refinements', () => {
     }
     expect(declarations(clients, `${button}:focus-visible`, 'outline')).toEqual(['2px solid var(--ui-accent)']);
     expect(declarations(clients, `${button}:focus-visible`, 'outline-offset')).toEqual(['-3px']);
+  });
+
+  it('prevents the live routing panel and its window metrics from shrinking under constrained flex heights', () => {
+    // The redesign moved the stat grid into the panel (.routing-window-metrics), so the panel itself must not shrink.
+    expect(declarations(responsiveUsage, '.usage-tab-panel > .live-routing-panel', 'flex')).toEqual(['none']);
   });
 
   it('groups optional empty-state actions without adding an empty action row', () => {
