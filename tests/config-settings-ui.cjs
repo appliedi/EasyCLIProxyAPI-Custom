@@ -2,7 +2,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 
-const categories = ['general', 'proxy', 'aliases', 'routing', 'requests', 'oauth', 'diagnostics', 'storage', 'software'];
+const categories = ['general', 'proxy', 'aliases', 'routing', 'requests', 'sensitiveWords', 'oauth', 'diagnostics', 'storage', 'software'];
 const viewports = [{ width: 1920, height: 1080 }, { width: 2560, height: 1440 }, { width: 640, height: 600 }, { width: 964, height: 700 }, { width: 1280, height: 800 }, { width: 1600, height: 1000 }];
 const scalarFields = '.template-config-field:is([data-field-type="string"], [data-field-type="number"], [data-field-type="select"]), :is(#config-native-retry, #config-native-routing) .config-network-field:has(input[type="text"], input[type="number"], select)';
 
@@ -187,7 +187,8 @@ const scalarFields = '.template-config-field:is([data-field-type="string"], [dat
               return { failures, types };
             });
             assert.ok(geometry.types.some(field => !field.native), `${label} ${category}: template scalar coverage is nonempty`);
-            if (category !== 'oauth') assert.ok(geometry.types.some(field => field.native), `${label} ${category}: native row coverage is nonempty`);
+            // Requests has only template groups since upstream 7c58b5e3 moved retry to routing.
+            if (!['oauth', 'requests'].includes(category)) assert.ok(geometry.types.some(field => field.native), `${label} ${category}: native row coverage is nonempty`);
             assert.deepEqual(geometry.failures, [], `${label} ${category}: actual label text must wrap readably without clipping or control overlap`);
             const fields = page.locator(scalarFields).filter({ visible: true });
             for (const type of ['select', 'text', 'number']) {
@@ -256,7 +257,7 @@ const scalarFields = '.template-config-field:is([data-field-type="string"], [dat
         };
 
         assert.equal(await page.getByRole('heading', { level: 1, name: locale === 'en' ? 'Advanced settings' : '高级设置', exact: true }).count(), 0);
-        assert.equal(await page.locator('.config-page [role="tabpanel"]').count(), 1);
+        assert.equal(await page.locator('.config-page #config-subpage-panel[role="tabpanel"]').count(), 1);
         assert.equal(await page.locator('.config-settings-header p').count(), 0,
           `${label}: settings header must not repeat layout explanations`);
         assert.equal(await page.locator('.config-nav-save-hint, .config-category-heading, .config-section-index').count(), 0,
@@ -391,7 +392,7 @@ const scalarFields = '.template-config-field:is([data-field-type="string"], [dat
 
         await tab('routing');
         assert.equal(await page.locator('#config-routing-section-title').isVisible(), true);
-        assert.equal(await page.locator('#config-retry-section-title').isVisible(), false);
+        assert.equal(await page.locator('#config-retry-section-title').isVisible(), true, 'retry settings live in the routing tab');
         await templateVisible('routing-advanced');
         await templateVisible('extensions-concurrency');
         if (viewport.width >= 964) {
@@ -403,7 +404,7 @@ const scalarFields = '.template-config-field:is([data-field-type="string"], [dat
         await templateVisible('extensions-plugins', false);
         await noOverflow('routing and stability');
         await scalarLayout('routing');
-        await tab('requests');
+        // Upstream 7c58b5e3 moved the retry card into the routing tab.
         assert.equal(await retrySection.isVisible(), true);
         if (viewport.width >= 964) {
           const value = await page.locator('#config-input-config-network-requestRetry').boundingBox();
@@ -502,8 +503,8 @@ const scalarFields = '.template-config-field:is([data-field-type="string"], [dat
           await dialog.waitFor({ state: 'detached' });
         }
         await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; });
-        await tab('requests');
-        await page.locator('.config-sensitive-words-row input').first().waitFor();
+        await tab('sensitiveWords');
+        await page.locator('.sw-inline-row').first().waitFor();
         await noOverflow('sensitive words');
 
         await tab('oauth');
@@ -531,13 +532,13 @@ const scalarFields = '.template-config-field:is([data-field-type="string"], [dat
         await noOverflow('search results');
         await reachable(results.getByRole('button').first(), 'search result');
         await results.getByRole('button', { name: locale === 'en' ? /Retries & cooldowns/ : /重试与冷却/ }).first().click();
-        assert.equal(await page.locator('#config-subpage-tab-requests').getAttribute('aria-selected'), 'true');
+        assert.equal(await page.locator('#config-subpage-tab-routing').getAttribute('aria-selected'), 'true');
         await reachable(page.locator('#config-retry-section-title'), 'search target');
         await search.fill(locale === 'en' ? 'Sensitive Words' : '敏感词');
         await results.getByRole('button').first().waitFor();
         await results.getByRole('button').first().click();
-        assert.equal(await page.locator('#config-subpage-tab-requests').getAttribute('aria-selected'), 'true');
-        assert.equal(await page.locator('.config-sensitive-words-row input').first().isVisible(), true);
+        assert.equal(await page.locator('#config-subpage-tab-sensitiveWords').getAttribute('aria-selected'), 'true');
+        assert.equal(await page.locator('.sw-library').isVisible(), true);
         await page.waitForFunction(() => document.querySelector('#config-native-sensitive-words')?.contains(document.activeElement));
         await search.fill(locale === 'en' ? 'thinking aliases' : '思考');
         await results.getByRole('button').first().waitFor();
@@ -620,31 +621,31 @@ const scalarFields = '.template-config-field:is([data-field-type="string"], [dat
           const remoteManagement = page.locator('#template-management-0');
           await remoteManagement.check();
           assert.equal(await hasDirtyMarker('general'), true, `${label}: template drafts mark their category`);
-          await tab('requests');
+          await tab('routing');
           const retryInput = retrySection.locator('input[type="text"]').first();
           await retryInput.fill('5');
           const cooling = page.getByRole('switch', { name: locale === 'en' ? 'Enable cooldowns' : '启用冷却', exact: true });
           assert.equal(await cooling.isChecked(), true, 'existing false disable-cooling means enabled');
           await cooling.uncheck();
-          assert.equal(await hasDirtyMarker('requests'), true, `${label}: core drafts mark their category`);
+          assert.equal(await hasDirtyMarker('routing'), true, `${label}: core drafts mark their category`);
           await tab('software');
-          assert.equal(await hasDirtyMarker('requests'), true, `${label}: dirty category remains marked while inactive`);
-          await tab('requests');
+          assert.equal(await hasDirtyMarker('routing'), true, `${label}: dirty category remains marked while inactive`);
+          await tab('routing');
           assert.equal(await retryInput.inputValue(), '5', `${label}: changing categories preserves core drafts`);
           const retrySave = retrySection.getByRole('button', { name: locale === 'en' ? /Save/ : /保存/ });
           await retrySave.click();
           await page.waitForFunction(button => {
             return button?.disabled && !/正在保存|保存中|saving/i.test(button.textContent);
           }, await retrySave.elementHandle());
-          assert.equal(await hasDirtyMarker('requests'), false, `${label}: saving clears the category marker`);
+          assert.equal(await hasDirtyMarker('routing'), false, `${label}: saving clears the category marker`);
           await tab('software');
-          await tab('requests');
+          await tab('routing');
           assert.equal(await cooling.isChecked(), false, 'saved disable-cooling true means switch off');
           await cooling.check();
           await retrySave.click();
           await page.waitForFunction(button => button?.disabled && !/正在保存|保存中|saving/i.test(button.textContent), await retrySave.elementHandle());
           await tab('software');
-          await tab('requests');
+          await tab('routing');
           assert.equal(await cooling.isChecked(), true, 'manually enabled cooling survives saving');
           await tab('general');
           assert.equal(await remoteManagement.isChecked(), true, `${label}: saving another category preserves template drafts`);
@@ -654,19 +655,19 @@ const scalarFields = '.template-config-field:is([data-field-type="string"], [dat
           assert.equal(await remoteManagement.isChecked(), false);
           assert.equal(await hasDirtyMarker('general'), false, `${label}: discarding clears the category marker`);
 
-          await tab('requests');
-          const sensitiveWord = page.locator('.config-sensitive-words-row input').first();
+          await tab('sensitiveWords');
+          const sensitiveWord = page.locator('.sw-inline-row textarea').first();
           await sensitiveWord.fill('settings-navigation-draft');
           await tab('software');
-          assert.equal(await hasDirtyMarker('requests'), true, `${label}: sensitive-word drafts mark their category`);
-          await tab('requests');
+          assert.equal(await hasDirtyMarker('sensitiveWords'), true, `${label}: unsaved rules mark their category`);
+          await tab('sensitiveWords');
           assert.equal(await sensitiveWord.inputValue(), 'settings-navigation-draft', `${label}: sensitive-word drafts survive category changes`);
         }
         await page.close();
       }
     }
     assert.deepEqual(runtimeErrors, [], 'Settings navigation must not produce runtime errors');
-    console.log('PASS: nine settings categories including storage and independent model aliases, adaptive cards, search, retained drafts, save feedback, and Chinese/English responsive layouts.');
+    console.log('PASS: ten settings categories including sensitive words, storage and independent model aliases, adaptive cards, search, retained drafts, save feedback, and Chinese/English responsive layouts.');
   } finally {
     try {
       if (browser) await browser.close();

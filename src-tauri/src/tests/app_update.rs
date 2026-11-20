@@ -30,6 +30,24 @@ fn app_update_comparison_uses_semantic_versions() {
     assert!(is_app_update_available("v0.3.6-pr.584.587.1", "v0.3.76").unwrap());
 }
 
+/// Custom releases mirror the upstream base as `1.<upstream minor>.<upstream patch>` and
+/// number fork-only revisions with numeric build metadata (`1.3.117+1` is shown as
+/// 1.3.117.1). The `semver` ordering compares build metadata after precedence, so each
+/// fork revision must still be offered as an update.
+#[test]
+fn app_update_comparison_orders_fork_revisions() {
+    assert!(is_app_update_available("v0.4.3", "v1.3.117").unwrap());
+    assert!(is_app_update_available("v0.4.4", "v1.3.117").unwrap());
+    assert!(is_app_update_available("v1.3.117", "v1.3.117+1").unwrap());
+    assert!(is_app_update_available("v1.3.117+1", "v1.3.117+2").unwrap());
+    assert!(is_app_update_available("v1.3.117+9", "v1.3.117+10").unwrap());
+    assert!(is_app_update_available("v1.3.117+2", "v1.3.118").unwrap());
+    assert!(!is_app_update_available("v1.3.117+2", "v1.3.117+1").unwrap());
+    assert!(!is_app_update_available("v1.3.117+1", "v1.3.117+1").unwrap());
+    assert!(!is_app_update_available("v1.3.117+1", "v1.3.117").unwrap());
+    assert!(!is_test_or_prerelease_version("1.3.117+1"));
+}
+
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #[test]
 fn portable_update_helper_writes_a_distinct_startup_ack() {
@@ -447,6 +465,7 @@ fn portable_update_test_manifest(version: &str) -> PortableUpdateManifest {
         version: version.to_string(),
         published_at: "2026-07-24T00:00:00.000Z".to_string(),
         release_notes: HashMap::new(),
+        release_notes_history: serde_json::Value::Null,
         release_url: format!(
             "https://github.com/appliedi/EasyCLIProxyAPI-Custom/releases/tag/v{version}"
         ),
@@ -464,6 +483,43 @@ fn portable_update_test_manifest(version: &str) -> PortableUpdateManifest {
         .collect(),
         full_assets: None,
     }
+}
+
+#[test]
+fn skipped_release_notes_exclude_endpoints_and_sort_stable_versions() {
+    let history = serde_json::json!({
+        "1.1.0": { "en": "Already installed" },
+        "1.2.0": { "en": "Earlier release" },
+        "1.2.1-preview.1": { "en": "Preview" },
+        "1.2.9": { "en": "Before 1.2.10" },
+        "1.2.10": { "ja": "更新内容", "en": " " },
+        "1.2.11": "Unlocalized",
+        "1.3.0": { "en": "Target" },
+        "1.4.0": { "en": "Later release" },
+        "invalid": { "en": "Invalid version" },
+    });
+    let manifest: PortableUpdateManifest = serde_json::from_value(serde_json::json!({
+        "schemaVersion": 1,
+        "version": "1.3.0",
+        "publishedAt": "2026-07-24T00:00:00.000Z",
+        "releaseUrl": "https://example.com/release",
+        "assets": {},
+        "releaseNotesHistory": history,
+    }))
+    .unwrap();
+    let entries = skipped_release_notes(&manifest.release_notes_history, "v1.1.0", "v1.3.0");
+    let versions: Vec<_> = entries.iter().map(|entry| entry.version.as_str()).collect();
+    assert_eq!(versions, ["1.2.10", "1.2.9", "1.2.0"]);
+    assert_eq!(entries[0].release_notes.len(), 1);
+    assert_eq!(entries[0].release_notes["ja"], "更新内容");
+    for (current, target) in [
+        ("1.3.0", "1.3.0"),
+        ("1.2.11", "1.3.0"),
+        ("1.1.0", "1.3.0-preview"),
+    ] {
+        assert!(skipped_release_notes(&history, current, target).is_empty());
+    }
+    assert!(skipped_release_notes(&serde_json::Value::Null, "1.1.0", "1.3.0").is_empty());
 }
 
 #[cfg(target_os = "linux")]
@@ -1332,6 +1388,23 @@ fn portable_update_zip_accepts_the_complete_release_package() {
         extracted.core_archive_name,
         Some("CLIProxyAPI_7.2.109_windows_amd64.zip".to_string())
     );
+    let app_dir = root.join("app");
+    fs::create_dir_all(app_dir.join("cpa-core")).unwrap();
+    fs::write(app_dir.join(CORE_VERSION_FILE), b"7.2.100\n").unwrap();
+    let executable = app_dir.join(PORTABLE_APP_BINARY);
+    fs::write(&executable, b"old executable").unwrap();
+    let work = root.join("EasyCLIProxyAPI-update-test");
+    let pending = PendingAppUpdate {
+        version: "1.2.3".into(),
+        asset: portable_update_test_asset("1.2.3", "amd64"),
+        arch: "amd64".into(),
+    };
+    let staged = crate::app_update::stage_portable_update(
+        &work, &valid_zip, &pending, executable.clone(), true,
+    ).unwrap();
+    staged.validate_cached(&executable).unwrap();
+    assert_eq!(fs::read(staged.staged_exe).unwrap(), b"new executable");
+    assert!(staged.preserve_core);
 
     let legacy_zip = root.join("legacy.zip");
     write_portable_update_zip(

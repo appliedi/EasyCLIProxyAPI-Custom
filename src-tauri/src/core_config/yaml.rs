@@ -233,7 +233,7 @@ pub(crate) fn lock_core_config_file() -> Result<std::sync::MutexGuard<'static, (
 pub(crate) fn read_installed_core_config_settings() -> Result<CoreConfigSettings, String> {
     let _config_guard = lock_core_config_file()?;
     let (_, document) = read_core_config_document()?;
-    core_config_settings_from_value(document.get())
+    core_config_settings_from_value(&document)
 }
 
 pub(crate) fn current_core_config_settings(
@@ -366,7 +366,24 @@ pub(crate) fn normalize_core_sensitive_words_settings(
     CoreSensitiveWordsSettings {
         antigravity_sensitive_words: normalize(settings.antigravity_sensitive_words),
         devin_sensitive_words: normalize(settings.devin_sensitive_words),
+        antigravity_sensitive_words_replace: normalize_sensitive_word_replacements(settings.antigravity_sensitive_words_replace),
+        devin_sensitive_words_replace: normalize_sensitive_word_replacements(settings.devin_sensitive_words_replace),
     }
+}
+
+fn normalize_sensitive_word_replacements(
+    replacements: std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut normalized = std::collections::BTreeMap::new();
+    for (target, replacement) in replacements {
+        let trimmed = target.trim();
+        if trimmed.is_empty() || (normalized.contains_key(trimmed) && target != trimmed) {
+            continue;
+        }
+        // Replacement whitespace and empty strings are meaningful to the core.
+        normalized.insert(trimmed.to_string(), replacement);
+    }
+    normalized
 }
 
 pub(crate) fn core_sensitive_words_settings_from_value(
@@ -402,16 +419,31 @@ pub(crate) fn core_sensitive_words_settings_from_value(
             })
             .collect()
     };
+    let read_replacements = |provider: &str| -> Result<std::collections::BTreeMap<String, String>, String> {
+        let Some(value) = nested_yaml_value(root, &["oauth", "providers", provider, "sensitive-words-replace"])
+            .or_else(|| nested_yaml_value(root, &[provider, "sensitive-words-replace"])) else {
+            return Ok(Default::default());
+        };
+        if value.is_null() {
+            return Ok(Default::default());
+        }
+        let invalid = || format!("{provider}.sensitive-words-replace must be a mapping of strings to strings");
+        value.as_mapping().ok_or_else(invalid)?.iter().map(|(key, value)| {
+            Ok((key.as_str().ok_or_else(invalid)?.to_string(), value.as_str().ok_or_else(invalid)?.to_string()))
+        }).collect()
+    };
     Ok(CoreSensitiveWordsSettings {
         antigravity_sensitive_words: read_words("antigravity")?,
         devin_sensitive_words: read_words("devin")?,
+        antigravity_sensitive_words_replace: read_replacements("antigravity")?,
+        devin_sensitive_words_replace: read_replacements("devin")?,
     })
 }
 
 pub(crate) fn read_core_sensitive_words_settings() -> Result<CoreSensitiveWordsSettings, String> {
     let _config_guard = lock_core_config_file()?;
     let (_, document) = read_core_config_document()?;
-    core_sensitive_words_settings_from_value(document.get())
+    core_sensitive_words_settings_from_value(&document)
 }
 
 pub(crate) fn patch_core_sensitive_words_yaml(
@@ -485,6 +517,23 @@ pub(crate) fn patch_core_sensitive_words_yaml(
                         .map(serde_norway::Value::String)
                         .collect(),
                 ),
+            )?;
+        }
+        for (provider, replacements) in [
+            ("antigravity", &settings.antigravity_sensitive_words_replace),
+            ("devin", &settings.devin_sensitive_words_replace),
+        ] {
+            let root = document.as_mapping().ok_or("Kernel configuration root must be a YAML mapping")?;
+            let current = nested_yaml_value(root, &["oauth", "providers", provider, "sensitive-words-replace"])
+                .or_else(|| nested_yaml_value(root, &[provider, "sensitive-words-replace"]));
+            if replacements.is_empty() && current.is_none_or(serde_norway::Value::is_null) {
+                continue;
+            }
+            changed |= set_core_yaml_schema_value(
+                document,
+                &[provider, "sensitive-words-replace"],
+                &["oauth", "providers", provider, "sensitive-words-replace"],
+                serde_norway::to_value(replacements).map_err(|error| format!("Failed to serialize sensitive-word replacements: {error}"))?,
             )?;
         }
         Ok(changed)
@@ -937,6 +986,15 @@ pub(crate) fn collect_yaml_value_changes(
     if original == updated {
         return Ok(());
     }
+    // A replacement map is one setting: render it atomically so removing or
+    // renaming a target does not leave stale rules in the configuration.
+    if matches!(path.iter().map(String::as_str).collect::<Vec<_>>().as_slice(),
+        ["antigravity" | "devin", "sensitive-words-replace"]
+        | ["oauth", "providers", "antigravity" | "devin", "sensitive-words-replace"]
+    ) {
+        changes.push(YamlValueChange { path: path.clone(), value: updated.clone() });
+        return Ok(());
+    }
     match (original, updated) {
         (
             serde_norway::Value::Mapping(original_mapping),
@@ -1063,13 +1121,19 @@ pub(crate) fn insert_yaml_mapping_values_at_path(
     let indent = " ".repeat(child_indent.unwrap_or(parent_indent + 2));
     let mut insertion = String::new();
     for (key, value) in entries {
-        let value = serde_json::to_string(value)
+        // Emit block YAML so new nested sections read like the rest of the
+        // file instead of as single-line JSON.
+        let mut wrapper = serde_norway::Mapping::new();
+        wrapper.insert(yaml_key(key), value.clone());
+        let block = serde_norway::to_string(&serde_norway::Value::Mapping(wrapper))
             .map_err(|error| format!("Failed to serialize kernel configuration value: {error}"))?;
-        insertion.push_str(&indent);
-        insertion.push_str(&render_yaml_mapping_key(key));
-        insertion.push_str(": ");
-        insertion.push_str(&value);
-        insertion.push_str(newline);
+        for line in block.trim_end_matches(['\r', '\n']).split('\n') {
+            if !line.is_empty() {
+                insertion.push_str(&indent);
+            }
+            insertion.push_str(line);
+            insertion.push_str(newline);
+        }
     }
     let mut updated = String::with_capacity(content.len() + insertion.len());
     updated.push_str(&content[..parent_end]);
@@ -1271,9 +1335,16 @@ pub(crate) fn yaml_edit_node_from_value(
     value: &serde_norway::Value,
 ) -> Result<yaml_edit::YamlNode, String> {
     const WRAPPER_KEY: &str = "__cpa_gui_value__";
-    let value =
-        serde_json::to_string(value).map_err(|err| format!("Failed to serialize kernel configuration value: {err}"))?;
-    let serialized = format!("{WRAPPER_KEY}: {value}\n");
+    // Serialize through a block-style YAML emitter rather than JSON: a JSON
+    // payload parses as a flow collection, and yaml-edit keeps the style of
+    // the node it is handed, so inserted or rewritten entries would land in
+    // the user's config as `{"name":...}` one-liners. yaml-edit re-indents a
+    // block node to the column of the entry that receives it, and converts it
+    // to flow form itself when the destination collection is flow-style.
+    let mut wrapper = serde_norway::Mapping::new();
+    wrapper.insert(yaml_key(WRAPPER_KEY), value.clone());
+    let serialized = serde_norway::to_string(&serde_norway::Value::Mapping(wrapper))
+        .map_err(|err| format!("Failed to serialize kernel configuration value: {err}"))?;
     let file = serialized
         .parse::<yaml_edit::YamlFile>()
         .map_err(|err| format!("Failed to parse kernel configuration value: {err}"))?;
@@ -1785,7 +1856,7 @@ pub(crate) fn set_yaml_edit_nested_value(
     false
 }
 
-pub(crate) fn read_core_config_document() -> Result<(PathBuf, yaml_serde_edit::YamlValue), String> {
+pub(crate) fn read_core_config_document() -> Result<(PathBuf, serde_norway::Value), String> {
     let config_path = core_install_dir()?.join(CORE_CONFIG_FILE);
     if !config_path.is_file() {
         return Err("Kernel configuration has not been generated. Start the CPA kernel first".to_string());
@@ -1793,7 +1864,7 @@ pub(crate) fn read_core_config_document() -> Result<(PathBuf, yaml_serde_edit::Y
 
     let content = fs::read_to_string(&config_path)
         .map_err(|err| format!("Failed to read kernel configuration {}: {err}", path_to_string(&config_path)))?;
-    let document = yaml_serde_edit::YamlValue::parse(&content)
+    let document = serde_norway::from_str(&content)
         .map_err(|err| format!("Failed to parse kernel configuration: {err}"))?;
     Ok((config_path, document))
 }

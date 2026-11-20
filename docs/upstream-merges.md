@@ -18,14 +18,22 @@ Use separate refs for upstream releases: our `v*` tags trigger our releases and 
 
 | Field | Value |
 | --- | --- |
-| Custom version | `0.4.4` (prepared) |
-| Upstream desktop release | `v0.3.99` |
-| Upstream commit | `023f656a99471b09bdfe3ec8af0b77bf62ccec72` |
-| Core version | `8.0.63` |
-| Custom pre-merge checkpoint | `56334fcb398606b696eb1a3d308b570f137776ab` |
-| Merge commit | `fed5a368b95dfa7c1a0005dfd96f500cb543bd98` |
+| Custom version | `1.3.117` (prepared) |
+| Upstream desktop release | `v0.3.117` |
+| Upstream commit | `4f0ba66a63435b45246f16c759091a52551c314c` |
+| Core version | `8.0.78` |
+| Custom pre-merge checkpoint | `375bcbbf577de02911f4f329de1c7fdf92cebe08` (unreleased 0.4.4 on v0.3.99) |
+| Merge commit | MERGE_COMMIT_PLACEHOLDER |
 
-See the [v0.3.99 integration report](upstream-0.3.99-validation.md) for the current preparation and validation status. The prior 0.4.3 integration is documented in the [v0.3.76 report](upstream-0.3.76-validation.md).
+See the [v0.3.117 integration report](upstream-0.3.117-validation.md) for the current preparation and validation status. The unreleased 0.4.4 integration of v0.3.99 (merge `fed5a368b95dfa7c1a0005dfd96f500cb543bd98`) is documented in the [v0.3.99 report](upstream-0.3.99-validation.md), and the 0.4.3 release in the [v0.3.76 report](upstream-0.3.76-validation.md).
+
+## Versioning
+
+Starting with 1.3.117, the custom version mirrors the upstream desktop release it is built on: upstream `0.<minor>.<patch>` becomes custom `1.<minor>.<patch>`. The leading 1 marks this distribution, sorts above every earlier 0.4.x release so existing installs update normally, and keeps our `v*` tags from colliding with upstream's `v0.*` tags.
+
+Fork-only releases between upstream releases add numeric SemVer build metadata: `1.3.117+1`, `1.3.117+2`. Cargo, Tauri and the release scripts all accept it. The Rust `semver` ordering used by the updater compares build metadata after precedence, so `1.3.117 < 1.3.117+1 < 1.3.117+2 < 1.3.118` (covered by `app_update_comparison_orders_fork_revisions`). Tauri writes numeric build metadata as the fourth Windows file-version field, so Windows shows 1.3.117.1. Keep the metadata a plain integer: no letters, no dots.
+
+Never use a pre-release suffix (`1.3.117-1`) for a fork fix. SemVer sorts pre-releases below the release, and the updater treats them as test builds. Before the first `+N` release, confirm that the GitHub release tag and asset names containing `+` publish and download correctly with a preview run.
 
 The previous v0.3.22 merge (`dbd0a11de81739168c2e3355ac57ed4275d9202f`) had conflicts in `src/pages/QuotaPage.tsx`, `src/pages/QuotaPage.css`, `src/mocks/browserMockRuntime.ts`, and `tests/quotaRendering.test.tsx`. We combined the dashboard with upstream reset/expiry behavior, preserved ledger layout, and adopted the expanded upstream quota mocks. In 0.4.1, the custom dashboard moved to `SubscriptionUsagePage.tsx`/`.css`; `QuotaPage.tsx`/`.css` matched the v0.3.22 upstream base exactly. Preserve that separation during future merges.
 

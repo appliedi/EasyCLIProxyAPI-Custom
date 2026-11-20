@@ -119,8 +119,9 @@ describe('shared UI refinements', () => {
     expect(declarations(clients, `${button}:focus-visible`, 'outline-offset')).toEqual(['-3px']);
   });
 
-  it('prevents live routing stat grid from shrinking under constrained flex heights', () => {
-    expect(declarations(responsiveUsage, '.usage-live-routing-layout > .usage-stat-grid', 'flex')).toEqual(['none']);
+  it('prevents the live routing panel and its window metrics from shrinking under constrained flex heights', () => {
+    // The redesign moved the stat grid into the panel (.routing-window-metrics), so the panel itself must not shrink.
+    expect(declarations(responsiveUsage, '.usage-tab-panel > .live-routing-panel', 'flex')).toEqual(['none']);
   });
 
   it('groups optional empty-state actions without adding an empty action row', () => {

@@ -103,14 +103,20 @@ describe("ZCode model catalog editing", () => {
       catalogSource.indexOf("fn build_zcode_rule_object("),
       catalogSource.indexOf("pub(crate) fn zcode_editor_snapshot(")
     );
-    expect(builder).toContain('rl.insert("values".into(), serde_json::json!(config.reasoning_levels))');
-    expect(builder).not.toContain("if !config.reasoning_levels.is_empty()");
+    // ZCode rejects an empty reasoningLevel.values list and discards the whole provider
+    // config, so the writer emits a sanitized list: manual rules fall back to a generic
+    // ladder and catalog rules drop the spec. The editor keeps the explicit empty
+    // selection (parser assertions above).
+    expect(builder).toContain("let mut reasoning_levels = sanitize_reasoning_levels(&config.reasoning_levels);");
+    expect(builder).toContain("if reasoning_levels.is_empty() && config.is_manual {");
+    expect(builder).toContain('option_specs.remove("reasoningLevel");');
+    expect(builder).toContain('rl.insert("values".into(), serde_json::json!(reasoning_levels));');
     expect(builder).not.toContain('option_specs.insert("reasoningLevel".into(), Value::Null)');
   });
 
   it("preserves explicit manual context windows before inference on apply and reload", () => {
     const apply = configurationSource.slice(configurationSource.indexOf("let effective_cw = match option.context_window"));
-    expect(apply).toMatch(/Some\(500_000\) \| None => manual\s*\.and_then\(\|rule\| rule.pointer\("\/config\/properties\/contextWindow"\)\)\s*\.and_then\(serde_json::Value::as_u64\)\s*\.or\(inferred_cw\)\s*\.or\(option.context_window\)/);
+    expect(apply).toMatch(/Some\(500_000\) \| None => manual\s*\.and_then\(\|rule\| rule.pointer\("\/config\/properties\/contextWindow"\)\)\s*\.and_then\(serde_json::Value::as_u64\)\s*\.filter\(\|value\| \*value > 0\)\s*\.or\(inferred_cw\)\s*\.or\(option.context_window\)/);
     const manualSnapshot = catalogSource.slice(
       catalogSource.indexOf("let configuration = if let Some(manual_rule)"),
       catalogSource.indexOf("} else if let Some(prov_rule)")

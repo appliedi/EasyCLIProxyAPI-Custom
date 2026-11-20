@@ -7,6 +7,7 @@ import ts from 'typescript';
 const sourceRoot = fileURLToPath(new URL('../src/', import.meta.url));
 const technicalText = new Set([
   'EasyCLIProxyAPI',
+  'ECPA',
   'WebSocket',
   'Fast',
   'HTTP',

@@ -57,6 +57,7 @@ const exceptions: Record<string, string[]> = {
     'thinking-level-tags', 'auth-file-request-block', 'agent-usage-chip',
   ],
   'Multi-line content buttons whose height follows the content': ['agent-codex-catalog-button', 'close-choice-button', 'quota-reset-footer'],
+  'Live routing map nodes: the node row and its attached disclosure strip are the control': ['routing-node-focus', 'routing-group-toggle'],
 };
 const exceptionNames = new Set(Object.values(exceptions).flat());
 const banned = /^(background(-color|-image)?|border(-(top|right|bottom|left|color|style|width|radius|inline|block)[a-z-]*)?|border-radius|color|height|min-height|max-height|font-size|font-weight|box-shadow)$/;
